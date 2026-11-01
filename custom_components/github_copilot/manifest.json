@@ -4,8 +4,8 @@
   "codeowners": ["@ChrisRomp"],
   "config_flow": true,
   "documentation": "https://github.com/ChrisRomp/ha-copilot",
-  "issue_tracker": "https://github.com/ChrisRomp/ha-copilot/issues",
   "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/ChrisRomp/ha-copilot/issues",
   "requirements": ["github-copilot-sdk==1.0.26"],
   "version": "0.1.0"
 }
