@@ -1,0 +1,42 @@
+name: Validate integration
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - name: Install HA conversation requirements
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import sys
+          import homeassistant
+          manifest = pathlib.Path(homeassistant.__file__).parent / "components/conversation/manifest.json"
+          requirements = json.loads(manifest.read_text())["requirements"]
+          subprocess.run([sys.executable, "-m", "pip", "install", *requirements], check=True)
+          PY
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -q
+        env:
+          HA_COPILOT_HA_TESTS: "1"
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master

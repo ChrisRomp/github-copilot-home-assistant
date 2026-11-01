@@ -1,0 +1,27 @@
+[project]
+name = "ha-github-copilot"
+version = "0.1.0"
+description = "Home Assistant conversation agent backed by the GitHub Copilot SDK"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+
+[project.optional-dependencies]
+dev = [
+    "homeassistant==2026.10.4",
+    "github-copilot-sdk==1.0.26",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.9",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
