@@ -65,6 +65,9 @@
           "model": "Model",
           "enable_device_control": "Allow control of Assist-exposed devices",
           "prompt": "Additional instructions"
+        },
+        "data_description": {
+          "prompt": "Trusted instructions from you, used as literal text without template expansion. Device and request context is retrieved separately as data."
         }
       }
     },

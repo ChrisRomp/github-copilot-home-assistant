@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ENABLE_DEVICE_CONTROL, CONF_PROMPT, DOMAIN, NAME
+from .const import CONF_ENABLE_DEVICE_CONTROL, DOMAIN, NAME
 from .runtime import CopilotRuntime
 
 
@@ -56,7 +56,8 @@ class GitHubCopilotConversationEntity(conversation.ConversationEntity):
                 ["assist"]
                 if self.entry.options.get(CONF_ENABLE_DEVICE_CONTROL)
                 else None,
-                self.entry.options.get(CONF_PROMPT),
+                # The backend supplies the owner's literal instructions separately.
+                None,
                 user_input.extra_system_prompt,
             )
         except conversation.ConverseError as err:

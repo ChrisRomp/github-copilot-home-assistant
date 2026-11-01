@@ -1,5 +1,6 @@
 """Optional contracts against real HA, not the lightweight boundary doubles."""
 
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, create_autospec
@@ -111,4 +112,141 @@ async def test_real_chat_log_records_external_tool_once_and_returns_speech(
         assert result.response.speech["plain"]["speech"] == "Done."
     finally:
         await backend.async_stop()
+        await hass.async_stop()
+
+
+async def test_real_live_context_filters_exposed_entities_without_promoting_data(
+    tmp_path,
+):
+    from homeassistant.components.conversation import ConversationInput
+    from homeassistant.components.conversation.chat_log import ChatLog
+    from homeassistant.components.homeassistant.const import DATA_EXPOSED_ENTITIES
+    from homeassistant.components.homeassistant.exposed_entities import (
+        ExposedEntities,
+        async_expose_entity,
+    )
+    from homeassistant.components.homeassistant.llm import GetLiveContextTool
+    from homeassistant.core import Context, HomeAssistant
+    from homeassistant.helpers import area_registry as ar
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+    from homeassistant.helpers.llm import APIInstance, selector_serializer
+
+    from custom_components.github_copilot.backend import ConversationBackend
+
+    hass = HomeAssistant(str(tmp_path))
+    backend = None
+    try:
+        dr.async_setup(hass)
+        await dr.async_load(hass, load_empty=True)
+        await er.async_load(hass, load_empty=True)
+        await ar.async_load(hass, load_empty=True)
+        exposure = hass.data[DATA_EXPOSED_ENTITIES] = ExposedEntities(hass)
+        await exposure.async_initialize()
+        hass.states.async_set(
+            "sensor.kitchen_temperature",
+            "21",
+            {
+                "friendly_name": "Kitchen temperature",
+                "unit_of_measurement": "C",
+            },
+        )
+        hass.states.async_set(
+            "sensor.private",
+            "PRIVATE_VALUE",
+            {
+                "friendly_name": "Private sensor",
+            },
+        )
+        hass.states.async_set(
+            "media_player.living_room",
+            "playing",
+            {
+                "friendly_name": "Living room",
+                "media_title": "MEDIA_TITLE_INJECTION",
+            },
+        )
+        for entity_id, exposed in (
+            ("sensor.kitchen_temperature", True),
+            ("sensor.private", False),
+            ("media_player.living_room", True),
+        ):
+            async_expose_entity(hass, "conversation", entity_id, exposed)
+
+        user = ConversationInput(
+            text="What is the kitchen temperature?",
+            context=Context(user_id="user"),
+            conversation_id="conversation",
+            device_id=None,
+            satellite_id=None,
+            language="en",
+            agent_id="conversation.github_copilot",
+        )
+        api = APIInstance(
+            api=SimpleNamespace(hass=hass, id="assist"),
+            api_prompt="Static catalog: DO_NOT_ELEVATE_THIS_CONTEXT",
+            llm_context=user.as_llm_context("github_copilot"),
+            tools=[GetLiveContextTool()],
+            custom_serializer=selector_serializer,
+        )
+        session = create_autospec(CopilotSession, instance=True)
+        session.on.return_value = Mock()
+        session.rpc = SimpleNamespace(options=SimpleNamespace(update=AsyncMock()))
+        client = SimpleNamespace(create_session=AsyncMock(return_value=session))
+        backend = ConversationBackend(
+            hass,
+            SimpleNamespace(
+                entry_id="entry",
+                data={"auth_method": "pat"},
+                options={"model": "gpt-6-luna", "enable_device_control": True},
+            ),
+            client,
+            AsyncMock(),
+            AsyncMock(return_value=[SimpleNamespace(id="gpt-6-luna")]),
+            access_token_getter=AsyncMock(return_value="test-only"),
+        )
+        chat = ChatLog(hass, "conversation", llm_api=api)
+        results = []
+        filters = {"name": "Kitchen temperature", "domain": "sensor"}
+
+        async def send(*args, **kwargs):
+            tool = next(
+                tool
+                for tool in session.set_tools.await_args.args[0]
+                if tool.name == "ha__homeassistant__GetLiveContext"
+            )
+            results.append(
+                await tool.handler(
+                    ToolInvocation(
+                        tool_name=tool.name,
+                        tool_call_id=f"call-{len(results)}",
+                        arguments=filters,
+                    )
+                )
+            )
+            return SimpleNamespace(
+                data=AssistantMessageData(content="Done.", message_id="reply")
+            )
+
+        session.send_and_wait.side_effect = send
+        await backend.async_handle_message(user.agent_id, user, chat)
+        assert results[0].result_type == "success"
+        assert "Kitchen temperature" in results[0].text_result_for_llm
+        assert "21" in results[0].text_result_for_llm
+        assert "PRIVATE_VALUE" not in results[0].text_result_for_llm
+        assert "MEDIA_TITLE_INJECTION" not in results[0].text_result_for_llm
+        assert (
+            client.create_session.await_args.kwargs["organization_custom_instructions"]
+            == ""
+        )
+        assert "DO_NOT_ELEVATE_THIS_CONTEXT" not in json.dumps(
+            client.create_session.await_args.kwargs["system_message"]
+        )
+        filters = {"name": "Private sensor", "domain": "sensor"}
+        await backend.async_handle_message(user.agent_id, user, chat)
+        assert results[1].result_type == "failure"
+        assert "PRIVATE_VALUE" not in results[1].text_result_for_llm
+    finally:
+        if backend is not None:
+            await backend.async_stop()
         await hass.async_stop()

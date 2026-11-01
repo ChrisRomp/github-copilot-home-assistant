@@ -100,10 +100,24 @@ only through the Home Assistant Assist API selected for that request. The
 integration does not give the Copilot runtime a general Home Assistant REST
 token.
 
-HA's current instructions and entity context replace the SDK's mutable,
-host-injected system instructions when they change; they are not repeated in
-every user message or accumulated as stale history. Only Assist-exposed
-tools are allowed; any other SDK permission request is explicitly rejected.
+Only fixed integration rules and the owner's **Additional instructions** enter
+the SDK's system-instruction channel. Additional instructions are literal text:
+HA templates are not expanded into that privileged channel. HA's combined,
+rendered system prompt is not forwarded there because it also contains device
+and request data.
+
+For current entity information, the assistant is instructed to use HA's
+`GetLiveContext` tool with relevant name, domain, or area filters when available.
+Supplementary API context and caller-supplied context are available on demand
+through a separate read-only context tool. This also preserves access to context
+on HA APIs without a targeted context tool. Generated device and request context
+is returned as tool data instead of being forwarded in HA's combined system
+prompt; existing HA tool definitions still describe the available capabilities.
+
+This separation reduces prompt-injection risk; formatting and model instructions
+alone cannot eliminate it. Context never grants permissions. Only Assist-exposed
+tools are allowed, device access remains opt-in, and other SDK permission
+requests are explicitly rejected. No new action-confirmation policy is imposed.
 If an action result cannot be serialized, the integration reports that the
 action may already have completed and does not replay it.
 
