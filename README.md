@@ -39,15 +39,16 @@ For manual installation, copy `custom_components/github_copilot/` into
 
 1. Go to **Settings > Devices & services > Add integration** and select
    **GitHub Copilot**.
-2. Sign in with GitHub and choose a model. Alternatively, use a fine-grained PAT
+2. Sign in with GitHub. Alternatively, use a fine-grained PAT
    with the **Copilot Requests** account permission. Classic PATs are not supported.
-3. Under **Settings > Voice assistants**, add or edit an assistant and select
+3. Choose a model. You can also enable **Allow control of Assist-exposed devices**
+   and provide **Additional instructions** on this setup screen.
+4. Under **Settings > Voice assistants**, add or edit an assistant and select
    **GitHub Copilot** as its conversation agent.
 
-Device control is off by default. To enable it, open **Settings > Devices &
-services > GitHub Copilot > Configure** and turn on **Allow control of
-Assist-exposed devices**. Only entities you expose to Assist are available.
-The same dialog lets you change the model and add your own instructions.
+Device control is off by default. Only entities you expose to Assist are
+available. You can change the model, device control, and additional instructions
+later under **Settings > Devices & services > GitHub Copilot > Configure**.
 
 ## Privacy and limitations
 

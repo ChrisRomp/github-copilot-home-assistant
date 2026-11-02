@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -69,7 +70,7 @@ _AUTH_DATA_KEYS = (
 
 
 class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Set up GitHub Copilot credentials and model selection."""
+    """Set up GitHub Copilot credentials and conversation options."""
 
     VERSION = 1
 
@@ -188,18 +189,19 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_model(
         self, user_input: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Choose a Copilot model."""
+        """Choose a Copilot model and optional conversation settings."""
         if self._removed:
             return self.async_abort(reason="oauth_failed")
         if user_input is not None:
             self._credentials[CONF_MODEL_BILLING] = model_billing(
                 user_input[CONF_MODEL], self._models
             )
+            device_control_enabled = user_input[CONF_ENABLE_DEVICE_CONTROL]
             options = {
                 CONF_MODEL: user_input[CONF_MODEL],
-                CONF_ENABLE_DEVICE_CONTROL: False,
-                CONF_LLM_HASS_API: None,
-                CONF_PROMPT: "",
+                CONF_ENABLE_DEVICE_CONTROL: device_control_enabled,
+                CONF_LLM_HASS_API: ["assist"] if device_control_enabled else None,
+                CONF_PROMPT: user_input.get(CONF_PROMPT, ""),
             }
             return self.async_create_entry(
                 title=NAME,
@@ -209,15 +211,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="model",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_MODEL): SelectSelector(
-                        SelectSelectorConfig(
-                            options=self._model_options(), custom_value=False
-                        )
-                    )
-                }
-            ),
+            data_schema=_options_schema(self._model_options(), {}),
         )
 
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> dict[str, Any]:
@@ -390,33 +384,9 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             step_id="init",
             errors=errors,
             description_placeholders=placeholders,
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_MODEL,
-                        default=default_model,
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=self._model_options(),
-                            custom_value=False,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_ENABLE_DEVICE_CONTROL,
-                        default=bool(
-                            self._entry.options.get(
-                                CONF_ENABLE_DEVICE_CONTROL,
-                                self._entry.options.get(CONF_LLM_HASS_API),
-                            )
-                        ),
-                    ): BooleanSelector(),
-                    vol.Optional(
-                        CONF_PROMPT,
-                        description={
-                            "suggested_value": self._entry.options.get(CONF_PROMPT, "")
-                        },
-                    ): TextSelector(),
-                }
+            data_schema=_options_schema(
+                self._model_options(),
+                {**self._entry.options, CONF_MODEL: default_model},
             ),
         )
 
@@ -436,6 +406,33 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             SelectOptionDict(label=_model_label(model), value=model.id)
             for model in self._models
         ]
+
+
+def _options_schema(
+    model_options: list[SelectOptionDict], options: Mapping[str, Any]
+) -> vol.Schema:
+    """Build the conversation settings form for setup and later changes."""
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_MODEL, default=options.get(CONF_MODEL, vol.UNDEFINED)
+            ): SelectSelector(
+                SelectSelectorConfig(options=model_options, custom_value=False)
+            ),
+            vol.Required(
+                CONF_ENABLE_DEVICE_CONTROL,
+                default=bool(
+                    options.get(
+                        CONF_ENABLE_DEVICE_CONTROL, options.get(CONF_LLM_HASS_API)
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_PROMPT,
+                description={"suggested_value": options.get(CONF_PROMPT, "")},
+            ): TextSelector(),
+        }
+    )
 
 
 def _model_label(model: Any) -> str:

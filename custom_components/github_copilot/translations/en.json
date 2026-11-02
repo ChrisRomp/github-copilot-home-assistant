@@ -28,10 +28,15 @@
         }
       },
       "model": {
-        "title": "Choose a Copilot model",
-        "description": "Select the model this Home Assistant conversation agent should use.",
+        "title": "Configure GitHub Copilot",
+        "description": "Choose a model and optionally enable device control or add instructions. Device control is disabled by default.",
         "data": {
-          "model": "Model"
+          "model": "Model",
+          "enable_device_control": "Allow control of Assist-exposed devices",
+          "prompt": "Additional instructions"
+        },
+        "data_description": {
+          "prompt": "Trusted instructions from you, used as literal text without template expansion. Device and request context is retrieved separately as data."
         }
       }
     },
