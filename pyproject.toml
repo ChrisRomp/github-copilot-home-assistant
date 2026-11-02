@@ -1,6 +1,6 @@
 [project]
 name = "ha-github-copilot"
-version = "0.1.0"
+version = "0.2.0"
 description = "Home Assistant conversation agent backed by the GitHub Copilot SDK"
 requires-python = ">=3.11"
 license = "Apache-2.0"
