@@ -8,6 +8,10 @@ devices.
 
 [![Open in Home Assistant Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ChrisRomp&repository=github-copilot-home-assistant&category=integration)
 
+**[Get started: setup guide with screenshots](docs/setup.md)**
+
+Walk through installation, sign-in, a test conversation, and optional voice setup.
+
 **This is an unofficial, community-built project, not affiliated with GitHub or
 the Home Assistant project.**
 
@@ -29,7 +33,7 @@ The project is not in the default catalog.
 
 | Home Assistant | Where to install | Restart after first install |
 | --- | --- | --- |
-| 2026.11 or newer | **Settings > Marketplace** | Only if prompted |
+| 2026.11 or newer | **Settings > Marketplace** | Yes |
 | 2026.10 | HACS, installed separately | Yes |
 
 For manual installation, copy `custom_components/github_copilot/` into
@@ -37,9 +41,12 @@ For manual installation, copy `custom_components/github_copilot/` into
 
 ## Setup
 
-1. Go to **Settings > Devices & services > Add integration** and select
+For a step-by-step walkthrough with screenshots, see the
+[setup guide](docs/setup.md), including sign-in, a test chat, and voice setup.
+
+1. Go to **Settings > Devices & services > Integrations > Add integration** and select
    **GitHub Copilot**.
-2. Sign in with GitHub. Alternatively, use a fine-grained PAT
+2. Sign in with GitHub (recommended). Alternatively, use a fine-grained PAT
    with the **Copilot Requests** account permission. Classic PATs are not supported.
 3. Choose a model. You can also enable **Allow control of Assist-exposed devices**
    and provide **Additional instructions** on this setup screen.

@@ -1,6 +1,7 @@
 # Using GitHub Copilot
 
-For installation and initial setup, see the [README](../README.md#installation).
+For installation, sign-in, a test conversation, and voice assistant setup, see
+the [setup guide](setup.md).
 
 ## Settings
 
