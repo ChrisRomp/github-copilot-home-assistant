@@ -1,0 +1,99 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "GitHub authentication",
+        "description": "Choose how Home Assistant should authenticate with GitHub.",
+        "menu_options": {
+          "oauth": "Sign in with GitHub",
+          "pat": "Use a fine-grained personal access token"
+        }
+      },
+      "reauth": {
+        "title": "Reauthenticate with GitHub",
+        "description": "Choose how Home Assistant should authenticate with GitHub.",
+        "menu_options": {
+          "oauth": "Sign in with GitHub",
+          "pat": "Use a fine-grained personal access token"
+        }
+      },
+      "oauth": {
+        "title": "Authorize GitHub Copilot"
+      },
+      "pat": {
+        "title": "Personal access token",
+        "description": "Enter a user-owned fine-grained token with the Copilot Requests account permission. Classic tokens are not supported.",
+        "data": {
+          "token": "Fine-grained personal access token"
+        }
+      },
+      "model": {
+        "title": "Choose a Copilot model",
+        "description": "Select the model this Home Assistant conversation agent should use.",
+        "data": {
+          "model": "Model"
+        }
+      }
+    },
+    "progress": {
+      "authorize": "Open [GitHub device activation]({verification_uri}) and enter this code:\n\n**{user_code}**\n\nAuthorize the GitHub Copilot integration. This dialog will continue automatically after you authorize. Close it to cancel."
+    },
+    "abort": {
+      "account_mismatch": "Sign in with the same GitHub account originally used for this integration. To change accounts, add a separate GitHub Copilot integration.",
+      "account_identity_unknown": "The original GitHub account could not be verified. Restore its credentials and try again, or remove and re-add this integration to explicitly choose an account.",
+      "oauth_not_configured": "Browser sign-in is unavailable because the project OAuth app has not been configured. Use a fine-grained personal access token.",
+      "oauth_unavailable": "Could not start GitHub sign-in. Check the Home Assistant connection to GitHub and try again.",
+      "oauth_expired": "The GitHub device code expired. Start the sign-in flow again.",
+      "oauth_failed": "GitHub sign-in did not complete. Start the sign-in flow again.",
+      "reauth_entry_missing": "The Home Assistant configuration entry could not be found.",
+      "reauth_successful": "GitHub authentication was updated.",
+      "reauth_required": "GitHub sign-in has expired. Reauthenticate in Home Assistant.",
+      "cannot_connect": "Could not validate GitHub credentials or load Copilot models. Check the token, Copilot access, and network connection.",
+      "no_models": "No Copilot models are available for this account.",
+      "quota_exceeded": "GitHub Copilot quota exceeded. Check your AI Credits usage and limits in GitHub, or contact your organization administrator."
+    },
+    "error": {
+      "invalid_pat": "Use a fine-grained PAT with Copilot Requests permission. Classic PATs are not supported."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "GitHub Copilot options",
+        "description": "Device control is optional and disabled by default.",
+        "data": {
+          "model": "Model",
+          "enable_device_control": "Allow control of Assist-exposed devices",
+          "prompt": "Additional instructions"
+        },
+        "data_description": {
+          "prompt": "Trusted instructions from you, used as literal text without template expansion. Device and request context is retrieved separately as data."
+        }
+      }
+    },
+    "abort": {
+      "cannot_connect": "Could not load Copilot models. Check the connection and try again.",
+      "reauth_required": "GitHub sign-in has expired. Reauthenticate in Home Assistant.",
+      "no_models": "No Copilot models are available for this account.",
+      "quota_exceeded": "GitHub Copilot quota exceeded. Check your AI Credits usage and limits in GitHub, or contact your organization administrator."
+    },
+    "error": {
+      "model_unavailable": "The previously selected model {model} is no longer available. Choose another model and save.",
+      "model_unavailable_fallback": "The previously selected model {model} is no longer available. Conversations are using {fallback}, which is preselected. Choose a model and save."
+    }
+  },
+  "issues": {
+    "model_fallback": {
+      "title": "GitHub Copilot model unavailable",
+      "description": "The selected model {model} is no longer available. Conversations are temporarily using {fallback}, the closest eligible model in the same family. Billing multiplier: {billing}. When the original multiplier is known, automatic fallback cannot exceed it. To keep this model or choose another, open **Settings > Devices & services > GitHub Copilot > Configure** and save."
+    },
+    "model_unavailable": {
+      "title": "GitHub Copilot model unavailable",
+      "description": "The selected model {model} is no longer available, and no same-family model within the known billing limit was found. GitHub Copilot conversations will fail until you choose another model in **Settings > Devices & services > GitHub Copilot > Configure**."
+    },
+    "quota_exceeded": {
+      "title": "GitHub Copilot quota exceeded",
+      "description": "GitHub Copilot rejected a request because its usage quota was exhausted. Check your AI Credits usage and limits in GitHub, or contact your organization administrator. Requests can resume when quota is available again. The integration does not switch models or automatically retry quota failures. This notice clears after a successful conversation response."
+    }
+  }
+}
