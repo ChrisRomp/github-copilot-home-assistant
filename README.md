@@ -1,222 +1,79 @@
 # GitHub Copilot for Home Assistant
 
-![GitHub Copilot for Home Assistant icon](custom_components/github_copilot/brand/icon.png)
+<img src="custom_components/github_copilot/brand/icon.png" alt="GitHub Copilot for Home Assistant icon" width="96" height="96">
 
-A custom Home Assistant conversation integration powered by GitHub Copilot.
-It provides a conversation agent that Assist can use for typed or spoken
-interactions, not a complete voice pipeline.
+Use GitHub Copilot as your Home Assistant Assist conversation agent, with
+streamed replies, follow-up conversations, and optional control of exposed
+devices.
+
+[![Open in Home Assistant Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ChrisRomp&repository=ha-copilot&category=integration)
 
 **This is an unofficial, community-built project, not affiliated with GitHub or
 the Home Assistant project.**
 
-The integration and GitHub Copilot SDK run in Python inside Home Assistant; the
-SDK starts its pinned Copilot runtime as a child process. Model inference
-happens through GitHub's cloud service, not on the Home Assistant device.
+## Requirements
 
-## Features
-
-- Conversation agent with streamed responses and multi-turn context.
-- Optional control of entities exposed to Home Assistant Assist. It is disabled
-  by default.
-- OAuth device-code sign-in in the Home Assistant UI, with expiring access
-  tokens that renew automatically.
-- Fine-grained personal access token (PAT) fallback.
-- Model selection from the models currently available to your Copilot account,
-  with automatic same-family fallback when the selected model disappears.
-
-AI Tasks, remote runtime hosting, and fallback to a local model, such as one
-served by Ollama, are not implemented.
-Existing Home Assistant speech-to-text and text-to-speech integrations continue
-to provide voice input and output.
-
-## Model selection
-
-You choose a model during setup and can change it under **Settings > Devices &
-services > GitHub Copilot > Configure**. Each time you open that dialog, the
-integration asks Copilot for the current list of models. Models disabled by
-account or organization policy are omitted.
-
-The integration also checks the selected model when it starts and before every
-conversation turn, including ongoing chats. It reuses the list for up to an hour
-and refreshes it immediately after a model/request failure. If the selected
-model is no longer available:
-
-- It uses the closest available version in the same family. Families are inferred
-  by removing version numbers from model IDs, so `claude-sonnet-4.5` can fall
-  back to `claude-sonnet-5` and `gpt-6-sol` to `gpt-6.1-sol`. Variants such as
-  `gpt-5.6-sol-fast` count as a different family. A fallback is logged as a
-  warning and shown in **Settings > Repairs**. Your saved choice isn't changed,
-  so the original model is used again if it returns. Existing sessions switch
-  models without discarding conversation history.
-- Known billing multipliers appear in the model picker and fallback Repair.
-  Automatic fallback does not exceed the selected model's last known multiplier.
-  If that baseline is unknown, the Repair warns that cost may differ; if the
-  baseline is known but a replacement's cost is unknown, it is not auto-selected.
-- If no model in the same family is available, conversations fail with an error
-  that names the missing model, and Repairs asks you to choose another one.
-
-When the configuration dialog opens, it never preselects an unavailable model.
-It preselects the fallback, if there is one, or the first available model, and
-explains what changed.
-
-If a model disappears during a request, the error names that model and, when
-available, its replacement for the next message. The failed request is not
-automatically replayed, since it may already have produced output or controlled
-a device.
-If discovery still lists a model that the API explicitly rejected, that model
-is excluded from conversation use for up to an hour before it is considered
-again.
-
-## Quota errors
-
-If Copilot reports exhausted usage quota, the integration returns a clear error,
-logs a warning, and creates a notice in **Settings > Repairs**. Check your AI
-Credits usage and limits in GitHub, or contact your organization administrator.
-The notice persists until a conversation response succeeds (or the integration
-entry is removed). Quota failures do not trigger model fallback or automatic
-retries. Temporary rate limiting alone is not treated as exhausted quota.
-
-## Diagnostics
-
-Use **Download diagnostics** from the integration's menu in Home Assistant for
-authentication-method, model, device-control, and runtime status. The diagnostic
-payload does not include access tokens, refresh tokens, prompts, or conversations.
-
-## Requirements and limitations
-
-- A Home Assistant installation with a supported 64-bit OS/runtime and outbound
-  access to GitHub.
+- Home Assistant 2026.10.0 or newer, with a supported 64-bit OS/runtime and
+  outbound access to GitHub. Linux ARM64 and x86-64 are supported; 32-bit is not.
 - A GitHub account with GitHub Copilot access. Organization policies and model
-  availability continue to apply.
-- Home Assistant installs the pinned
-  `github-copilot-sdk` dependency from the integration manifest.
-- The SDK's native runtime has Linux ARM64 and x86-64 glibc/musl release assets.
-  Local 32-bit runtime support is not available.
+  availability apply, as do your plan's usage limits.
 
-Conversations have a five-minute idle limit and are isolated by conversation,
-user, and originating device. The SDK can write session files while a chat is
-active. The integration deletes its SDK sessions when HA releases a chat, when
-an idle session is cleaned up, and during normal unload or shutdown. An abrupt
-exit or failed cleanup can leave files behind, and backups taken while a chat is
-active may include conversation data. A Home Assistant restart starts fresh
-conversations. Credentials and settings remain in Home Assistant's config-entry
-storage; treat the entry directory and Home Assistant backups as sensitive.
-
-Prompts, the information needed to answer them, and tool results are sent to
-GitHub Copilot. When device control is enabled, the model can request actions
-only through the Home Assistant Assist API selected for that request. The
-integration does not give the Copilot runtime a general Home Assistant REST
-token.
-
-Only fixed integration rules and the owner's **Additional instructions** enter
-the SDK's system-instruction channel. Additional instructions are literal text:
-HA templates are not expanded into that privileged channel. HA's combined,
-rendered system prompt is not forwarded there because it also contains device
-and request data.
-
-For current entity information, the assistant is instructed to use HA's
-`GetLiveContext` tool with relevant name, domain, or area filters when available.
-Supplementary API context and caller-supplied context are available on demand
-through a separate read-only context tool. This also preserves access to context
-on HA APIs without a targeted context tool. Generated device and request context
-is returned as tool data instead of being forwarded in HA's combined system
-prompt; existing HA tool definitions still describe the available capabilities.
-
-This separation reduces prompt-injection risk; formatting and model instructions
-alone cannot eliminate it. Context never grants permissions. Only Assist-exposed
-tools are allowed, device access remains opt-in, and other SDK permission
-requests are explicitly rejected. No new action-confirmation policy is imposed.
-If an action result cannot be serialized, the integration reports that the
-action may already have completed and does not replay it.
-
-The SDK-pinned native runtime is cached under
-`<config>/.storage/github_copilot/runtime/<runtime-version>/`. Its installer runs
-in an isolated process and performs the SDK's checksum verification. The cache
-survives Core container replacement. The installer's environment is limited to
-Python/platform, proxy, and certificate settings rather than the full HA
-environment. Network/download, checksum, storage, and
-unsupported-platform failures are reported during setup. Removing an integration
-entry removes only that entry's runtime state, not this shared versioned cache.
+For voice, keep your existing speech-to-text and text-to-speech integrations.
+This integration supplies the conversation agent, not a complete voice pipeline.
 
 ## Installation
 
-In HACS, add [ChrisRomp/ha-copilot](https://github.com/ChrisRomp/ha-copilot) as a
-custom repository with category **Integration**, then download **GitHub Copilot**.
+Use the button above to add [ChrisRomp/ha-copilot](https://github.com/ChrisRomp/ha-copilot)
+as a custom repository with category **Integration**, then install the integration.
+The project is not in the default catalog.
+
+| Home Assistant | Where to install | Restart after first install |
+| --- | --- | --- |
+| 2026.11 or newer | **Settings > Marketplace** | Only if prompted |
+| 2026.10 | HACS, installed separately | Yes |
 
 For manual installation, copy `custom_components/github_copilot/` into
-`<config>/custom_components/github_copilot/`.
+`<config>/custom_components/github_copilot/` and restart Home Assistant.
 
-Restart Home Assistant, then add **GitHub Copilot** from
-**Settings → Devices & services**. Sign in with GitHub or a fine-grained PAT
-and choose a model.
+## Setup
 
-The conversation entity is named **GitHub Copilot**. New installations normally
-use `conversation.github_copilot` (HA adds a suffix if that ID is already taken).
-Existing entity IDs and user-defined names are preserved on upgrade. To change
-an older generated entity ID, open the entity's settings in HA and review any
-Assist pipelines, scripts, or automations that reference it.
+1. Go to **Settings > Devices & services > Add integration** and select
+   **GitHub Copilot**.
+2. Sign in with GitHub and choose a model. Alternatively, use a fine-grained PAT
+   with the **Copilot Requests** account permission. Classic PATs are not supported.
+3. Under **Settings > Voice assistants**, add or edit an assistant and select
+   **GitHub Copilot** as its conversation agent.
 
-The integration bundles its icon in `brand/`, supported by Home Assistant
-2026.3 and newer without a separate Brands-repository submission. Older HA
-versions may show a placeholder instead.
+Device control is off by default. To enable it, open **Settings > Devices &
+services > GitHub Copilot > Configure** and turn on **Allow control of
+Assist-exposed devices**. Only entities you expose to Assist are available.
+The same dialog lets you change the model and add your own instructions.
 
-## Development setup
+## Privacy and limitations
 
-Development uses Python 3.14 and Home Assistant 2026.10.4. To run tests and lint:
+Model inference runs through GitHub's cloud service. Prompts, relevant device
+information, and tool results are sent to GitHub Copilot. Credentials and
+temporary conversation files can be included in Home Assistant backups; treat
+those backups as sensitive.
 
-```sh
-python -m pip install -e '.[dev]'
-pytest
-ruff check .
-```
+Chats expire after five minutes of inactivity, and a Home Assistant restart
+starts fresh conversations. AI Tasks, local-model fallback, and remote runtime
+hosting are not supported.
 
-Install HA's conversation requirements listed in its
-`components/conversation/manifest.json` to run
-`HA_COPILOT_HA_TESTS=1 pytest tests/test_ha_contract.py`. This checks actual HA
-schema conversion, tool-result handling, and final speech without contacting
-GitHub or controlling devices. With an SDK runtime already cached, run
-`HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py` to verify prompt
-updates through the real runtime against a loopback-only fake model.
-The validation workflow runs unit tests, the real HA contract test, and hassfest.
+See the [user guide](docs/usage.md) for model fallback, data handling, and
+troubleshooting.
 
-Keep the SDK version pins in `manifest.json` and `pyproject.toml` in sync.
-The SDK wheel pins the native runtime version.
+## Updates and help
 
-## OAuth setup for maintainers
+Install updates from **Settings > Updates** on 2026.11 or newer, or through HACS
+on 2026.10. Restart after updating an already-loaded integration.
 
-Browser sign-in uses the project's GitHub OAuth App. Its **public Client ID**
-is set as `OAUTH_CLIENT_ID` in `custom_components/github_copilot/const.py`.
-The device flow uses no client secret or callback URL, so no secret is shipped.
+For model or quota errors, check **Settings > Repairs**. For other problems,
+see [troubleshooting](docs/usage.md#troubleshooting) or
+[open an issue](https://github.com/ChrisRomp/ha-copilot/issues).
 
-The OAuth App must keep these settings:
-
-- **Device flow** enabled.
-- **Expiring user tokens** enabled. GitHub then issues 8-hour access tokens and
-  6-month refresh tokens. The integration also requests the `offline_access`
-  scope, which asks for expiring tokens even if the app setting is off.
-  It requests no repository access.
-
-The integration stores both tokens in the config entry, renews the access
-token when roughly an hour remains (as required by the SDK), and saves the new
-pair each time without reloading the integration or discarding active chats.
-Only options changes reload automatically; completing reauthentication explicitly
-reloads once. If GitHub rejects the refresh, for example because the refresh
-token expired or the user revoked the app, Home Assistant starts reauthentication. OAuth responses
-without a token lifetime are rejected. The `offline_access` scope requests
-expiring tokens independently of the app's default setting.
-
-The OAuth dialog polls automatically and cancels polling when closed. GitHub's
-immutable account ID is saved at setup and checked during reauthentication.
-Existing entries bind to their current account at startup; if old credentials
-are already invalid, account identity cannot be safely inferred and the user
-must explicitly remove/re-add the entry to choose an account. The same account
-can still be used by multiple separately configured conversation agents.
-
-The fallback is a user-owned fine-grained PAT with the **Copilot Requests**
-account permission, supplied through the SDK's static-token option. The
-integration does not renew PATs or invent an expiry time for them. Classic PATs
-are not supported. Never put access tokens in source files, issue reports, or
-chat messages.
+Developer setup and implementation notes are in the
+[development guide](docs/development.md).
 
 ## License
 
