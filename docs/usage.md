@@ -4,8 +4,9 @@ For installation and initial setup, see the [README](../README.md#installation).
 
 ## Settings
 
-Open **Settings > Devices & services > GitHub Copilot > Configure** to change
-the model, enable device control, or set **Additional instructions**.
+During initial setup, choose a model and optionally enable device control or
+set **Additional instructions** on the same screen. To change these settings
+later, open **Settings > Devices & services > GitHub Copilot > Configure**.
 
 Device control is disabled by default and is limited to entities exposed to
 Home Assistant Assist. The integration does not give the Copilot runtime a

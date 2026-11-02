@@ -1,4 +1,4 @@
-"""OAuth flow lifecycle and account binding regressions."""
+"""Initial configuration, OAuth lifecycle, and account binding regressions."""
 
 import asyncio
 import json
@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import voluptuous as vol
 
 from custom_components.github_copilot.auth import OAuthError
 
@@ -76,9 +77,93 @@ async def test_oauth_progress_reuses_one_poll_and_returns_model_form(
     assert (await setup.flow.async_step_oauth())["next_step_id"] == "oauth_complete"
     form = await setup.flow.async_step_oauth_complete()
     assert form["step_id"] == "model"
-    result = await setup.flow.async_step_model({"model": "gpt-6-luna"})
+    submitted = form["data_schema"]({"model": "gpt-6-luna"})
+    assert submitted == {"model": "gpt-6-luna", "enable_device_control": False}
+    result = await setup.flow.async_step_model(submitted)
     assert result["data"]["account_id"] == "123"
+    assert result["options"] == {
+        "model": "gpt-6-luna",
+        "enable_device_control": False,
+        "llm_hass_api": None,
+        "prompt": "",
+    }
     setup.flow.async_remove()
+
+
+@pytest.mark.parametrize("auth_method", ["oauth", "pat"])
+@pytest.mark.parametrize("device_control_enabled", [False, True])
+@pytest.mark.parametrize("prompt", [None, "", "Keep {{ user }} instructions literal."])
+async def test_initial_conversation_options_are_saved(
+    flow_setup, monkeypatch, auth_method, device_control_enabled, prompt
+):
+    setup = flow_setup
+    setup.probe.return_value = [
+        SimpleNamespace(id="gpt-6-luna", billing=SimpleNamespace(multiplier=0.5))
+    ]
+    if auth_method == "oauth":
+        monkeypatch.setattr(
+            setup.module,
+            "poll_for_device_token",
+            AsyncMock(
+                return_value={"auth_method": "oauth", "access_token": "test-token"}
+            ),
+        )
+        progress = await setup.flow.async_step_oauth()
+        await progress["progress_task"]
+        form = await setup.flow.async_step_oauth_complete()
+    else:
+        form = await setup.flow.async_step_pat({"token": "github_pat_test"})
+
+    assert form["step_id"] == "model"
+    user_input = {
+        "model": "gpt-6-luna",
+        "enable_device_control": device_control_enabled,
+    }
+    if prompt is not None:
+        user_input["prompt"] = prompt
+    result = await setup.flow.async_step_model(form["data_schema"](user_input))
+
+    assert result["type"] == "create_entry"
+    assert result["options"] == {
+        "model": "gpt-6-luna",
+        "enable_device_control": device_control_enabled,
+        "llm_hass_api": ["assist"] if device_control_enabled else None,
+        "prompt": prompt if prompt is not None else "",
+    }
+    assert result["data"]["auth_method"] == auth_method
+    assert result["data"]["account_id"] == "123"
+    assert result["data"]["model_billing"] == {
+        "model": "gpt-6-luna",
+        "multiplier": 0.5,
+    }
+    setup.flow.async_remove()
+
+
+async def test_initial_options_require_an_available_model_and_default_control_off(
+    flow_setup,
+):
+    form = await flow_setup.flow.async_step_pat({"token": "github_pat_test"})
+    schema = form["data_schema"]
+    assert schema({"model": "gpt-6-luna"}) == {
+        "model": "gpt-6-luna",
+        "enable_device_control": False,
+    }
+    with pytest.raises(vol.Invalid):
+        schema({})
+    with pytest.raises(vol.Invalid):
+        schema({"model": "unavailable"})
+    prompt_field = next(key for key in schema.schema if key == "prompt")
+    assert prompt_field.description == {"suggested_value": ""}
+
+
+@pytest.mark.parametrize("filename", ["strings.json", "translations/en.json"])
+def test_initial_options_have_matching_translations(filename):
+    component = Path(__file__).parents[1] / "custom_components/github_copilot"
+    translations = json.loads((component / filename).read_text())
+    setup = translations["config"]["step"]["model"]
+    options = translations["options"]["step"]["init"]
+    assert setup["data"] == options["data"]
+    assert setup["data_description"] == options["data_description"]
 
 
 async def test_closing_oauth_flow_cancels_poll_and_never_saves(flow_setup, monkeypatch):
@@ -133,9 +218,15 @@ async def test_different_account_reauth_is_rejected_before_copilot_probe(flow_se
 
 async def test_same_account_reauth_preserves_settings_and_reloads_once(flow_setup):
     setup = flow_setup
+    options = {
+        "model": "keep",
+        "enable_device_control": True,
+        "llm_hass_api": ["assist"],
+        "prompt": "Keep these instructions.",
+    }
     entry = SimpleNamespace(
         entry_id="entry",
-        options={"model": "keep"},
+        options=dict(options),
         data={
             "account_id": "123",
             "refresh_token": "old",
@@ -159,7 +250,7 @@ async def test_same_account_reauth_preserves_settings_and_reloads_once(flow_setu
     setup.flow.hass.config_entries.async_schedule_reload.assert_called_once_with(
         "entry"
     )
-    assert entry.options == {"model": "keep"}
+    assert entry.options == options
 
 
 async def test_poll_failure_is_reported(flow_setup, monkeypatch):
