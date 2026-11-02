@@ -25,6 +25,28 @@ _MODEL_CODES = {
     "model_unavailable",
     "model_disabled",
 }
+_AUTH_CODES = {
+    "401",
+    "bad_credentials",
+    "invalid_token",
+    "expired_token",
+    "token_expired",
+    "token_revoked",
+    "authentication_required",
+    "unauthenticated",
+    "unauthorized",
+}
+_AUTH_MESSAGE = re.compile(
+    r"\b(?:HTTP(?:/\d(?:\.\d)?)?\s+|status(?:\s+code)?\s*[:=]?\s*)401\b"
+    r"|\b401\s*:?\s*unauthorized\b"
+    r"|\bauthentication failed\s*\(401\)"
+    r"|\bbad credentials\b"
+    r"|\b(?:access\s+|oauth\s+|github\s+)?token\s+(?:has\s+)?(?:been\s+|is\s+)?"
+    r"(?:expired|revoked|invalid)\b"
+    r"|\b(?:expired|revoked|invalid)\s+(?:(?:access|oauth|github)\s+)?token\b"
+    r"|\bnot authenticated\b",
+    re.IGNORECASE,
+)
 _QUOTA_MESSAGE = re.compile(
     r"\bquota\b.{0,80}\b(?:exceeded|exhausted|depleted)\b"
     r"|\b(?:exceeded|exhausted|insufficient)\b.{0,80}\bquota\b"
@@ -44,15 +66,18 @@ def _details(payload: Mapping[str, Any]) -> Iterator[tuple[str, str]]:
     for key, value in payload.items():
         if key in ("error", "data") and isinstance(value, Mapping):
             yield from _details(value)
-        elif isinstance(value, str) and key in (
+        elif isinstance(value, (str, int)) and key in (
             "code",
             "errorCode",
             "errorType",
             "providerErrorType",
             "type",
             "message",
+            "status",
+            "statusCode",
+            "status_code",
         ):
-            yield key, value
+            yield key, str(value)
 
 
 def _matches(
@@ -72,7 +97,12 @@ def _matches(
         if isinstance(data, Mapping):
             payloads.append(data)
         payloads.append(
-            {"code": getattr(current, "code", None), "message": str(current)}
+            {
+                "code": getattr(current, "code", None),
+                "message": str(current),
+                "statusCode": getattr(current, "status_code", None),
+                "status": getattr(current, "status", None),
+            }
         )
         current = current.__cause__
     return any(
@@ -100,3 +130,14 @@ def is_model_unavailable_error(
 ) -> bool:
     """Identify explicit model rejection even if discovery is still stale."""
     return _matches(error, event, _MODEL_CODES, _MODEL_MESSAGE)
+
+
+def is_authentication_error(
+    error: Exception, event: SessionErrorData | None = None
+) -> bool:
+    """Identify rejected credentials, not rate limits or model access policies."""
+    return (
+        not is_quota_error(error, event)
+        and not is_model_unavailable_error(error, event)
+        and _matches(error, event, _AUTH_CODES, _AUTH_MESSAGE)
+    )

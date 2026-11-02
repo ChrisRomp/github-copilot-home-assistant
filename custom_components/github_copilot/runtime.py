@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .api_errors import is_quota_error
+from .api_errors import is_authentication_error, is_quota_error
 from .auth import (
     CredentialStore,
     OAuthError,
@@ -26,7 +26,6 @@ from .const import (
     MODEL_CACHE_SECONDS,
     OAUTH_CLIENT_ID,
     SDK_TOKEN_MIN_LIFETIME_SECONDS,
-    SESSION_IDLE_SECONDS,
 )
 from .models import model_billing
 from .provisioning import async_runtime_path
@@ -54,6 +53,7 @@ class CopilotRuntime:
         self._models: list[Any] | None = None
         self._models_fetched_at = 0.0
         self._models_lock = asyncio.Lock()
+        self._stop_lock = asyncio.Lock()
 
     async def async_start(self) -> None:
         """Provision and start the pinned native runtime."""
@@ -74,7 +74,8 @@ class CopilotRuntime:
             connection=RuntimeConnection.for_stdio(path=runtime_path),
             use_logged_in_user=False,
             base_directory=str(self.base_directory),
-            session_idle_timeout_seconds=SESSION_IDLE_SECONDS,
+            # The backend owns idle expiry and deletes native sessions on eviction.
+            session_idle_timeout_seconds=0,
             mode="empty",
             log_level="error",
         )
@@ -93,17 +94,22 @@ class CopilotRuntime:
 
     async def async_stop(self) -> None:
         """Stop the SDK runtime and release its process resources."""
-        try:
-            if self.backend is not None:
-                await self.backend.async_stop()
-                self.backend = None
-        finally:
+        async with self._stop_lock:
+            backend, self.backend = self.backend, None
+            client, self.client = self.client, None
+            self.is_started = False
             try:
-                if self.client is not None:
-                    await self.client.stop()
-                    self.client = None
+                if backend is not None:
+                    await backend.async_stop()
             finally:
-                self.is_started = False
+                if client is not None:
+                    try:
+                        await client.stop()
+                    except BaseException:
+                        self.client = client
+                        await client.force_stop()
+                        self.client = None
+                        raise
 
     async def async_github_token_provider(
         self, request: GitHubTokenProviderArgs
@@ -154,7 +160,7 @@ class CopilotRuntime:
                 except (ReauthenticationRequired, OAuthError):
                     raise
                 except Exception as err:  # noqa: BLE001 - experimental SDK RPC
-                    if is_quota_error(err):
+                    if is_quota_error(err) or is_authentication_error(err):
                         raise
                     _LOGGER.debug(
                         "Model listing through the running client failed (%s); "
@@ -169,6 +175,10 @@ class CopilotRuntime:
                     if self.backend is not None:
                         self.backend.report_quota_exceeded()
                     raise RuntimeError("GitHub Copilot quota exceeded.") from err
+                if is_authentication_error(err):
+                    raise ReauthenticationRequired(
+                        "GitHub sign-in was rejected. Reauthenticate in Home Assistant."
+                    ) from err
                 raise
 
             self._models = list(models)
@@ -221,7 +231,13 @@ async def async_probe_models(
         )
         await client.start()
         return await client.list_models()
+    except ReauthenticationRequired:
+        raise
     except Exception as err:
+        if is_authentication_error(err):
+            raise ReauthenticationRequired(
+                "GitHub sign-in was rejected. Reauthenticate in Home Assistant."
+            ) from err
         raise RuntimeError("Copilot authentication or model discovery failed.") from err
     finally:
         try:

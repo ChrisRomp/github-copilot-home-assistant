@@ -19,7 +19,9 @@ from custom_components.github_copilot.const import (
     AUTH_METHOD_PAT,
     CONF_ACCESS_TOKEN,
     CONF_ACCESS_TOKEN_EXPIRES_AT,
+    CONF_ACCOUNT_ID,
     CONF_AUTH_METHOD,
+    CONF_MODEL_BILLING,
     CONF_REFRESH_TOKEN,
     OAUTH_CLIENT_ID,
     OAUTH_SCOPE,
@@ -212,7 +214,12 @@ def credentials(ha_boundary, monkeypatch):
     monkeypatch.setattr(module, "refresh_oauth_token", refresh_mock)
     store = module.CredentialStore(hass, entry, OAUTH_CLIENT_ID)
     return SimpleNamespace(
-        store=store, entry=entry, refresh=refresh_mock, update=update
+        store=store,
+        entry=entry,
+        refresh=refresh_mock,
+        update=update,
+        module=module,
+        rotated=rotated,
     )
 
 
@@ -251,6 +258,96 @@ async def test_pat_is_not_refreshed_or_assigned_an_expiry(credentials):
     assert CONF_ACCESS_TOKEN_EXPIRES_AT not in credentials.entry.data
 
 
+async def test_refresh_preserves_options_billing_saved_during_request(credentials):
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def refresh(*args, **kwargs):
+        entered.set()
+        await finish.wait()
+        return credentials.rotated
+
+    credentials.refresh.side_effect = refresh
+    pending = asyncio.create_task(credentials.store.async_get_access_token())
+    await entered.wait()
+    billing = {"model": "new-model", "multiplier": 0.5}
+    credentials.entry.data = {
+        **credentials.entry.data,
+        CONF_MODEL_BILLING: billing,
+        "other_setting": "updated",
+    }
+    finish.set()
+    assert await pending == "new-access-token"
+    assert credentials.entry.data[CONF_MODEL_BILLING] == billing
+    assert credentials.entry.data["other_setting"] == "updated"
+
+
+@pytest.mark.parametrize("method", [AUTH_METHOD_PAT, AUTH_METHOD_OAUTH])
+@pytest.mark.parametrize("failure", [None, "OAuthError", "ReauthenticationRequired"])
+async def test_refresh_discards_stale_response_after_reauthentication(
+    credentials, method, failure
+):
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def refresh(*args, **kwargs):
+        entered.set()
+        await finish.wait()
+        if failure:
+            raise getattr(credentials.module, failure)("Old sign-in failed")
+        return credentials.rotated
+
+    credentials.refresh.side_effect = refresh
+    other_store = credentials.module.CredentialStore(
+        credentials.store.hass, credentials.entry, OAUTH_CLIENT_ID
+    )
+    pending = asyncio.gather(
+        credentials.store.async_get_access_token(),
+        other_store.async_get_access_token(),
+    )
+    await entered.wait()
+    replacement = {
+        CONF_AUTH_METHOD: method,
+        CONF_ACCESS_TOKEN: "reauth-access-token",
+        CONF_ACCOUNT_ID: "123",
+        CONF_MODEL_BILLING: {"model": "keep-model", "multiplier": 0.5},
+    }
+    if method == AUTH_METHOD_OAUTH:
+        replacement.update(
+            {
+                CONF_ACCESS_TOKEN_EXPIRES_AT: 10000 + 28800,
+                CONF_REFRESH_TOKEN: "reauth-refresh-token",
+            }
+        )
+    credentials.entry.data = replacement
+    finish.set()
+    assert await pending == ["reauth-access-token"] * 2
+    assert credentials.entry.data == replacement
+    credentials.refresh.assert_awaited_once()
+    credentials.update.assert_not_called()
+
+
+async def test_refresh_rechecks_replaced_refresh_token_even_if_access_is_unchanged(
+    credentials,
+):
+    calls = 0
+
+    async def refresh(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            credentials.entry.data = {
+                **credentials.entry.data,
+                CONF_REFRESH_TOKEN: "reauth-refresh-token",
+            }
+            return {**credentials.rotated, CONF_ACCESS_TOKEN: "discard-me"}
+        assert kwargs["refresh_token"] == "reauth-refresh-token"
+        return credentials.rotated
+
+    credentials.refresh.side_effect = refresh
+    assert await credentials.store.async_get_access_token() == "new-access-token"
+    assert calls == 2
+    credentials.update.assert_called_once()
+
+
 @pytest.mark.parametrize("payload", [{"id": 123}, {"id": "123"}, {"id": True}, {}, []])
 async def test_account_identity_uses_immutable_numeric_github_id(payload):
     from custom_components.github_copilot.auth import async_get_account_id
@@ -264,3 +361,25 @@ async def test_account_identity_uses_immutable_numeric_github_id(payload):
         with pytest.raises(OAuthError, match="invalid account identity"):
             await async_get_account_id(session, "test-token")
     assert session.get.call_args.args == ("https://api.github.com/user",)
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+async def test_account_identity_does_not_treat_forbidden_or_rate_limits_as_expiry(
+    status,
+):
+    from aiohttp import ClientResponseError
+
+    from custom_components.github_copilot.auth import (
+        ReauthenticationRequired,
+        async_get_account_id,
+    )
+
+    response = _Response({})
+    response.status = status
+    response.raise_for_status = Mock(
+        side_effect=ClientResponseError(Mock(), (), status=status)
+    )
+    session = SimpleNamespace(get=Mock(return_value=response))
+    expected = ReauthenticationRequired if status == 401 else OAuthError
+    with pytest.raises(expected):
+        await async_get_account_id(session, "test-token")

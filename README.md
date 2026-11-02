@@ -76,6 +76,12 @@ The notice persists until a conversation response succeeds (or the integration
 entry is removed). Quota failures do not trigger model fallback or automatic
 retries. Temporary rate limiting alone is not treated as exhausted quota.
 
+## Diagnostics
+
+Use **Download diagnostics** from the integration's menu in Home Assistant for
+authentication-method, model, device-control, and runtime status. The diagnostic
+payload does not include access tokens, refresh tokens, prompts, or conversations.
+
 ## Requirements and limitations
 
 - A Home Assistant installation with a supported 64-bit OS/runtime and outbound
@@ -87,12 +93,14 @@ retries. Temporary rate limiting alone is not treated as exhausted quota.
 - The SDK's native runtime has Linux ARM64 and x86-64 glibc/musl release assets.
   Local 32-bit runtime support is not available.
 
-Conversation context is held in the running integration and released when HA
-expires the chat, with a five-minute idle limit for SDK session reuse. Sessions
-are isolated by conversation, user, and originating device. A Home Assistant
-restart starts fresh conversations. Credentials
-and settings remain in Home Assistant's config-entry storage, which should be
-treated as sensitive and may be present in Home Assistant backups.
+Conversations have a five-minute idle limit and are isolated by conversation,
+user, and originating device. The SDK can write session files while a chat is
+active. The integration deletes its SDK sessions when HA releases a chat, when
+an idle session is cleaned up, and during normal unload or shutdown. An abrupt
+exit or failed cleanup can leave files behind, and backups taken while a chat is
+active may include conversation data. A Home Assistant restart starts fresh
+conversations. Credentials and settings remain in Home Assistant's config-entry
+storage; treat the entry directory and Home Assistant backups as sensitive.
 
 Prompts, the information needed to answer them, and tool results are sent to
 GitHub Copilot. When device control is enabled, the model can request actions
@@ -124,7 +132,9 @@ action may already have completed and does not replay it.
 The SDK-pinned native runtime is cached under
 `<config>/.storage/github_copilot/runtime/<runtime-version>/`. Its installer runs
 in an isolated process and performs the SDK's checksum verification. The cache
-survives Core container replacement. Network/download, checksum, storage, and
+survives Core container replacement. The installer's environment is limited to
+Python/platform, proxy, and certificate settings rather than the full HA
+environment. Network/download, checksum, storage, and
 unsupported-platform failures are reported during setup. Removing an integration
 entry removes only that entry's runtime state, not this shared versioned cache.
 

@@ -131,7 +131,9 @@ async def test_native_device_context_is_tool_data_not_system_instructions(
     backend = module.ConversationBackend(
         SimpleNamespace(),
         entry,
-        SimpleNamespace(create_session=create_session),
+        SimpleNamespace(
+            create_session=create_session, delete_session=client.delete_session
+        ),
         AsyncMock(),
         AsyncMock(return_value=[SimpleNamespace(id="gpt-4.1")]),
         access_token_getter=AsyncMock(return_value="not-used"),
@@ -208,6 +210,26 @@ async def test_native_device_context_is_tool_data_not_system_instructions(
             assert api.async_call_tool.await_args.args[0].tool_args == tool_arguments
         else:
             api.async_call_tool.assert_not_awaited()
+        key, record = next(iter(backend._sessions.items()))
+        workspace = record.session.workspace_path
+        assert workspace is not None and workspace.is_relative_to(tmp_path)
+        assert workspace.is_dir()
+        assert any(
+            "DEVICE_CONTEXT_ATTACK" in path.read_text(errors="ignore")
+            for path in workspace.rglob("*")
+            if path.is_file()
+        )
+        if context_source == "assist_api":
+            await backend._async_release_session(key, record)
+        elif context_source == "request":
+            await record.session.disconnect()
+            assert workspace.is_dir(), "disconnect preserves native SDK history"
+            record.last_used -= module.SESSION_IDLE_SECONDS + 1
+            await backend._async_expire_sessions()
+        else:
+            await backend.async_stop()
+        assert not backend._sessions
+        assert not workspace.exists(), "releasing the chat must delete SDK history"
     finally:
         await backend.async_stop()
         await client.stop()

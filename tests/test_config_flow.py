@@ -176,3 +176,91 @@ async def test_poll_failure_is_reported(flow_setup, monkeypatch):
         "reason": "oauth_failed",
     }
     setup.flow.async_remove()
+
+
+async def test_successful_reauth_supersedes_inflight_refresh(flow_setup, monkeypatch):
+    from custom_components.github_copilot import auth
+
+    setup = flow_setup
+    entered, finish = asyncio.Event(), asyncio.Event()
+    entry = SimpleNamespace(
+        entry_id="entry",
+        data={
+            "account_id": "123",
+            "auth_method": "oauth",
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "access_token_expires_at": 1,
+            "model_billing": {"model": "keep", "multiplier": 0.5},
+        },
+        options={"model": "keep"},
+    )
+    setup.flow._reauth_entry = entry
+    setup.flow.hass.config_entries.async_update_entry.side_effect = (
+        lambda entry, *, data: setattr(entry, "data", data)
+    )
+
+    async def refresh(*args, **kwargs):
+        entered.set()
+        await finish.wait()
+        return {
+            "auth_method": "oauth",
+            "access_token": "stale-rotated-access",
+            "refresh_token": "stale-rotated-refresh",
+            "access_token_expires_at": 9999999999,
+        }
+
+    monkeypatch.setattr(auth, "refresh_oauth_token", refresh)
+    store = auth.CredentialStore(setup.flow.hass, entry, "client")
+    pending = asyncio.create_task(store.async_get_access_token())
+    await entered.wait()
+    result = await setup.flow.async_step_pat({"token": "github_pat_replacement"})
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    finish.set()
+    assert await pending == "github_pat_replacement"
+    assert entry.data["auth_method"] == "pat"
+    assert "refresh_token" not in entry.data
+    assert "access_token_expires_at" not in entry.data
+    assert entry.data["model_billing"] == {"model": "keep", "multiplier": 0.5}
+    setup.flow.hass.config_entries.async_update_entry.assert_called_once()
+    setup.flow.hass.config_entries.async_schedule_reload.assert_called_once_with(
+        "entry"
+    )
+
+
+@pytest.mark.parametrize("runtime_loaded", [False, True])
+async def test_rejected_pat_discovery_starts_account_bound_reauth(
+    flow_setup, monkeypatch, runtime_loaded
+):
+    from custom_components.github_copilot.auth import ReauthenticationRequired
+
+    setup = flow_setup
+    entry = SimpleNamespace(
+        entry_id="entry",
+        data={
+            "account_id": "123",
+            "auth_method": "pat",
+            "access_token": "revoked-pat",
+        },
+        options={"model": "keep"},
+        async_start_reauth=Mock(),
+    )
+    flow = setup.module.GitHubCopilotOptionsFlow(entry)
+    flow.hass = setup.flow.hass
+    discovery = AsyncMock(side_effect=ReauthenticationRequired("GitHub rejected token"))
+    if runtime_loaded:
+        flow.hass.data["github_copilot"] = {
+            entry.entry_id: SimpleNamespace(
+                is_started=True, async_list_models=discovery
+            )
+        }
+    else:
+        monkeypatch.setattr(setup.module, "async_probe_models", discovery)
+    assert await flow.async_step_init() == {
+        "type": "abort",
+        "reason": "reauth_required",
+    }
+    entry.async_start_reauth.assert_called_once_with(flow.hass)
+    assert entry.data["account_id"] == "123"
+    assert entry.options["model"] == "keep"
+    flow.hass.config_entries.async_update_entry.assert_not_called()

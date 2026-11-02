@@ -26,17 +26,53 @@ except RuntimeError:
     sys.exit(2)
 try:
     print(ensure_runtime_wrapper(), flush=True)
+except (TimeoutError, ConnectionError):
+    sys.exit(5)
 except OSError:
     sys.exit(3)
 except RuntimeError as error:
-    sys.exit(4 if "checksum" in str(error).lower() else 5)
+    message = str(error).lower()
+    if "checksum mismatch" in message:
+        sys.exit(4)
+    sys.exit(5 if message.startswith("failed to download") else 1)
 """
+_INSTALL_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONUTF8",
+        "PYTHONIOENCODING",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SYSTEMROOT",
+        "WINDIR",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "COPILOT_CLI_DOWNLOAD_BASE_URL",
+        "COPILOT_SKIP_CLI_DOWNLOAD",
+    }
+)
 _ERRORS = {
     2: "The Copilot SDK does not support this OS or CPU architecture.",
     3: "Cannot write or execute the Copilot runtime cache. Check storage permissions.",
     4: "Copilot runtime checksum verification failed. The download was rejected.",
     5: "Could not download the pinned Copilot runtime. Check connectivity to GitHub.",
 }
+
+
+class RuntimeDownloadError(RuntimeError):
+    """A transient failure downloading the pinned runtime."""
 
 
 async def async_runtime_path(hass: HomeAssistant) -> str:
@@ -46,11 +82,18 @@ async def async_runtime_path(hass: HomeAssistant) -> str:
     cache = Path(hass.config.path(".storage", DOMAIN, "runtime", CLI_VERSION))
     lock = hass.data.setdefault(f"{DOMAIN}_provision_lock", asyncio.Lock())
     async with lock:
+        # Preserve operator transport settings, including lowercase proxy variables.
+        safe_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() in _INSTALL_ENV_ALLOWLIST
+        }
+        safe_env["COPILOT_CLI_EXTRACT_DIR"] = str(cache)
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-c",
             _INSTALL_SCRIPT,
-            env={**os.environ, "COPILOT_CLI_EXTRACT_DIR": str(cache)},
+            env=safe_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -63,7 +106,10 @@ async def async_runtime_path(hass: HomeAssistant) -> str:
             await process.wait()
             raise
         if process.returncode:
-            raise RuntimeError(
+            error_type = (
+                RuntimeDownloadError if process.returncode == 5 else RuntimeError
+            )
+            raise error_type(
                 _ERRORS.get(
                     process.returncode,
                     "The Copilot runtime installer failed. Check the SDK installation.",

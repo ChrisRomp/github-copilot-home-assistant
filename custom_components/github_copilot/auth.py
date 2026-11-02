@@ -29,6 +29,15 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
+_CREDENTIAL_KEYS = (
+    CONF_AUTH_METHOD,
+    CONF_ACCESS_TOKEN,
+    CONF_ACCESS_TOKEN_EXPIRES_AT,
+    CONF_REFRESH_TOKEN,
+    CONF_REFRESH_TOKEN_EXPIRES_AT,
+    CONF_ACCOUNT_ID,
+)
+
 
 class OAuthError(Exception):
     """A safe, user-presentable GitHub OAuth error."""
@@ -54,7 +63,7 @@ async def async_get_account_id(session: Any, token: str) -> str:
             },
             timeout=15,
         ) as response:
-            if response.status in (401, 403):
+            if response.status == 401:
                 raise ReauthenticationRequired("GitHub could not verify this account.")
             response.raise_for_status()
             payload = await response.json()
@@ -261,53 +270,57 @@ class CredentialStore:
 
     async def async_get_access_token(self) -> str:
         """Return a valid access token, refreshing expiring OAuth tokens."""
-        data = self.entry.data
-        if data.get(CONF_AUTH_METHOD) != AUTH_METHOD_OAUTH:
-            token = data.get(CONF_ACCESS_TOKEN)
-            if not token:
-                raise ReauthenticationRequired("Sign in to GitHub again.")
-            return token
-
-        expiry = data.get(CONF_ACCESS_TOKEN_EXPIRES_AT)
-        if expiry is not None and expiry > time.time() + OAUTH_REFRESH_MARGIN_SECONDS:
-            token = data.get(CONF_ACCESS_TOKEN)
-            if not token:
-                raise ReauthenticationRequired("Sign in to GitHub again.")
-            return token
-
         async with self._refresh_lock:
-            data = self.entry.data
-            expiry = data.get(CONF_ACCESS_TOKEN_EXPIRES_AT)
-            if (
-                expiry is not None
-                and expiry > time.time() + OAUTH_REFRESH_MARGIN_SECONDS
-            ):
-                return data[CONF_ACCESS_TOKEN]
+            while True:
+                data = dict(self.entry.data)
+                expiry = data.get(CONF_ACCESS_TOKEN_EXPIRES_AT)
+                if data.get(CONF_AUTH_METHOD) != AUTH_METHOD_OAUTH or (
+                    expiry is not None
+                    and expiry > time.time() + OAUTH_REFRESH_MARGIN_SECONDS
+                ):
+                    token = data.get(CONF_ACCESS_TOKEN)
+                    if not token:
+                        raise ReauthenticationRequired("Sign in to GitHub again.")
+                    return token
 
-            refresh_token = data.get(CONF_REFRESH_TOKEN)
-            refresh_expiry = data.get(CONF_REFRESH_TOKEN_EXPIRES_AT)
-            if (
-                not refresh_token
-                or not self.client_id
-                or (refresh_expiry is not None and refresh_expiry <= time.time())
-            ):
-                raise ReauthenticationRequired(
-                    "GitHub sign-in expired. Reauthenticate in Home Assistant."
+                refresh_token = data.get(CONF_REFRESH_TOKEN)
+                refresh_expiry = data.get(CONF_REFRESH_TOKEN_EXPIRES_AT)
+                if (
+                    not refresh_token
+                    or not self.client_id
+                    or (refresh_expiry is not None and refresh_expiry <= time.time())
+                ):
+                    raise ReauthenticationRequired(
+                        "GitHub sign-in expired. Reauthenticate in Home Assistant."
+                    )
+
+                from homeassistant.helpers.aiohttp_client import (
+                    async_get_clientsession,
                 )
 
-            from homeassistant.helpers.aiohttp_client import (
-                async_get_clientsession,
-            )
+                try:
+                    rotated = await refresh_oauth_token(
+                        async_get_clientsession(self.hass),
+                        client_id=self.client_id,
+                        refresh_token=refresh_token,
+                    )
+                except (OAuthError, ReauthenticationRequired):
+                    if self._credentials_changed(data):
+                        continue
+                    raise
+                # Reauth can replace credentials while GitHub is rotating the old pair.
+                if self._credentials_changed(data):
+                    continue
+                self.hass.config_entries.async_update_entry(
+                    self.entry, data={**self.entry.data, **rotated}
+                )
+                return rotated[CONF_ACCESS_TOKEN]
 
-            rotated = await refresh_oauth_token(
-                async_get_clientsession(self.hass),
-                client_id=self.client_id,
-                refresh_token=refresh_token,
-            )
-            self.hass.config_entries.async_update_entry(
-                self.entry, data={**data, **rotated}
-            )
-            return rotated[CONF_ACCESS_TOKEN]
+    def _credentials_changed(self, snapshot: Mapping[str, Any]) -> bool:
+        """Reject responses belonging to a superseded sign-in."""
+        return any(
+            snapshot.get(key) != self.entry.data.get(key) for key in _CREDENTIAL_KEYS
+        )
 
     async def async_ensure_account_id(self) -> str:
         """Bind legacy entries to their existing account before allowing reauth."""

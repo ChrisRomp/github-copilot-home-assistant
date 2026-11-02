@@ -2,42 +2,61 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from .const import DOMAIN
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import Event, HomeAssistant
 
     from .runtime import CopilotRuntime
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a GitHub Copilot config entry."""
-    from homeassistant.const import Platform
+    from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
     from homeassistant.exceptions import ConfigEntryNotReady
 
+    from .provisioning import RuntimeDownloadError
     from .runtime import CopilotRuntime
 
     runtime = CopilotRuntime(hass, entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    async def async_stop_runtime(event: Event) -> None:
+        """Finish runtime cleanup before Home Assistant closes its event loop."""
+        await runtime.async_stop()
+
     try:
         await runtime.async_start()
         await hass.config_entries.async_forward_entry_setups(
             entry, [Platform.CONVERSATION]
         )
-    except (OSError, RuntimeError) as err:
+        entry.async_on_unload(
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, async_stop_runtime)
+        )
+        entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+        entry.async_create_background_task(
+            hass, runtime.backend.async_check_model(), f"{DOMAIN} model check"
+        )
+    except BaseException as err:
         hass.data[DOMAIN].pop(entry.entry_id, None)
-        await runtime.async_stop()
-        raise ConfigEntryNotReady(
-            f"Unable to start the Copilot runtime: {err}"
-        ) from err
+        if not hass.data[DOMAIN]:
+            hass.data.pop(DOMAIN)
+        try:
+            await runtime.async_stop()
+        except BaseException:
+            _LOGGER.exception("Failed to stop the Copilot runtime after setup failed")
+        if isinstance(err, (OSError, RuntimeDownloadError)):
+            raise ConfigEntryNotReady(
+                f"Unable to start the Copilot runtime: {err}"
+            ) from err
+        raise
 
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
-    entry.async_create_background_task(
-        hass, runtime.backend.async_check_model(), f"{DOMAIN} model check"
-    )
     return True
 
 
@@ -84,22 +103,3 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     for issue in (ISSUE_MODEL_FALLBACK, ISSUE_MODEL_UNAVAILABLE, ISSUE_QUOTA_EXCEEDED):
         ir.async_delete_issue(hass, DOMAIN, f"{issue}_{entry.entry_id}")
-
-
-async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> dict[str, object]:
-    """Return diagnostics without credentials or conversation content."""
-    runtime: CopilotRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    return {
-        "auth_method": entry.data.get("auth_method"),
-        "has_access_token": bool(entry.data.get("access_token")),
-        "selected_model": entry.options.get("model"),
-        "active_model": (
-            runtime.backend.active_model
-            if runtime is not None and runtime.backend is not None
-            else None
-        ),
-        "device_control_enabled": entry.options.get("enable_device_control", False),
-        "runtime_started": runtime is not None and runtime.is_started,
-    }

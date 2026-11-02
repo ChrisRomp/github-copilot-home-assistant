@@ -18,8 +18,9 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("tool_failed", [False, True])
+@pytest.mark.parametrize("native_intent", [False, True])
 async def test_real_chat_log_records_external_tool_once_and_returns_speech(
-    tmp_path, tool_failed
+    tmp_path, tool_failed, native_intent
 ):
     from homeassistant.components.conversation import (
         ConversationInput,
@@ -31,12 +32,22 @@ async def test_real_chat_log_records_external_tool_once_and_returns_speech(
         UserContent,
     )
     from homeassistant.core import Context, HomeAssistant
-    from homeassistant.helpers.llm import ToolResult, selector_serializer
+    from homeassistant.helpers.intent import (
+        IntentResponse,
+        IntentResponseTarget,
+        IntentResponseTargetType,
+    )
+    from homeassistant.helpers.llm import (
+        IntentResponseDict,
+        ToolResult,
+        selector_serializer,
+    )
 
     from custom_components.github_copilot.backend import ConversationBackend
 
     hass = HomeAssistant(str(tmp_path))
     session = create_autospec(CopilotSession, instance=True)
+    session.session_id = "sdk-session"
     session.on.return_value = Mock()
     session.rpc = SimpleNamespace(options=SimpleNamespace(update=AsyncMock()))
     backend = ConversationBackend(
@@ -46,10 +57,30 @@ async def test_real_chat_log_records_external_tool_once_and_returns_speech(
             data={"auth_method": "pat"},
             options={"model": "gpt-6-luna", "enable_device_control": True},
         ),
-        SimpleNamespace(create_session=AsyncMock(return_value=session)),
+        SimpleNamespace(
+            create_session=AsyncMock(return_value=session), delete_session=AsyncMock()
+        ),
         AsyncMock(),
         AsyncMock(return_value=[SimpleNamespace(id="gpt-6-luna")]),
         access_token_getter=AsyncMock(return_value="test-only"),
+    )
+    intent_response = IntentResponse(language="en")
+    intent_response.async_set_results(
+        [
+            IntentResponseTarget(
+                "Kitchen", IntentResponseTargetType.ENTITY, "light.kitchen"
+            )
+        ],
+        [
+            IntentResponseTarget(
+                "Office", IntentResponseTargetType.ENTITY, "light.office"
+            )
+        ],
+    )
+    data = (
+        IntentResponseDict(intent_response)
+        if native_intent
+        else {"success": not tool_failed}
     )
     api = SimpleNamespace(
         api_prompt="Use only exposed tools.",
@@ -62,9 +93,7 @@ async def test_real_chat_log_records_external_tool_once_and_returns_speech(
             )
         ],
         async_call_tool=AsyncMock(
-            return_value=ToolResult(
-                data={"success": not tool_failed}, error=tool_failed
-            )
+            return_value=ToolResult(data=data, error=tool_failed)
         ),
     )
     chat = ChatLog(hass, "conversation", llm_api=api)
@@ -110,6 +139,16 @@ async def test_real_chat_log_records_external_tool_once_and_returns_speech(
         )
         result = async_get_result_from_chat_log(user, chat)
         assert result.response.speech["plain"]["speech"] == "Done."
+        if native_intent:
+            assert result.response is intent_response
+            assert result.response.success_results[0].id == "light.kitchen"
+            assert result.response.failed_results[0].id == "light.office"
+            recorded = next(
+                content
+                for content in chat.content
+                if isinstance(content, ToolResultContent)
+            )
+            assert recorded.result.data is data
     finally:
         await backend.async_stop()
         await hass.async_stop()
@@ -190,9 +229,12 @@ async def test_real_live_context_filters_exposed_entities_without_promoting_data
             custom_serializer=selector_serializer,
         )
         session = create_autospec(CopilotSession, instance=True)
+        session.session_id = "sdk-session"
         session.on.return_value = Mock()
         session.rpc = SimpleNamespace(options=SimpleNamespace(update=AsyncMock()))
-        client = SimpleNamespace(create_session=AsyncMock(return_value=session))
+        client = SimpleNamespace(
+            create_session=AsyncMock(return_value=session), delete_session=AsyncMock()
+        )
         backend = ConversationBackend(
             hass,
             SimpleNamespace(

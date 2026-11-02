@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from copilot._jsonrpc import JsonRpcError
 from copilot.client import GitHubTokenProviderArgs
 from copilot.generated.rpc import GitHubTokenAcquireReason
 
@@ -173,3 +177,193 @@ async def test_model_discovery_quota_is_reported_without_temporary_client_retry(
         await runtime.async_list_models()
     runtime.backend.report_quota_exceeded.assert_called_once()
     probe.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("HTTP 401 Unauthorized"),
+        JsonRpcError(-32603, "Request rejected", data={"statusCode": 401}),
+        JsonRpcError(
+            -32603, "Request rejected", data={"error": {"code": "invalid_token"}}
+        ),
+    ],
+)
+async def test_running_discovery_rejected_pat_requires_reauth_without_retry(
+    monkeypatch, error
+):
+    from custom_components.github_copilot import runtime as runtime_module
+
+    runtime = _runtime_for_models()
+    runtime.entry.data = {"auth_method": "pat", "access_token": "revoked-pat"}
+    runtime._async_list_models_rpc = AsyncMock(side_effect=error)
+    probe = AsyncMock()
+    monkeypatch.setattr(runtime_module, "async_probe_models", probe)
+    with pytest.raises(ReauthenticationRequired):
+        await runtime.async_list_models()
+    probe.assert_not_awaited()
+    assert runtime._models is None
+    assert runtime.entry.options["model"] == "model-1"
+
+
+@pytest.fixture
+def sdk_runtime(ha_boundary, monkeypatch):
+    import copilot
+
+    module = ha_boundary.load("runtime")
+    hass = SimpleNamespace(
+        data={},
+        config=SimpleNamespace(path=Mock(return_value=str(Path.cwd()))),
+    )
+    entry = SimpleNamespace(entry_id="entry", data={}, options={})
+    runtime = module.CopilotRuntime(hass, entry)
+    runtime.base_directory = Mock()
+    runtime.credentials.async_ensure_account_id = AsyncMock(return_value="123")
+    client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        force_stop=AsyncMock(),
+        list_models=AsyncMock(return_value=[SimpleNamespace(id="model")]),
+    )
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    monkeypatch.setattr(
+        module, "async_runtime_path", AsyncMock(return_value="/unused-runtime")
+    )
+    backend = SimpleNamespace(async_stop=AsyncMock())
+    monkeypatch.setitem(
+        sys.modules,
+        "custom_components.github_copilot.backend",
+        SimpleNamespace(ConversationBackend=Mock(return_value=backend)),
+    )
+    directory = SimpleNamespace(name=str(Path.cwd()), cleanup=Mock())
+    monkeypatch.setattr(
+        module.tempfile, "TemporaryDirectory", Mock(return_value=directory)
+    )
+    return SimpleNamespace(
+        module=module,
+        runtime=runtime,
+        client=client,
+        factory=factory,
+        backend=backend,
+        directory=directory,
+    )
+
+
+async def test_runtime_disables_native_expiry_so_backend_owns_session_lifetime(
+    sdk_runtime,
+):
+    await sdk_runtime.runtime.async_start()
+    assert sdk_runtime.factory.call_args.kwargs["session_idle_timeout_seconds"] == 0
+    assert sdk_runtime.runtime.is_started
+    await sdk_runtime.runtime.async_stop()
+
+
+@pytest.mark.parametrize("failed_stage", ["start", "list_models"])
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (RuntimeError("HTTP 401 Unauthorized"), ReauthenticationRequired),
+        (
+            JsonRpcError(
+                -32603, "Request rejected", data={"error": {"code": "bad_credentials"}}
+            ),
+            ReauthenticationRequired,
+        ),
+        (RuntimeError("HTTP 403 Forbidden: model policy"), RuntimeError),
+        (RuntimeError("HTTP 429 Too many requests"), RuntimeError),
+        (RuntimeError("Quota exceeded"), RuntimeError),
+        (RuntimeError("Model not available"), RuntimeError),
+    ],
+)
+async def test_probe_classifies_only_confirmed_auth_rejections_and_cleans_up(
+    sdk_runtime, failed_stage, error, expected
+):
+    getattr(sdk_runtime.client, failed_stage).side_effect = error
+    with pytest.raises(expected):
+        await sdk_runtime.module.async_probe_models(
+            "test-pat", flow_id="flow", hass=sdk_runtime.runtime.hass
+        )
+    sdk_runtime.client.stop.assert_awaited_once()
+    sdk_runtime.directory.cleanup.assert_called_once()
+
+
+async def test_runtime_stop_drains_backend_before_stopping_client_and_is_idempotent(
+    sdk_runtime,
+):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def stop_backend():
+        entered.set()
+        await finish.wait()
+
+    sdk_runtime.backend.async_stop.side_effect = stop_backend
+    first = asyncio.create_task(runtime.async_stop())
+    await entered.wait()
+    second = asyncio.create_task(runtime.async_stop())
+    await asyncio.sleep(0)
+    assert not second.done()
+    sdk_runtime.client.stop.assert_not_awaited()
+    finish.set()
+    await asyncio.gather(first, second)
+    await runtime.async_stop()
+    sdk_runtime.backend.async_stop.assert_awaited_once()
+    sdk_runtime.client.stop.assert_awaited_once()
+    assert runtime.backend is runtime.client is None
+    assert not runtime.is_started
+
+
+@pytest.mark.parametrize("failed_stage", ["backend", "client"])
+async def test_runtime_stop_clears_references_even_if_cleanup_fails(
+    sdk_runtime, failed_stage
+):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    if failed_stage == "backend":
+        sdk_runtime.backend.async_stop.side_effect = RuntimeError("Cleanup failed")
+    else:
+        sdk_runtime.client.stop.side_effect = RuntimeError("Cleanup failed")
+    with pytest.raises(RuntimeError, match="Cleanup failed"):
+        await runtime.async_stop()
+    await runtime.async_stop()
+    sdk_runtime.backend.async_stop.assert_awaited_once()
+    sdk_runtime.client.stop.assert_awaited_once()
+    if failed_stage == "client":
+        sdk_runtime.client.force_stop.assert_awaited_once()
+    else:
+        sdk_runtime.client.force_stop.assert_not_awaited()
+    assert runtime.backend is runtime.client is None
+    assert not runtime.is_started
+
+
+async def test_runtime_stop_retains_client_for_retry_if_force_stop_also_fails(
+    sdk_runtime,
+):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    sdk_runtime.client.stop.side_effect = RuntimeError("Cleanup failed")
+    sdk_runtime.client.force_stop.side_effect = OSError("Process could not exit")
+    with pytest.raises(OSError, match="Process could not exit"):
+        await runtime.async_stop()
+    assert runtime.client is sdk_runtime.client
+    sdk_runtime.client.stop.side_effect = None
+    await runtime.async_stop()
+    assert runtime.client is None
+    sdk_runtime.backend.async_stop.assert_awaited_once()
+    assert sdk_runtime.client.stop.await_count == 2
+
+
+async def test_runtime_stop_force_stops_client_if_graceful_stop_is_cancelled(
+    sdk_runtime,
+):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    sdk_runtime.client.stop.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.async_stop()
+    sdk_runtime.client.force_stop.assert_awaited_once()
+    assert runtime.client is None
+    await runtime.async_stop()
+    sdk_runtime.client.stop.assert_awaited_once()
