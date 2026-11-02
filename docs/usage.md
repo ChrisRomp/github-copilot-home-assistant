@@ -121,5 +121,5 @@ Use **Download diagnostics** from the integration's menu in Home Assistant for
 authentication-method, model, device-control, and runtime status. The diagnostic
 payload does not include access tokens, refresh tokens, prompts, or conversations.
 
-[Open an issue](https://github.com/ChrisRomp/ha-copilot/issues) for bugs.
+[Open an issue](https://github.com/ChrisRomp/github-copilot-home-assistant/issues) for bugs.
 Never include tokens or unredacted conversations in a report.

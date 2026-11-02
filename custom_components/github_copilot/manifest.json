@@ -5,9 +5,9 @@
   "codeowners": ["@ChrisRomp"],
   "config_flow": true,
   "dependencies": ["conversation"],
-  "documentation": "https://github.com/ChrisRomp/ha-copilot",
+  "documentation": "https://github.com/ChrisRomp/github-copilot-home-assistant",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/ChrisRomp/ha-copilot/issues",
+  "issue_tracker": "https://github.com/ChrisRomp/github-copilot-home-assistant/issues",
   "requirements": ["github-copilot-sdk==1.0.26"],
   "version": "0.1.0"
 }
