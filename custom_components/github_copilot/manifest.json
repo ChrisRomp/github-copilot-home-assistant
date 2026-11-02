@@ -1,6 +1,7 @@
 {
   "domain": "github_copilot",
   "name": "GitHub Copilot",
+  "categories": ["ai_voice.ai_models"],
   "codeowners": ["@ChrisRomp"],
   "config_flow": true,
   "dependencies": ["conversation"],
