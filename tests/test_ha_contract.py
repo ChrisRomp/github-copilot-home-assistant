@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, create_autospec
 
@@ -15,6 +16,46 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("HA_COPILOT_HA_TESTS") != "1",
     reason="Requires the full pinned Home Assistant dependencies",
 )
+
+
+@pytest.mark.parametrize(
+    ("time_zone", "offset_hours"),
+    [("Asia/Tokyo", 9), ("Pacific/Honolulu", -10)],
+)
+async def test_request_time_uses_real_home_assistant_configured_zone(
+    tmp_path, time_zone, offset_hours
+):
+    from homeassistant.components.conversation import ConversationInput
+    from homeassistant.components.conversation.chat_log import ChatLog
+    from homeassistant.core import Context, HomeAssistant
+    from homeassistant.util import dt as dt_util
+
+    from custom_components.github_copilot.backend import ConversationBackend
+
+    previous_zone = dt_util.DEFAULT_TIME_ZONE
+    hass = HomeAssistant(str(tmp_path))
+    try:
+        await hass.config.async_set_time_zone(time_zone)
+        user = ConversationInput(
+            text="What time is it?",
+            context=Context(user_id="user"),
+            conversation_id="conversation",
+            device_id=None,
+            satellite_id=None,
+            language="en",
+            agent_id="conversation.github_copilot",
+        )
+        before = dt_util.utcnow()
+        result = ConversationBackend._context_tool_result(
+            {"section": "request"}, user, ChatLog(hass, "conversation")
+        )
+        after = dt_util.utcnow()
+        current_time = datetime.fromisoformat(result["current_time"])
+        assert current_time.utcoffset() == timedelta(hours=offset_hours)
+        assert before <= current_time <= after
+    finally:
+        dt_util.set_default_time_zone(previous_zone)
+        await hass.async_stop()
 
 
 @pytest.mark.parametrize("tool_failed", [False, True])

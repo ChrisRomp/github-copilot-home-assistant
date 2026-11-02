@@ -328,13 +328,20 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             device_control_enabled = options[CONF_ENABLE_DEVICE_CONTROL]
             options[CONF_ENABLE_DEVICE_CONTROL] = device_control_enabled
             options[CONF_LLM_HASS_API] = ["assist"] if device_control_enabled else None
+            selected_model = options[CONF_MODEL]
+            billing = model_billing(selected_model, self._models)
+            saved_billing = self._entry.data.get(CONF_MODEL_BILLING, {})
+            if (
+                selected_model == self._entry.options.get(CONF_MODEL)
+                and billing["multiplier"] is None
+                and model_budget(selected_model, saved_billing) is not None
+            ):
+                billing = saved_billing
             self.hass.config_entries.async_update_entry(
                 self._entry,
                 data={
                     **self._entry.data,
-                    CONF_MODEL_BILLING: model_billing(
-                        options[CONF_MODEL], self._models
-                    ),
+                    CONF_MODEL_BILLING: billing,
                 },
             )
             return self.async_create_entry(title="", data=options)
@@ -405,7 +412,9 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
                     ): BooleanSelector(),
                     vol.Optional(
                         CONF_PROMPT,
-                        default=self._entry.options.get(CONF_PROMPT, ""),
+                        description={
+                            "suggested_value": self._entry.options.get(CONF_PROMPT, "")
+                        },
                     ): TextSelector(),
                 }
             ),

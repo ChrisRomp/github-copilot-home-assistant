@@ -16,6 +16,18 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def _remove_stopped_runtime(
+    hass: HomeAssistant, entry: ConfigEntry, runtime: CopilotRuntime
+) -> None:
+    """Remove only this runtime, without disturbing a replacement registry."""
+    runtimes = hass.data.get(DOMAIN)
+    if runtimes is None or runtimes.get(entry.entry_id) is not runtime:
+        return
+    runtimes.pop(entry.entry_id)
+    if not runtimes and hass.data.get(DOMAIN) is runtimes:
+        hass.data.pop(DOMAIN, None)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a GitHub Copilot config entry."""
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
@@ -23,6 +35,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     from .provisioning import RuntimeDownloadError
     from .runtime import CopilotRuntime
+
+    previous = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if previous is not None:
+        try:
+            await previous.async_stop()
+        except (OSError, RuntimeDownloadError) as err:
+            raise ConfigEntryNotReady(
+                "Unable to stop the previous Copilot runtime."
+            ) from err
+        _remove_stopped_runtime(hass, entry, previous)
 
     runtime = CopilotRuntime(hass, entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
@@ -44,13 +66,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass, runtime.backend.async_check_model(), f"{DOMAIN} model check"
         )
     except BaseException as err:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
-        if not hass.data[DOMAIN]:
-            hass.data.pop(DOMAIN)
         try:
             await runtime.async_stop()
         except BaseException:
             _LOGGER.exception("Failed to stop the Copilot runtime after setup failed")
+        else:
+            _remove_stopped_runtime(hass, entry, runtime)
         if isinstance(err, (OSError, RuntimeDownloadError)):
             raise ConfigEntryNotReady(
                 f"Unable to start the Copilot runtime: {err}"
@@ -69,10 +90,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ):
         return False
 
-    runtime: CopilotRuntime = hass.data[DOMAIN].pop(entry.entry_id)
+    runtime: CopilotRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if runtime is None:
+        return True
     await runtime.async_stop()
-    if not hass.data[DOMAIN]:
-        hass.data.pop(DOMAIN)
+    _remove_stopped_runtime(hass, entry, runtime)
     return True
 
 

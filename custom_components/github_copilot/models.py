@@ -61,9 +61,8 @@ def _version_key(model_id: str) -> tuple[int, ...]:
     return tuple(key)
 
 
-def model_multiplier(model: Any) -> float | None:
-    """Return valid SDK billing metadata, never infer pricing from a model name."""
-    value = getattr(getattr(model, "billing", None), "multiplier", None)
+def _valid_multiplier(value: Any) -> float | None:
+    """Validate discovered or stored billing multipliers."""
     if (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
@@ -74,6 +73,13 @@ def model_multiplier(model: Any) -> float | None:
     return None
 
 
+def model_multiplier(model: Any) -> float | None:
+    """Return valid SDK billing metadata, never infer pricing from a model name."""
+    return _valid_multiplier(
+        getattr(getattr(model, "billing", None), "multiplier", None)
+    )
+
+
 def model_billing(model_id: str, models: Sequence[Any]) -> dict[str, Any]:
     """Capture the selected model's cost for when it disappears from discovery."""
     model = next((model for model in models if model.id == model_id), None)
@@ -82,7 +88,11 @@ def model_billing(model_id: str, models: Sequence[Any]) -> dict[str, Any]:
 
 def model_budget(model_id: str, billing: dict[str, Any]) -> float | None:
     """Read a stored billing snapshot only for the model it describes."""
-    return billing.get("multiplier") if billing.get("model") == model_id else None
+    return (
+        _valid_multiplier(billing.get("multiplier"))
+        if billing.get("model") == model_id
+        else None
+    )
 
 
 def _version_distance(

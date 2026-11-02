@@ -110,6 +110,96 @@ async def test_failed_unload_keeps_runtime_and_shutdown_listener(setup_entry):
     setup.hass.bus.async_listen_once.return_value.assert_not_called()
 
 
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+async def test_stop_failure_keeps_unloaded_runtime_registered_for_retry(
+    setup_entry, error_type
+):
+    setup = setup_entry
+    await async_setup_entry(setup.hass, setup.entry)
+    error = error_type("process still running")
+    setup.runtime.async_stop.side_effect = error
+
+    with pytest.raises(error_type) as raised:
+        await async_unload_entry(setup.hass, setup.entry)
+    assert raised.value is error
+    assert setup.hass.data[DOMAIN]["entry"] is setup.runtime
+
+    setup.runtime.async_stop.side_effect = None
+    assert await async_unload_entry(setup.hass, setup.entry)
+    assert DOMAIN not in setup.hass.data
+    assert setup.runtime.async_stop.await_count == 2
+
+
+async def test_concurrent_unloads_keep_stopping_entries_registered(setup_entry):
+    setup = setup_entry
+    await async_setup_entry(setup.hass, setup.entry)
+    second_entry = SimpleNamespace(entry_id="second")
+    second_runtime = SimpleNamespace(async_stop=AsyncMock())
+    setup.hass.data[DOMAIN]["second"] = second_runtime
+    entered = [asyncio.Event(), asyncio.Event()]
+    finish = [asyncio.Event(), asyncio.Event()]
+
+    async def stop(index):
+        entered[index].set()
+        await finish[index].wait()
+
+    async def stop_first():
+        await stop(0)
+
+    async def stop_second():
+        await stop(1)
+
+    setup.runtime.async_stop.side_effect = stop_first
+    second_runtime.async_stop.side_effect = stop_second
+    tasks = [
+        asyncio.create_task(async_unload_entry(setup.hass, entry))
+        for entry in (setup.entry, second_entry)
+    ]
+    await asyncio.gather(*(event.wait() for event in entered))
+    assert set(setup.hass.data[DOMAIN]) == {"entry", "second"}
+    finish[0].set()
+    assert await tasks[0]
+    assert setup.hass.data[DOMAIN] == {"second": second_runtime}
+    finish[1].set()
+    assert await tasks[1]
+    assert DOMAIN not in setup.hass.data
+
+
+async def test_concurrent_unloads_of_same_entry_are_safe(setup_entry):
+    setup = setup_entry
+    await async_setup_entry(setup.hass, setup.entry)
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def stop():
+        if setup.runtime.async_stop.await_count == 2:
+            entered.set()
+        await finish.wait()
+
+    setup.runtime.async_stop.side_effect = stop
+    tasks = [
+        asyncio.create_task(async_unload_entry(setup.hass, setup.entry))
+        for _ in range(2)
+    ]
+    await entered.wait()
+    finish.set()
+    assert await asyncio.gather(*tasks) == [True, True]
+    assert DOMAIN not in setup.hass.data
+
+
+async def test_unload_does_not_remove_replacement_runtime(setup_entry):
+    setup = setup_entry
+    await async_setup_entry(setup.hass, setup.entry)
+    replacement = object()
+
+    async def replace_runtime():
+        setup.hass.data[DOMAIN] = {"entry": replacement}
+
+    setup.runtime.async_stop.side_effect = replace_runtime
+    assert await async_unload_entry(setup.hass, setup.entry)
+    assert setup.hass.data[DOMAIN] == {"entry": replacement}
+
+
 @pytest.mark.parametrize("stage", ["start", "forward"])
 @pytest.mark.parametrize(
     "error_type",
@@ -179,8 +269,53 @@ async def test_cleanup_failure_does_not_replace_setup_failure(
         assert raised.value.__cause__ is error
     else:
         assert raised.value is error
-    assert DOMAIN not in setup.hass.data
+    assert setup.hass.data[DOMAIN]["entry"] is setup.runtime
     assert "Failed to stop the Copilot runtime after setup failed" in caplog.text
+
+
+async def test_setup_retry_stops_retained_runtime_before_starting_replacement(
+    setup_entry,
+):
+    from custom_components.github_copilot import runtime as runtime_module
+
+    setup = setup_entry
+    previous = SimpleNamespace(async_stop=AsyncMock())
+    setup.hass.data[DOMAIN] = {"entry": previous}
+    factory = runtime_module.CopilotRuntime
+
+    async def stop():
+        factory.assert_not_called()
+        assert setup.hass.data[DOMAIN]["entry"] is previous
+
+    previous.async_stop.side_effect = stop
+    assert await async_setup_entry(setup.hass, setup.entry)
+    previous.async_stop.assert_awaited_once()
+    assert setup.hass.data[DOMAIN]["entry"] is setup.runtime
+    setup.runtime.async_start.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "error_type", [OSError, RuntimeError, ValueError, asyncio.CancelledError]
+)
+async def test_setup_retry_cannot_overwrite_failed_cleanup(setup_entry, error_type):
+    from homeassistant.exceptions import ConfigEntryNotReady
+
+    from custom_components.github_copilot import runtime as runtime_module
+
+    setup = setup_entry
+    error = error_type("process still running")
+    previous = SimpleNamespace(async_stop=AsyncMock(side_effect=error))
+    setup.hass.data[DOMAIN] = {"entry": previous}
+
+    expected = ConfigEntryNotReady if error_type is OSError else error_type
+    with pytest.raises(expected) as raised:
+        await async_setup_entry(setup.hass, setup.entry)
+    if error_type is OSError:
+        assert raised.value.__cause__ is error
+    else:
+        assert raised.value is error
+    assert setup.hass.data[DOMAIN]["entry"] is previous
+    runtime_module.CopilotRuntime.assert_not_called()
 
 
 async def test_cancelled_setup_waits_for_cleanup(setup_entry):
@@ -204,11 +339,12 @@ async def test_cancelled_setup_waits_for_cleanup(setup_entry):
     task.cancel()
     await stopping.wait()
     assert not task.done()
-    assert DOMAIN not in setup.hass.data
+    assert setup.hass.data[DOMAIN]["entry"] is setup.runtime
     stopped.set()
     with pytest.raises(asyncio.CancelledError):
         await task
     setup.runtime.async_stop.assert_awaited_once()
+    assert DOMAIN not in setup.hass.data
 
 
 async def test_setup_failure_preserves_other_entry_state(setup_entry):

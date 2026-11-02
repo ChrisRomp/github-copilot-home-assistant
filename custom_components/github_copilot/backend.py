@@ -10,7 +10,6 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import voluptuous as vol
@@ -31,6 +30,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import llm
 from homeassistant.helpers.chat_session import current_session
 from homeassistant.helpers.json import json_dumps
+from homeassistant.util import dt as dt_util
 
 from .api_errors import is_model_unavailable_error, is_quota_error
 from .auth import OAuthError, ReauthenticationRequired, async_start_reauth_flow
@@ -131,9 +131,29 @@ class ConversationBackend:
         """Stream a Copilot response into Home Assistant's chat log."""
         if self._closed:
             raise HomeAssistantError("GitHub Copilot is shutting down.")
-        task = asyncio.current_task()
-        assert task is not None
+        caller = asyncio.current_task()
+        assert caller is not None
+        task = asyncio.create_task(self._async_run_turn(agent_id, user_input, chat_log))
         self._turn_tasks.add(task)
+        task.add_done_callback(self._turn_tasks.discard)
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as err:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+            # A caller's cancellation must not interrupt an already-draining turn.
+            await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+            if self._closed and not caller.cancelling():
+                raise HomeAssistantError("GitHub Copilot is shutting down.") from err
+            raise
+
+    async def _async_run_turn(
+        self,
+        agent_id: str,
+        user_input: ConversationInput,
+        chat_log: ChatLog,
+    ) -> None:
+        """Own admission and execution without tracking HA's caller task."""
         acquired = False
         try:
             try:
@@ -149,7 +169,6 @@ class ConversationBackend:
         finally:
             if acquired:
                 self._turn_slots.release()
-            self._turn_tasks.discard(task)
 
     async def _async_handle_message(
         self,
@@ -880,7 +899,7 @@ class ConversationBackend:
             }
         return {
             "source": "home_assistant_request",
-            "current_time": datetime.now().astimezone().isoformat(),
+            "current_time": dt_util.now().isoformat(),
             "context": (
                 getattr(user_input, "extra_system_prompt", None)
                 or getattr(chat_log, "extra_system_prompt", None)

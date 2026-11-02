@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, create_autospec
 
@@ -783,6 +784,19 @@ async def test_read_only_context_cannot_bypass_disabled_device_access(
     await assert_clean(setup)
 
 
+def test_request_context_uses_home_assistant_time_helper(setup, monkeypatch):
+    current_time = datetime.fromisoformat("2026-11-02T10:15:00+09:00")
+    now = Mock(return_value=current_time)
+    monkeypatch.setattr(setup.module.dt_util, "now", now)
+
+    result = setup.backend._context_tool_result(
+        {"section": "request"}, setup.user, setup.chat
+    )
+
+    now.assert_called_once_with()
+    assert result["current_time"] == current_time.isoformat()
+
+
 async def test_filtered_live_context_is_forwarded_without_broad_context_lookup(setup):
     setup.entry.options["enable_device_control"] = True
     api = SimpleNamespace(
@@ -1067,7 +1081,7 @@ async def test_stop_drains_active_action_and_rejects_queued_and_late_tools(setup
     assert late.result_type == "rejected"
     finish.set()
     await asyncio.gather(stop, second_stop)
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(setup.error, match="shutting down"):
         await task
     assert sdk_futures[1].result().result_type == "rejected"
     setup.chat.llm_api.async_call_tool.assert_awaited_once()
@@ -1100,7 +1114,7 @@ async def test_closed_backend_rejects_action_after_tool_call_delta(setup):
         )
 
     setup.session.send_and_wait.side_effect = send
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(setup.error, match="shutting down"):
         await turn(setup)
     setup.chat.llm_api.async_call_tool.assert_not_awaited()
     await assert_clean(setup)
@@ -1113,13 +1127,97 @@ async def test_stop_cancels_turn_waiting_for_admission(setup):
     task = asyncio.create_task(turn(setup))
     await asyncio.sleep(0)
     await setup.backend.async_stop()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(setup.error, match="shutting down"):
         await task
     setup.token_getter.assert_not_awaited()
     setup.client.create_session.assert_not_awaited()
     for _ in range(slots):
         setup.backend._turn_slots.release()
     assert setup.backend._turn_slots._value == slots
+    await assert_clean(setup)
+
+
+async def test_stop_does_not_cancel_or_wait_for_ha_callers_cleanup(setup):
+    entered = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    errors = []
+
+    async def send(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def caller():
+        try:
+            await turn(setup)
+        except setup.error as err:
+            errors.append(str(err))
+        finally:
+            cleanup_entered.set()
+            await finish_cleanup.wait()
+
+    setup.session.send_and_wait.side_effect = send
+    task = asyncio.create_task(caller())
+    try:
+        await entered.wait()
+        owned = tuple(setup.backend._turn_tasks)
+        assert len(owned) == 1 and task not in owned
+        await asyncio.wait_for(setup.backend.async_stop(), timeout=1)
+        await asyncio.wait_for(cleanup_entered.wait(), timeout=1)
+        assert all(turn_task.done() for turn_task in owned)
+        assert not task.done()
+        assert task.cancelling() == 0
+        assert errors == ["GitHub Copilot is shutting down."]
+        setup.session.disconnect.assert_awaited_once()
+    finally:
+        finish_cleanup.set()
+        await task
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("cancel_before_stop", [False, True])
+@pytest.mark.parametrize("cancellation_count", [1, 2])
+async def test_caller_cancellation_survives_shutdown_without_interrupting_abort(
+    setup, cancel_before_stop, cancellation_count
+):
+    entered = asyncio.Event()
+    abort_entered = asyncio.Event()
+    finish_abort = asyncio.Event()
+
+    async def send(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def abort():
+        abort_entered.set()
+        await finish_abort.wait()
+
+    setup.session.send_and_wait.side_effect = send
+    setup.session.abort.side_effect = abort
+    task = asyncio.create_task(turn(setup))
+    await entered.wait()
+    owned = tuple(setup.backend._turn_tasks)
+    if cancel_before_stop:
+        task.cancel()
+        await abort_entered.wait()
+    stop = asyncio.create_task(setup.backend.async_stop())
+    await abort_entered.wait()
+    if not cancel_before_stop:
+        task.cancel()
+    await asyncio.sleep(0)
+    if cancellation_count == 2:
+        task.cancel()
+        await asyncio.sleep(0)
+    assert not stop.done()
+    assert set(owned) == setup.backend._turn_tasks
+    setup.session.disconnect.assert_not_awaited()
+    finish_abort.set()
+    await stop
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelling() == cancellation_count
+    setup.session.abort.assert_awaited_once()
+    setup.session.disconnect.assert_awaited_once()
     await assert_clean(setup)
 
 
@@ -1140,7 +1238,7 @@ async def test_stop_drains_creation_and_deletes_unreturned_session(setup):
     assert not stop.done()
     finish.set()
     await stop
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(setup.error, match="shutting down"):
         await task
     setup.session.send_and_wait.assert_not_awaited()
     setup.session.disconnect.assert_awaited_once()
@@ -1167,7 +1265,7 @@ async def test_stop_drains_abort_already_running_during_failed_turn(setup):
     setup.session.disconnect.assert_not_awaited()
     finish.set()
     await stop
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(setup.error, match="shutting down"):
         await task
     setup.session.abort.assert_awaited_once()
     setup.session.disconnect.assert_awaited_once()

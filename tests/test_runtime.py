@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -214,6 +215,13 @@ def sdk_runtime(ha_boundary, monkeypatch):
     hass = SimpleNamespace(
         data={},
         config=SimpleNamespace(path=Mock(return_value=str(Path.cwd()))),
+        bus=SimpleNamespace(async_listen_once=Mock(return_value=Mock())),
+    )
+    monkeypatch.setattr(
+        sys.modules["homeassistant.const"],
+        "EVENT_HOMEASSISTANT_STOP",
+        "homeassistant_stop",
+        raising=False,
     )
     entry = SimpleNamespace(entry_id="entry", data={}, options={})
     runtime = module.CopilotRuntime(hass, entry)
@@ -237,9 +245,8 @@ def sdk_runtime(ha_boundary, monkeypatch):
         SimpleNamespace(ConversationBackend=Mock(return_value=backend)),
     )
     directory = SimpleNamespace(name=str(Path.cwd()), cleanup=Mock())
-    monkeypatch.setattr(
-        module.tempfile, "TemporaryDirectory", Mock(return_value=directory)
-    )
+    monkeypatch.setattr(module.tempfile, "mkdtemp", Mock(return_value=directory.name))
+    monkeypatch.setattr(module.shutil, "rmtree", directory.cleanup)
     return SimpleNamespace(
         module=module,
         runtime=runtime,
@@ -286,6 +293,217 @@ async def test_probe_classifies_only_confirmed_auth_rejections_and_cleans_up(
         )
     sdk_runtime.client.stop.assert_awaited_once()
     sdk_runtime.directory.cleanup.assert_called_once()
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+async def test_probe_force_stops_before_deleting_directory(sdk_runtime, error_type):
+    error = error_type("graceful stop failed")
+    sdk_runtime.client.stop.side_effect = error
+    forced = False
+
+    async def force_stop():
+        nonlocal forced
+        sdk_runtime.directory.cleanup.assert_not_called()
+        forced = True
+
+    def remove_directory(directory):
+        assert forced
+        assert directory == Path(sdk_runtime.directory.name)
+
+    sdk_runtime.client.force_stop.side_effect = force_stop
+    sdk_runtime.directory.cleanup.side_effect = remove_directory
+    with pytest.raises(error_type) as raised:
+        await sdk_runtime.module.async_probe_models(
+            "test-pat", flow_id="flow", hass=sdk_runtime.runtime.hass
+        )
+    assert raised.value is error
+    sdk_runtime.client.force_stop.assert_awaited_once()
+    sdk_runtime.directory.cleanup.assert_called_once()
+    assert sdk_runtime.module._DATA_PROBE_CLEANUP not in sdk_runtime.runtime.hass.data
+
+
+async def test_cancelling_probe_during_stop_waits_for_force_stop(sdk_runtime):
+    stopping, forcing, forced = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def stop():
+        stopping.set()
+        await asyncio.Event().wait()
+
+    async def force_stop():
+        forcing.set()
+        await forced.wait()
+
+    sdk_runtime.client.stop.side_effect = stop
+    sdk_runtime.client.force_stop.side_effect = force_stop
+    task = asyncio.create_task(
+        sdk_runtime.module.async_probe_models(
+            "test-pat", flow_id="flow", hass=sdk_runtime.runtime.hass
+        )
+    )
+    await stopping.wait()
+    task.cancel()
+    await forcing.wait()
+    assert not task.done()
+    sdk_runtime.directory.cleanup.assert_not_called()
+    forced.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    sdk_runtime.directory.cleanup.assert_called_once()
+
+
+@pytest.mark.parametrize("error_type", [OSError, asyncio.CancelledError])
+async def test_probe_retains_client_and_directory_if_force_stop_fails(
+    sdk_runtime, error_type, caplog
+):
+    sdk_runtime.client.stop.side_effect = RuntimeError("graceful stop failed")
+    force_error = error_type("process still running")
+    sdk_runtime.client.force_stop.side_effect = force_error
+    hass = sdk_runtime.runtime.hass
+
+    with pytest.raises(error_type) as raised:
+        await sdk_runtime.module.async_probe_models(
+            "test-pat", flow_id="flow", hass=hass
+        )
+    assert raised.value is force_error
+    sdk_runtime.directory.cleanup.assert_not_called()
+    pending = list(hass.data[sdk_runtime.module._DATA_PROBE_CLEANUP].values())
+    assert len(pending) == 1
+    assert pending[0].client is sdk_runtime.client
+    assert pending[0].directory == Path(sdk_runtime.directory.name)
+    assert "Failed to force-stop a Copilot model probe" in caplog.text
+    assert "retaining its client and directory" in caplog.text
+    hass.bus.async_listen_once.assert_called_once()
+
+    sdk_runtime.client.stop.side_effect = None
+    listener = hass.bus.async_listen_once.call_args.args[1]
+    await listener(SimpleNamespace())
+    assert sdk_runtime.module._DATA_PROBE_CLEANUP not in hass.data
+    assert pending[0].client is pending[0].directory is None
+    sdk_runtime.directory.cleanup.assert_called_once()
+    hass.bus.async_listen_once.return_value.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "original_error",
+    [ReauthenticationRequired("sign in again"), asyncio.CancelledError()],
+)
+@pytest.mark.parametrize("force_fails", [False, True])
+async def test_probe_cleanup_does_not_replace_original_error(
+    sdk_runtime, original_error, force_fails, caplog
+):
+    sdk_runtime.client.list_models.side_effect = original_error
+    sdk_runtime.client.stop.side_effect = RuntimeError("graceful stop failed")
+    if force_fails:
+        sdk_runtime.client.force_stop.side_effect = OSError("process still running")
+
+    with pytest.raises(type(original_error)) as raised:
+        await sdk_runtime.module.async_probe_models(
+            "test-pat", flow_id="flow", hass=sdk_runtime.runtime.hass
+        )
+    assert raised.value is original_error
+    sdk_runtime.client.force_stop.assert_awaited_once()
+    assert "Copilot model probe cleanup reported an error" in caplog.text
+    if force_fails:
+        sdk_runtime.directory.cleanup.assert_not_called()
+        sdk_runtime.client.stop.side_effect = None
+        listener = sdk_runtime.runtime.hass.bus.async_listen_once.call_args.args[1]
+        await listener(SimpleNamespace())
+    else:
+        sdk_runtime.directory.cleanup.assert_called_once()
+
+
+async def test_next_probe_retries_failed_cleanup_before_creating_client(sdk_runtime):
+    hass = sdk_runtime.runtime.hass
+    sdk_runtime.client.stop.side_effect = RuntimeError("graceful stop failed")
+    sdk_runtime.client.force_stop.side_effect = OSError("process still running")
+    with pytest.raises(OSError):
+        await sdk_runtime.module.async_probe_models(
+            "test-pat", flow_id="first", hass=hass
+        )
+
+    with pytest.raises(OSError):
+        await sdk_runtime.module.async_probe_models(
+            "test-pat", flow_id="second", hass=hass
+        )
+    sdk_runtime.factory.assert_called_once()
+    sdk_runtime.directory.cleanup.assert_not_called()
+
+    sdk_runtime.client.stop.side_effect = None
+    models = await sdk_runtime.module.async_probe_models(
+        "test-pat", flow_id="third", hass=hass
+    )
+    assert [model.id for model in models] == ["model"]
+    assert sdk_runtime.factory.call_count == 2
+    assert sdk_runtime.directory.cleanup.call_count == 2
+    assert sdk_runtime.module._DATA_PROBE_CLEANUP not in hass.data
+
+
+async def test_probe_retains_failed_directory_cleanup_without_stopping_again(
+    sdk_runtime,
+):
+    hass = sdk_runtime.runtime.hass
+    sdk_runtime.directory.cleanup.side_effect = OSError("directory is locked")
+    with pytest.raises(OSError, match="directory is locked"):
+        await sdk_runtime.module.async_probe_models(
+            "test-pat", flow_id="flow", hass=hass
+        )
+    pending = next(iter(hass.data[sdk_runtime.module._DATA_PROBE_CLEANUP].values()))
+    assert pending.client is None
+    sdk_runtime.directory.cleanup.side_effect = None
+    await pending.async_stop()
+    sdk_runtime.client.stop.assert_awaited_once()
+    sdk_runtime.client.force_stop.assert_not_awaited()
+    assert sdk_runtime.module._DATA_PROBE_CLEANUP not in hass.data
+
+
+async def test_cancelled_directory_cleanup_is_retained_and_not_started_twice(
+    sdk_runtime,
+):
+    entered, finish = threading.Event(), threading.Event()
+
+    def remove_directory(directory):
+        entered.set()
+        assert finish.wait(timeout=5)
+
+    sdk_runtime.directory.cleanup.side_effect = remove_directory
+    hass = sdk_runtime.runtime.hass
+    task = asyncio.create_task(
+        sdk_runtime.module.async_probe_models("test-pat", flow_id="flow", hass=hass)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        pending = next(iter(hass.data[sdk_runtime.module._DATA_PROBE_CLEANUP].values()))
+        assert pending.client is None
+        assert not pending._directory_cleanup.done()
+        retry = asyncio.create_task(pending.async_stop())
+        await asyncio.sleep(0)
+        assert not retry.done()
+    finally:
+        finish.set()
+    await retry
+    sdk_runtime.directory.cleanup.assert_called_once()
+    sdk_runtime.client.stop.assert_awaited_once()
+    assert sdk_runtime.module._DATA_PROBE_CLEANUP not in hass.data
+
+
+async def test_probe_preserves_stop_cancellation_when_force_stop_fails(sdk_runtime):
+    error = asyncio.CancelledError()
+    sdk_runtime.client.stop.side_effect = error
+    sdk_runtime.client.force_stop.side_effect = OSError("process still running")
+    hass = sdk_runtime.runtime.hass
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await sdk_runtime.module.async_probe_models(
+            "test-pat", flow_id="flow", hass=hass
+        )
+    assert raised.value is error
+    sdk_runtime.directory.cleanup.assert_not_called()
+    pending = next(iter(hass.data[sdk_runtime.module._DATA_PROBE_CLEANUP].values()))
+    assert pending.client is sdk_runtime.client
+    sdk_runtime.client.stop.side_effect = None
+    await pending.async_stop()
 
 
 async def test_runtime_stop_drains_backend_before_stopping_client_and_is_idempotent(
