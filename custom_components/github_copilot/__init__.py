@@ -120,6 +120,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     )
     from .runtime import remove_entry_directory
 
+    runtime: CopilotRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if runtime is not None:
+        await runtime.async_stop()
+        _remove_stopped_runtime(hass, entry, runtime)
+
     await asyncio.to_thread(remove_entry_directory, hass, entry.entry_id)
     hass.data.get(DATA_CREDENTIAL_LOCKS, {}).pop(entry.entry_id, None)
 

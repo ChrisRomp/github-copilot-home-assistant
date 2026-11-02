@@ -10,8 +10,12 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from custom_components.github_copilot import async_setup_entry, async_unload_entry
-from custom_components.github_copilot.const import DOMAIN
+from custom_components.github_copilot import (
+    async_remove_entry,
+    async_setup_entry,
+    async_unload_entry,
+)
+from custom_components.github_copilot.const import DATA_CREDENTIAL_LOCKS, DOMAIN
 
 
 @pytest.fixture
@@ -316,6 +320,79 @@ async def test_setup_retry_cannot_overwrite_failed_cleanup(setup_entry, error_ty
         assert raised.value is error
     assert setup.hass.data[DOMAIN]["entry"] is previous
     runtime_module.CopilotRuntime.assert_not_called()
+
+
+async def test_remove_stops_runtime_retained_after_failed_setup(
+    setup_entry, monkeypatch
+):
+    from custom_components.github_copilot import runtime as runtime_module
+
+    setup = setup_entry
+    setup.runtime.async_start.side_effect = ValueError("setup failed")
+    setup.runtime.async_stop.side_effect = RuntimeError("cleanup failed")
+    with pytest.raises(ValueError, match="setup failed"):
+        await async_setup_entry(setup.hass, setup.entry)
+    assert setup.hass.data[DOMAIN]["entry"] is setup.runtime
+    setup.runtime.async_stop.side_effect = None
+
+    def remove_directory(hass, entry_id):
+        assert setup.runtime.async_stop.await_count == 2
+        assert DOMAIN not in hass.data
+        assert entry_id == setup.entry.entry_id
+
+    remove = Mock(side_effect=remove_directory)
+    monkeypatch.setattr(runtime_module, "remove_entry_directory", remove)
+    await async_remove_entry(setup.hass, setup.entry)
+    remove.assert_called_once_with(setup.hass, setup.entry.entry_id)
+    assert DOMAIN not in setup.hass.data
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+async def test_remove_preserves_state_when_retained_runtime_cannot_stop(
+    setup_entry, monkeypatch, error_type
+):
+    from homeassistant.helpers import issue_registry as ir
+
+    from custom_components.github_copilot import runtime as runtime_module
+
+    setup = setup_entry
+    error = error_type("still running")
+    setup.runtime.async_stop.side_effect = error
+    lock = object()
+    setup.hass.data = {
+        DOMAIN: {"entry": setup.runtime},
+        DATA_CREDENTIAL_LOCKS: {"entry": lock},
+    }
+    remove = Mock()
+    monkeypatch.setattr(runtime_module, "remove_entry_directory", remove)
+    with pytest.raises(error_type) as raised:
+        await async_remove_entry(setup.hass, setup.entry)
+    assert raised.value is error
+    remove.assert_not_called()
+    ir.async_delete_issue.assert_not_called()
+    assert setup.hass.data[DOMAIN]["entry"] is setup.runtime
+    assert setup.hass.data[DATA_CREDENTIAL_LOCKS]["entry"] is lock
+
+
+async def test_remove_unloaded_entry_preserves_other_runtime_and_lock(
+    setup_entry, monkeypatch
+):
+    from custom_components.github_copilot import runtime as runtime_module
+
+    setup = setup_entry
+    other = SimpleNamespace(async_stop=AsyncMock())
+    other_lock = object()
+    setup.hass.data = {
+        DOMAIN: {"other": other},
+        DATA_CREDENTIAL_LOCKS: {"entry": object(), "other": other_lock},
+    }
+    remove = Mock()
+    monkeypatch.setattr(runtime_module, "remove_entry_directory", remove)
+    await async_remove_entry(setup.hass, setup.entry)
+    remove.assert_called_once_with(setup.hass, setup.entry.entry_id)
+    other.async_stop.assert_not_awaited()
+    assert setup.hass.data[DOMAIN] == {"other": other}
+    assert setup.hass.data[DATA_CREDENTIAL_LOCKS] == {"other": other_lock}
 
 
 async def test_cancelled_setup_waits_for_cleanup(setup_entry):
