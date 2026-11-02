@@ -6,7 +6,7 @@ Use GitHub Copilot as your Home Assistant Assist conversation agent, with
 streamed replies, follow-up conversations, and optional control of exposed
 devices.
 
-[![Open in Home Assistant Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ChrisRomp&repository=ha-copilot&category=integration)
+[![Open in Home Assistant Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ChrisRomp&repository=github-copilot-home-assistant&category=integration)
 
 **This is an unofficial, community-built project, not affiliated with GitHub or
 the Home Assistant project.**
@@ -23,7 +23,7 @@ This integration supplies the conversation agent, not a complete voice pipeline.
 
 ## Installation
 
-Use the button above to add [ChrisRomp/ha-copilot](https://github.com/ChrisRomp/ha-copilot)
+Use the button above to add [ChrisRomp/github-copilot-home-assistant](https://github.com/ChrisRomp/github-copilot-home-assistant)
 as a custom repository with category **Integration**, then install the integration.
 The project is not in the default catalog.
 
@@ -70,7 +70,7 @@ on 2026.10. Restart after updating an already-loaded integration.
 
 For model or quota errors, check **Settings > Repairs**. For other problems,
 see [troubleshooting](docs/usage.md#troubleshooting) or
-[open an issue](https://github.com/ChrisRomp/ha-copilot/issues).
+[open an issue](https://github.com/ChrisRomp/github-copilot-home-assistant/issues).
 
 Developer setup and implementation notes are in the
 [development guide](docs/development.md).
