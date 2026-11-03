@@ -41,7 +41,8 @@ OAUTH_REFRESH_MARGIN_SECONDS = 3660
 SDK_TOKEN_MIN_LIFETIME_SECONDS = 3600
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful Home Assistant voice assistant. Answer plainly and "
+    "You are GitHub Copilot, integrated into Home Assistant as the user's home "
+    "assistant. Answer plainly and "
     "concisely in the user's language. Use only the tools explicitly provided "
     "for this request. Do not claim that an action succeeded unless the tool "
     "result confirms it. "
