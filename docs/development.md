@@ -101,6 +101,13 @@ on HA APIs without a targeted context tool. Generated device and request context
 is returned as tool data instead of being forwarded in HA's combined system
 prompt; existing HA tool definitions still describe the available capabilities.
 
+Fixed integration instructions replace the SDK's `identity` prompt section in
+`customize` mode, while `safety` and `custom_instructions` remain intact. Do not
+rely on top-level `content` alongside section removals: the pinned runtime omitted
+that content from the model request. Native contract tests must verify the full
+conversation/task instructions, SDK safety text, and owner instructions in the
+actual outbound messages, not just the `create_session` arguments.
+
 This separation reduces prompt-injection risk; formatting and model instructions
 alone cannot eliminate it. Context never grants permissions. Only Assist-exposed
 tools are allowed, device access remains opt-in, and other SDK permission

@@ -1256,14 +1256,18 @@ class ConversationBackend:
                 model=model_id,
                 system_message={
                     "mode": "customize",
-                    "content": AI_TASK_SYSTEM_PROMPT
-                    if task_mode
-                    else DEFAULT_SYSTEM_PROMPT,
                     "sections": {
                         **{
                             section: {"action": "remove"}
                             for section in SYSTEM_MESSAGE_SECTIONS
-                            if section not in ("safety", "custom_instructions")
+                            if section
+                            not in ("identity", "safety", "custom_instructions")
+                        },
+                        "identity": {
+                            "action": "replace",
+                            "content": AI_TASK_SYSTEM_PROMPT
+                            if task_mode
+                            else DEFAULT_SYSTEM_PROMPT,
                         },
                     },
                 },
