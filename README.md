@@ -14,8 +14,7 @@ analysis, and native image generation when available to your account. See
 
 **[Get started: setup guide with screenshots](docs/setup.md)**
 
-Walk through installation, sign-in, a test conversation, AI Tasks, and optional
-voice setup.
+Walk through installation, sign-in, a test conversation, and optional voice setup.
 
 **This is an unofficial, community-built project, not affiliated with GitHub or
 the Home Assistant project.**
@@ -47,8 +46,7 @@ For manual installation, copy `custom_components/github_copilot/` into
 ## Setup
 
 For a step-by-step walkthrough with screenshots, see the
-[setup guide](docs/setup.md), including sign-in, a test chat, AI Tasks, and voice
-setup.
+[setup guide](docs/setup.md), including sign-in, a test chat, and voice setup.
 
 1. Go to **Settings > Devices & services > Integrations > Add integration** and select
    **GitHub Copilot**.
@@ -67,10 +65,9 @@ later under **Settings > Devices & services > GitHub Copilot > Configure**.
 
 An AI Task entity is created alongside the conversation entity without another
 sign-in. Use it in scripts and automations, or choose it as your preferred provider
-under **Settings > System > AI**. Start with the
-[AI Task setup check](docs/setup.md#6-test-an-ai-task-optional), then see the
-[user guide](docs/usage.md#ai-tasks) for structured data, camera analysis, and
-image-generation examples.
+under **Settings > System > AI**. See the [AI Task usage guide](docs/usage.md#ai-tasks)
+for a first task, structured data, camera analysis, and image-generation examples,
+with links to Home Assistant's authoritative documentation.
 
 ## Privacy and limitations
 

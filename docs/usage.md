@@ -16,11 +16,19 @@ Home Assistant templates are not expanded.
 
 ## AI Tasks
 
+Home Assistant's [AI Task documentation](https://www.home-assistant.io/integrations/ai_task/)
+is the authoritative reference for task behavior. See its
+[Generate data](https://www.home-assistant.io/actions/ai_task.generate_data/) and
+[Generate image](https://www.home-assistant.io/actions/ai_task.generate_image/)
+references for action parameters. This guide adds Copilot-specific settings,
+examples, and limitations.
+
 The integration exposes an AI Task entity alongside the conversation entity.
 Use `ai_task.generate_data` to generate text or structured data in an automation
-or script. Select the entity explicitly, or configure Home Assistant's preferred
-AI Task entity before omitting `entity_id`. This integration does not change that
-preference automatically.
+or script. Select the entity explicitly, or choose it as your preferred provider
+under **Settings > System > AI** before omitting `entity_id`. This integration
+does not change that preference automatically. A voice assistant and device
+control are not required to generate text, analyze attachments, or generate images.
 
 The **AI Task model** is independent of the conversation model. Existing entries
 initially copy their saved conversation model and billing snapshot once.
@@ -28,16 +36,31 @@ initially copy their saved conversation model and billing snapshot once.
 own instructions. The task timeout defaults to 180 seconds and is configurable.
 Assist retains its 60-second timeout.
 
+### Try a text task
+
+Open **Developer tools > Actions**, switch to YAML mode, and paste this action.
+Replace the entity ID if yours differs.
+
 ```yaml
 action: ai_task.generate_data
 data:
   entity_id: ai_task.github_copilot
-  task_name: garage reminder
-  instructions: Write a short, friendly reminder that the garage door is open.
-response_variable: reminder
+  task_name: recycling reminder
+  instructions: >-
+    Write a one-sentence reminder to take out the recycling.
+    Do not control any devices.
 ```
 
-Use `{{ reminder.data }}` in a later notification action.
+Select **Perform action**. The response should contain the reminder in `data`
+and a `conversation_id`. This request uses your Copilot allowance.
+
+In a script or automation, add `response_variable: reminder` to the action and
+use `{{ reminder.data }}` in a later step. Task instructions can use Home
+Assistant templates; the conversation's **Additional instructions** cannot.
+
+### Structured output
+
+Add a `structure` to request typed fields, as in this script or automation action:
 
 ```yaml
 action: ai_task.generate_data
@@ -59,7 +82,7 @@ data:
 response_variable: comfort
 ```
 
-The response contains `data` and `conversation_id`. In the second example,
+The response contains `data` and `conversation_id`. In this example,
 `{{ comfort.data.summary }}` is the generated summary. Structured results are
 validated against HA's selector schema. Unsupported structures, invalid JSON,
 missing required values, and invalid results fail explicitly; the integration
@@ -80,6 +103,8 @@ warning summaries distinguish `provider_schema_rejected` from
 unsupported schema keywords when available. These summaries omit prompts,
 schemas, generated values, and raw provider error payloads. Neither failure
 automatically retries the task or switches models.
+
+### Device access and session lifecycle
 
 Enabling **Allow control of Assist-exposed devices** also enables those tools
 for data tasks. Disabled means no device tools, not merely an instruction to
