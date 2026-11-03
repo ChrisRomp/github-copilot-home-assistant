@@ -40,6 +40,7 @@ from homeassistant.helpers.json import json_dumps
 from homeassistant.util import dt as dt_util
 
 from .api_errors import (
+    is_authentication_error,
     is_model_unavailable_error,
     is_output_schema_error,
     is_quota_error,
@@ -230,7 +231,11 @@ class ConversationBackend:
     ) -> GeneratedImage:
         from .images import GeneratedImage
 
-        result = await self._async_submit_turn(agent_id, request, chat_log)
+        try:
+            result = await self._async_submit_turn(agent_id, request, chat_log)
+        except Exception as err:
+            self._raise_if_quota_exceeded(err)
+            raise
         if not isinstance(result, GeneratedImage):
             raise HomeAssistantError("Unexpected image task result type.")
         return result
@@ -691,12 +696,9 @@ class ConversationBackend:
                         ),
                     )
                 )
+                # The task admission owner already applies its execution deadline.
                 async with asyncio.timeout(
-                    self.entry.options.get(
-                        CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT
-                    )
-                    if is_task
-                    else REQUEST_TIMEOUT_SECONDS
+                    None if is_task else REQUEST_TIMEOUT_SECONDS
                 ):
                     async for _ in chat_log.async_add_delta_content_stream(
                         agent_id, stream()
@@ -708,6 +710,13 @@ class ConversationBackend:
                         raise
                     except Exception as err:
                         self._raise_if_quota_exceeded(err, session_error)
+                        if is_task and is_authentication_error(err, session_error):
+                            await async_start_reauth_flow(self.hass, self.entry)
+                            raise HomeAssistantError(
+                                "GitHub sign-in was rejected. Reauthenticate in "
+                                "Home Assistant. This task was not retried; "
+                                "completed actions have not been undone."
+                            ) from err
                         if (
                             is_task
                             and user_input.output_schema is not None
@@ -959,7 +968,9 @@ class ConversationBackend:
         async def cleanup() -> None:
             try:
                 await self._async_cleanup_rpc(
-                    session.abort(), "abort a failed Copilot turn"
+                    session.abort(),
+                    "abort a failed Copilot turn",
+                    force_stop_on_error=True,
                 )
             finally:
                 if not operation.done():
@@ -968,7 +979,13 @@ class ConversationBackend:
 
         await async_wait_cleanup(asyncio.create_task(cleanup()))
 
-    async def _async_cleanup_rpc(self, operation: Awaitable[Any], label: str) -> None:
+    async def _async_cleanup_rpc(
+        self,
+        operation: Awaitable[Any],
+        label: str,
+        *,
+        force_stop_on_error: bool = False,
+    ) -> None:
         """Bound SDK cleanup without applying the bound to HA actions or image IO."""
         try:
             async with asyncio.timeout(SDK_CLEANUP_TIMEOUT_SECONDS):
@@ -982,6 +999,8 @@ class ConversationBackend:
             await self._async_emergency_stop()
         except Exception as err:
             _LOGGER.warning("Unable to %s (%s)", label, type(err).__name__)
+            if force_stop_on_error:
+                await self._async_emergency_stop()
 
     async def _async_force_client(self) -> None:
         async with asyncio.timeout(SDK_FORCE_STOP_TIMEOUT_SECONDS):

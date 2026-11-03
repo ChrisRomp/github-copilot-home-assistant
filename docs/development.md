@@ -142,14 +142,19 @@ or raw provider errors in these summaries. SDK and HA logs are separate from
 these integration-owned summaries.
 
 One-shot session disposal runs in the admitting task after execution deadlines
-have ended. Abort, disconnect, delete, and graceful client stop each have a
-10-second cleanup budget; native force-stop has a separate 10-second budget.
+have ended. Data tasks use one outer execution deadline so a second timer cannot
+interrupt an already-draining HA action. Abort, disconnect, delete, and graceful
+client stop each have a 10-second cleanup budget; native force-stop has a separate
+10-second budget.
 Cleanup workers are shielded from caller cancellation and deletion is attempted
 even if disconnect is interrupted. A wedged native client is closed to new
 requests, terminated through a single-flight stop, and reloaded asynchronously
 without awaiting reload from the turn being drained. If termination fails,
 retain the client/backend and quarantine image admission for a later stop retry.
 Do not apply native cleanup deadlines to local image IO or HA device actions.
+An abort RPC error also requires confirmed native termination before releasing
+image admission; ordinary deletion failures after completed work remain
+best-effort and are logged.
 
 Task Repair content is derived from both text and vision resolutions from the
 same catalog snapshot, while diagnostics retain the actual selected task model.

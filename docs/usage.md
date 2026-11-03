@@ -124,8 +124,8 @@ Repeated task names do not share SDK history.
 
 Session disposal has its own cleanup deadlines; a response completed within the
 task timeout is not discarded merely because disconnecting takes longer.
-Cancellation still attempts deletion. If native cleanup stops responding, the
-integration force-stops that runtime and schedules a reload without replaying
+Cancellation still attempts deletion. If abort fails or native cleanup stops
+responding, the integration force-stops that runtime and schedules a reload without replaying
 requests. This can interrupt other conversations on the same entry. Forced
 termination or failed deletion can leave SDK files behind; backups remain
 sensitive. If termination cannot be confirmed, image work stays blocked until
@@ -314,6 +314,13 @@ an older generated entity ID, open the entity's settings in HA and review any
 Assist pipelines, scripts, or automations that reference it.
 
 ## Troubleshooting
+
+### GitHub sign-in errors
+
+If data-task inference reports a confirmed authentication failure, such as a
+revoked token, the integration starts Home Assistant's reauthentication flow
+even when model discovery was cached. Reauthenticate the integration; the failed
+task is not automatically replayed.
 
 ### Quota errors
 

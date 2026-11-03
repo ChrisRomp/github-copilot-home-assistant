@@ -234,8 +234,9 @@ async def test_wedged_disposal_forces_runtime_stop_and_still_attempts_delete(
     await assert_clean(setup)
 
 
+@pytest.mark.parametrize("abort_failure", ["timeout", "rpc_error"])
 async def test_wedged_abort_does_not_release_image_admission_before_native_exit(
-    setup, monkeypatch
+    setup, monkeypatch, abort_failure
 ):
     import sys
 
@@ -256,6 +257,8 @@ async def test_wedged_abort_does_not_release_image_admission_before_native_exit(
         await asyncio.Event().wait()
 
     async def abort():
+        if abort_failure == "rpc_error":
+            raise RuntimeError("Abort RPC failed")
         await asyncio.Event().wait()
 
     async def force_stop():
@@ -291,6 +294,55 @@ async def test_wedged_abort_does_not_release_image_admission_before_native_exit(
         await asyncio.gather(task, return_exceptions=True)
         if stop is not None:
             await stop
+        await setup.backend.async_stop()
+
+
+async def test_failed_abort_and_force_stop_quarantine_image_admission(
+    setup, monkeypatch
+):
+    import sys
+
+    from custom_components.github_copilot.const import DATA_IMAGE_LOCK
+
+    monkeypatch.setattr(
+        sys.modules["homeassistant.components.conversation"],
+        "AssistantContent",
+        SimpleNamespace,
+        raising=False,
+    )
+    setup.backend._image_model_getter = lambda: SimpleNamespace(id="image")
+    entered = asyncio.Event()
+
+    async def execute(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    setup.session.rpc.tools = SimpleNamespace(execute=AsyncMock(side_effect=execute))
+    setup.session.abort.side_effect = RuntimeError("Abort failed")
+    setup.client.force_stop.side_effect = OSError("Termination unconfirmed")
+    caller = asyncio.create_task(
+        setup.backend.async_generate_image(
+            "image",
+            setup.module.ImageTaskRequest(text="Draw", context=SimpleNamespace()),
+            ChatLog(),
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        setup.client.force_stop.assert_awaited_once()
+        assert setup.backend._stop_unconfirmed
+        assert setup.backend.hass.data[DATA_IMAGE_LOCK].locked()
+        setup.client.force_stop.side_effect = None
+        await setup.backend.async_stop()
+        assert not setup.backend.hass.data[DATA_IMAGE_LOCK].locked()
+        assert setup.client.force_stop.await_count == 2
+    finally:
+        setup.client.force_stop.side_effect = None
+        caller.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
         await setup.backend.async_stop()
 
 
@@ -579,6 +631,82 @@ async def test_deadline_then_shutdown_cannot_release_running_image_validation(
         await setup.backend.async_stop()
 
 
+async def test_task_deadline_cannot_recancel_a_draining_ha_action(
+    setup, monkeypatch, tmp_path
+):
+    from PIL import Image
+
+    from custom_components.github_copilot.const import DATA_IMAGE_LOCK
+
+    path = tmp_path / "small.png"
+    with Image.new("RGB", (16, 16)) as image:
+        image.save(path)
+    setup.lister.return_value = [vision_model()]
+    setup.entry.options.update(enable_device_control=True, ai_task_timeout=1)
+    draining, finish = asyncio.Event(), asyncio.Event()
+    service = asyncio.create_task(finish.wait())
+    inner_timers = []
+    original_timeout = asyncio.timeout
+
+    def timeout(delay):
+        timer = original_timeout(3600 if delay == 1 else delay)
+        if delay == 1:
+            inner_timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(setup.module.asyncio, "timeout", timeout)
+
+    async def action(*args):
+        try:
+            await asyncio.shield(service)
+        except asyncio.CancelledError:
+            draining.set()
+            await asyncio.shield(service)
+        return {"success": True}
+
+    api = action_api(side_effect=action)
+
+    async def send(*args, **kwargs):
+        tool = setup.session.set_tools.await_args.args[0][0]
+        await tool.handler(
+            ToolInvocation(tool_name=tool.name, tool_call_id="action", arguments={})
+        )
+        return SimpleNamespace(
+            data=AssistantMessageData(content="Done.", message_id="reply")
+        )
+
+    setup.session.send_and_wait.side_effect = send
+    request = task_request(
+        setup, api=api, attachments=[SimpleNamespace(path=path, mime_type="image/png")]
+    )
+    caller = asyncio.create_task(
+        setup.backend.async_generate_data("task", request, ChatLog())
+    )
+    try:
+        async with original_timeout(5):
+            await draining.wait()
+        for timer in inner_timers:
+            timer.reschedule(asyncio.get_running_loop().time())
+        done, _ = await asyncio.wait({caller}, timeout=0.05)
+        assert not done, "A second deadline must not interrupt action draining"
+        assert not service.done()
+        assert setup.backend._task_active
+        assert setup.backend.hass.data[DATA_IMAGE_LOCK].locked()
+        setup.session.disconnect.assert_not_awaited()
+        finish.set()
+        with pytest.raises(setup.error, match="AI Task timed out"):
+            await caller
+        assert not setup.backend.hass.data[DATA_IMAGE_LOCK].locked()
+        api.async_call_tool.assert_awaited_once()
+        setup.session.send_and_wait.assert_awaited_once()
+        setup.client.force_stop.assert_not_awaited()
+    finally:
+        finish.set()
+        caller.cancel()
+        await asyncio.gather(caller, service, return_exceptions=True)
+        await setup.backend.async_stop()
+
+
 @pytest.mark.parametrize(
     ("message", "keywords"),
     [
@@ -727,6 +855,59 @@ async def test_task_event_only_quota_creates_repair_without_replay(
     assert setup.lister.await_count == 1
     setup.session.send_and_wait.assert_awaited_once()
     setup.client.delete_session.assert_awaited_once()
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("source", ["exception", "event"])
+async def test_cached_task_auth_failure_starts_reauth_without_replay(
+    setup, monkeypatch, source
+):
+    setup.entry.data[CONF_AUTH_METHOD] = AUTH_METHOD_PAT
+    reauth = AsyncMock()
+    monkeypatch.setattr(setup.module, "async_start_reauth_flow", reauth)
+    await setup.backend.async_resolve_model(task_mode=True)
+    setup.lister.reset_mock()
+
+    async def send(*args, **kwargs):
+        if source == "event":
+            setup.session.on.call_args.args[0](
+                SimpleNamespace(
+                    data=SessionErrorData(
+                        error_type="provider_error",
+                        error_code="invalid_token",
+                        message="PRIVATE_PROVIDER_ERROR",
+                    )
+                )
+            )
+            raise RuntimeError("Request failed")
+        raise JsonRpcError(-32603, "HTTP 401 Unauthorized PRIVATE_PROVIDER_ERROR")
+
+    setup.session.send_and_wait.side_effect = send
+    with pytest.raises(setup.error, match="Reauthenticate") as error:
+        await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+    assert "PRIVATE_" not in str(error.value)
+    reauth.assert_awaited_once_with(setup.backend.hass, setup.entry)
+    setup.lister.assert_awaited_once_with(force_refresh=False)
+    assert not setup.backend._rejected_models
+    setup.session.send_and_wait.assert_awaited_once()
+    setup.client.create_session.assert_awaited_once()
+    setup.client.delete_session.assert_awaited_once()
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize(
+    "message", ["HTTP 403 Forbidden", "HTTP 429 Too many requests"]
+)
+async def test_task_policy_and_rate_errors_do_not_start_reauth(
+    setup, monkeypatch, message
+):
+    reauth = AsyncMock()
+    monkeypatch.setattr(setup.module, "async_start_reauth_flow", reauth)
+    setup.session.send_and_wait.side_effect = RuntimeError(message)
+    with pytest.raises(setup.error):
+        await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+    reauth.assert_not_awaited()
+    setup.session.send_and_wait.assert_awaited_once()
     await assert_clean(setup)
 
 
@@ -930,6 +1111,45 @@ async def test_invalid_generated_image_does_not_clear_quota_repair(setup, monkey
     assert (DOMAIN, "quota_exceeded_entry") in setup.issues
     setup.session.rpc.tools.execute.assert_awaited_once()
     setup.client.delete_session.assert_awaited_once()
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("source", ["discovery", "create", "execute"])
+async def test_image_quota_failures_create_repair_without_replay(
+    setup, monkeypatch, source
+):
+    import sys
+
+    monkeypatch.setattr(
+        sys.modules["homeassistant.components.conversation"],
+        "AssistantContent",
+        SimpleNamespace,
+        raising=False,
+    )
+    setup.backend._image_model_getter = lambda: SimpleNamespace(id="image")
+    error = JsonRpcError(
+        -32603, "PRIVATE_PROVIDER_ERROR", data={"error": {"code": "quota_exceeded"}}
+    )
+    setup.session.rpc.tools = SimpleNamespace(execute=AsyncMock(side_effect=error))
+    if source == "discovery":
+        wrapped = RuntimeError("Discovery failed")
+        wrapped.__cause__ = error
+        setup.lister.side_effect = wrapped
+    elif source == "create":
+        setup.client.create_session.side_effect = error
+    with pytest.raises(setup.error, match="quota exceeded") as raised:
+        await setup.backend.async_generate_image(
+            "image",
+            setup.module.ImageTaskRequest(text="Draw", context=SimpleNamespace()),
+            ChatLog(),
+        )
+    assert "PRIVATE_" not in str(raised.value)
+    assert setup.backend._quota_exceeded
+    assert (DOMAIN, "quota_exceeded_entry") in setup.issues
+    assert setup.lister.await_count == 1
+    assert setup.client.create_session.await_count <= 1
+    assert setup.session.rpc.tools.execute.await_count <= 1
+    setup.session.send_and_wait.assert_not_awaited()
     await assert_clean(setup)
 
 
