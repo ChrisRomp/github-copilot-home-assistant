@@ -134,6 +134,33 @@ def test_time_selector_uses_local_time_not_rfc3339_time():
             output.parse('{"time":"' + time + '"}')
 
 
+def test_multi_select_removes_provider_unsupported_uniqueness_constraint():
+    from homeassistant.exceptions import HomeAssistantError
+    from homeassistant.helpers.llm import selector_serializer
+    from homeassistant.helpers.selector import SelectSelector
+
+    output = prepare_output_schema(
+        vol.Schema(
+            {
+                vol.Required("chores"): SelectSelector(
+                    {"options": ["dishes", "laundry"], "multiple": True}
+                )
+            }
+        ),
+        selector_serializer,
+    )
+    field = output.provider["properties"]["chores"]
+    assert "uniqueItems" not in field
+    assert "at most once" in field["description"]
+    assert output.original["properties"]["chores"]["uniqueItems"] is True
+    assert output.parse('{"chores":["dishes","laundry"]}') == {
+        "chores": ["dishes", "laundry"]
+    }
+    assert output.parse('{"chores":[]}') == {"chores": []}
+    with pytest.raises(HomeAssistantError, match="does not match"):
+        output.parse('{"chores":["vacuuming"]}')
+
+
 def test_date_and_datetime_formats_are_not_removed():
     from homeassistant.helpers.llm import selector_serializer
     from homeassistant.helpers.selector import DateSelector, DateTimeSelector

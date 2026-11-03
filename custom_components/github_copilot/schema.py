@@ -212,6 +212,11 @@ def _strict_schema(original: dict[str, Any]) -> dict[str, Any]:
     if "array" in types:
         if "items" not in node:
             raise ValueError("Untyped array")
+        if node.pop("uniqueItems", False):
+            hint = "Return each selected value at most once."
+            node["description"] = (
+                f"{node['description']} {hint}" if node.get("description") else hint
+            )
         node["items"] = _strict_schema(node["items"])
     if "anyOf" in node:
         if sum(child.get("type") in ("object", "array") for child in node["anyOf"]) > 1:
