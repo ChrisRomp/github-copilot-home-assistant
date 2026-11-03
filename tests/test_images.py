@@ -1,6 +1,7 @@
 """Image guards use small fixtures rather than stressing the validation host."""
 
 import base64
+import random
 import struct
 import zlib
 from io import BytesIO
@@ -244,6 +245,66 @@ def test_native_asset_reference_is_resolved_and_cleared(image_setup):
         }
     )
     assert image.data == raw
+    assert not collector.assets
+
+
+def noisy_png():
+    buffer = BytesIO()
+    with Image.frombytes(
+        "RGB", (32, 32), random.Random(0).randbytes(32 * 32 * 3)
+    ) as image:
+        image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("representation", ["reference", "inline", "mixed"])
+def test_reserved_asset_payload_is_counted_once(monkeypatch, representation):
+    from custom_components.github_copilot import images
+
+    raw = noisy_png()
+    data = base64.b64encode(raw).decode()
+    budget = max(len(data) * 8, 32 * 32 * 16 + len(data) * 4)
+    monkeypatch.setattr(images, "IMAGE_WORKING_SET_BYTES", budget)
+    collector = ImageResultCollector()
+    collector.add_asset(
+        {
+            "assetId": "asset",
+            "type": "image",
+            "data": data,
+            "byteLength": len(raw),
+            "mimeType": "image/png",
+        }
+    )
+    reference = {"type": "binary_asset", "assetId": "asset"}
+    result = image_result(raw)
+    if representation == "reference":
+        result["contents"] = [reference]
+    elif representation == "mixed":
+        result["binaryResultsForLlm"] = [reference]
+    assert collector.decode(result).data == raw
+    assert not collector.assets
+
+
+def test_unreferenced_asset_payload_remains_reserved(monkeypatch):
+    from homeassistant.exceptions import HomeAssistantError
+
+    from custom_components.github_copilot import images
+
+    raw = noisy_png()
+    data = base64.b64encode(raw).decode()
+    unrelated = "A" * len(data)
+    monkeypatch.setattr(images, "IMAGE_WORKING_SET_BYTES", len(data) * 12)
+    collector = ImageResultCollector()
+    collector.add_asset(
+        {
+            "assetId": "other",
+            "type": "image",
+            "data": unrelated,
+            "mimeType": "image/png",
+        }
+    )
+    with pytest.raises(HomeAssistantError, match="processing budget"):
+        collector.decode(image_result(raw))
     assert not collector.assets
 
 

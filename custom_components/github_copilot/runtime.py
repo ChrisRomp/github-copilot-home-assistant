@@ -180,11 +180,18 @@ class CopilotRuntime:
                         # Keep ownership until native termination is confirmed.
                         self.client = client
                         self.backend = backend
-                        await self._async_force_stop_client(client)
-                        if backend is not None:
-                            backend.mark_runtime_stopped()
-                        self.client = None
-                        self.backend = None
+
+                        # Caller cancellation must not skip confirmed-stop bookkeeping.
+                        async def force_stop_and_finalize() -> None:
+                            await self._async_force_stop_client(client)
+                            if backend is not None:
+                                backend.mark_runtime_stopped()
+                            self.client = None
+                            self.backend = None
+
+                        await async_wait_cleanup(
+                            asyncio.create_task(force_stop_and_finalize())
+                        )
                         if isinstance(err, TimeoutError):
                             _LOGGER.warning(
                                 "Copilot graceful shutdown timed out; "

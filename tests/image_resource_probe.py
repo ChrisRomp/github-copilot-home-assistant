@@ -69,7 +69,9 @@ def cpu_seconds() -> float:
     return int(values["usage_usec"]) / 1_000_000
 
 
-async def probe(fixtures: Path, runtime: Path) -> None:
+async def probe(
+    fixtures: Path, runtime: Path, *, asset_representations: bool = False
+) -> None:
     assert platform.system() == "Linux" and platform.machine() == "aarch64"
     memory_limit = int(Path("/sys/fs/cgroup/memory.max").read_text())
     quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
@@ -337,10 +339,22 @@ async def probe(fixtures: Path, runtime: Path) -> None:
                 result = await session.rpc.tools.execute(
                     ToolsExecuteRequest(name="image_fixture", arguments={}), timeout=30
                 )
-                try:
-                    image = await asyncio.to_thread(
-                        ImageResultCollector().decode, result
+                collector = ImageResultCollector()
+                if asset_representations:
+                    collector.add_asset(
+                        {
+                            "assetId": "output-fixture",
+                            "type": "image",
+                            "mimeType": "image/png",
+                            "byteLength": len(raw_output),
+                            "data": base64.b64encode(raw_output).decode("ascii"),
+                        }
                     )
+                    result.setdefault("binaryResultsForLlm", []).append(
+                        {"type": "binary_asset", "assetId": "output-fixture"}
+                    )
+                try:
+                    image = await asyncio.to_thread(collector.decode, result)
                 except errors.HomeAssistantError:
                     assert not expected
                 else:
@@ -355,6 +369,7 @@ async def probe(fixtures: Path, runtime: Path) -> None:
                         "case": filename,
                         "bytes": len(raw_output),
                         "admitted": expected,
+                        "asset_representations": asset_representations,
                         "seconds": time.monotonic() - start,
                         "cpu_seconds": cpu_seconds() - cpu_start,
                         "before": before,
@@ -406,9 +421,19 @@ if __name__ == "__main__":
     parser.add_argument("--make-fixtures", type=Path)
     parser.add_argument("--fixtures", type=Path)
     parser.add_argument("--runtime", type=Path)
+    parser.add_argument("--asset-representations", action="store_true")
     args = parser.parse_args()
     if args.make_fixtures is not None:
         create_fixtures(args.make_fixtures)
     else:
         assert args.fixtures is not None and args.runtime is not None
-        asyncio.run(asyncio.wait_for(probe(args.fixtures, args.runtime), timeout=120))
+        asyncio.run(
+            asyncio.wait_for(
+                probe(
+                    args.fixtures,
+                    args.runtime,
+                    asset_representations=args.asset_representations,
+                ),
+                timeout=120,
+            )
+        )

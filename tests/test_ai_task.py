@@ -166,13 +166,18 @@ async def test_inherited_context_cannot_authorize_direct_child_call(ai_setup):
 
     with async_get_chat_session(ai_setup.hass) as session:
         ai_setup.entity.async_set_context(Context(user_id="parent"))
-        with pytest.raises(HomeAssistantError, match="public task helper"):
-            await asyncio.create_task(
-                ai_setup.entity._async_generate_data(
-                    ai_setup.ai_task.GenDataTask(name="child", instructions="child"),
-                    ChatLog(ai_setup.hass, session.conversation_id),
-                )
-            )
+
+        async def child():
+            for _ in range(2):
+                with pytest.raises(HomeAssistantError, match="public task helper"):
+                    await ai_setup.entity._async_generate_data(
+                        ai_setup.ai_task.GenDataTask(
+                            name="child", instructions="child"
+                        ),
+                        ChatLog(ai_setup.hass, session.conversation_id),
+                    )
+
+        await asyncio.create_task(child())
     ai_setup.backend.async_generate_data.assert_not_awaited()
 
 

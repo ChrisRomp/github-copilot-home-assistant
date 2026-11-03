@@ -226,6 +226,13 @@ generation requests.
 
 ## Model selection and fallback
 
+If initial model discovery fails transiently, the startup check retries in the
+background after 5 and 15 seconds. A successful discovery refreshes image
+capabilities without requiring a text request. Unknown image capabilities remain
+disabled, and confirmed authentication/quota errors or a successfully retrieved
+catalog do not trigger these retries. If retries are exhausted, check the logs,
+correct the connection problem, and reload the integration.
+
 Each time you open the configuration dialog, the integration asks Copilot for
 the current list of models. Models disabled by account or organization policy
 are omitted.

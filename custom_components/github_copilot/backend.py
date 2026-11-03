@@ -77,6 +77,7 @@ from .const import (
     SDK_CLEANUP_TIMEOUT_SECONDS,
     SDK_FORCE_STOP_TIMEOUT_SECONDS,
     SESSION_IDLE_SECONDS,
+    STARTUP_MODEL_RETRY_DELAYS,
 )
 from .models import (
     ModelResolution,
@@ -197,6 +198,7 @@ class ConversationBackend:
         self._task_model_resolution: ModelResolution | None = None
         self._task_vision_resolution: ModelResolution | None = None
         self._catalog: dict[str, Any] = {}
+        self._model_catalog_loaded = False
         self._task_active = False
         self._sessions: dict[str, _SessionRecord] = {}
         self._turn_slots = asyncio.Semaphore(MAX_CONCURRENT_TURNS)
@@ -1360,13 +1362,32 @@ class ConversationBackend:
 
     async def async_check_model(self) -> None:
         """Verify the configured model at startup so Repairs is current."""
-        for task_mode in (False, True):
-            try:
-                await self.async_resolve_model(task_mode=task_mode)
-            except HomeAssistantError:
-                pass
-            except Exception as err:  # noqa: BLE001 - startup check is best effort
-                _LOGGER.warning("Unable to verify the GitHub Copilot model: %s", err)
+        for attempt in range(len(STARTUP_MODEL_RETRY_DELAYS) + 1):
+            for task_mode in (False, True):
+                if self._closed:
+                    return
+                try:
+                    await self.async_resolve_model(task_mode=task_mode)
+                except HomeAssistantError as err:
+                    if (
+                        self._quota_exceeded
+                        or isinstance(err.__cause__, ReauthenticationRequired)
+                        or is_authentication_error(err)
+                    ):
+                        return
+                except Exception as err:  # noqa: BLE001 - startup check is best effort
+                    _LOGGER.warning(
+                        "Unable to verify the GitHub Copilot model (%s)",
+                        type(err).__name__,
+                    )
+            if self._model_catalog_loaded or self._closed:
+                return
+            if attempt < len(STARTUP_MODEL_RETRY_DELAYS):
+                await asyncio.sleep(STARTUP_MODEL_RETRY_DELAYS[attempt])
+        _LOGGER.warning(
+            "Copilot startup discovery retries exhausted; image generation remains "
+            "unavailable until model discovery succeeds"
+        )
 
     async def async_resolve_model(
         self,
@@ -1411,6 +1432,7 @@ class ConversationBackend:
         models = [model for model in models if model.id not in self._rejected_models]
         self._available_model_ids = {model.id for model in selectable_models(models)}
         self._catalog = {model.id: model for model in selectable_models(models)}
+        self._model_catalog_loaded = True
 
         budget = model_budget(
             configured,

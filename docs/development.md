@@ -126,6 +126,8 @@ context together. The provider hook consumes that record only for the matching
 request, so interleaving, inherited task contexts, and failed preparation do not
 reuse another caller. The backend provisions only Assist tools, with
 `assistant="conversation"` to reuse existing exposure rules.
+Rejected child callers retain their inherited record so retrying the same
+invalid call cannot bypass provenance checks.
 
 Tasks share execution admission, credentials, tool handling, cancellation, and
 cleanup with conversations, but have their own model/Repair state and disposable
@@ -155,9 +157,15 @@ Do not apply native cleanup deadlines to local image IO or HA device actions.
 An abort RPC error also requires confirmed native termination before releasing
 image admission; ordinary deletion failures after completed work remain
 best-effort and are logged.
+Confirmed-stop bookkeeping runs in an owned cleanup worker, so caller
+cancellation cannot skip releasing quarantined image admission after a
+successful force-stop.
 
 Task Repair content is derived from both text and vision resolutions from the
 same catalog snapshot, while diagnostics retain the actual selected task model.
+The existing startup model check performs at most two delayed retries while the
+initial catalog is unknown; it stops on shutdown, known catalog state,
+authentication rejection, or quota exhaustion.
 HA time selectors request local `HH:MM:SS` strings rather than RFC 3339 `time`
 values with offsets; original HA validation remains authoritative.
 
@@ -176,6 +184,9 @@ writable scratch directory. Generate bounded fixtures separately with
 `python tests/image_resource_probe.py --make-fixtures <directory>`, then supply
 `--fixtures` and `--runtime` inside the container. The Linux SDK/Pillow/aiohttp
 dependencies and checksum-verified native runtime must already be available.
+Add `--asset-representations` to retain an additional asset payload and repeat it
+by reference alongside the native output, exercising representation-independent
+admission while accounting for other held assets.
 
 With runtime 1.0.103, PNG/JPEG/static GIF/WebP inputs reached the fake model;
 oversized inputs were rejected before inference. The latest profile, including

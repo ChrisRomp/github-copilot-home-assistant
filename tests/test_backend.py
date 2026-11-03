@@ -162,6 +162,66 @@ async def test_tasks_are_one_shot_with_independent_model_and_prompt(setup):
     await assert_clean(setup)
 
 
+async def test_startup_model_discovery_retries_transient_failures(setup, monkeypatch):
+    setup.lister.side_effect = [
+        RuntimeError("Temporary discovery failure"),
+        RuntimeError("Temporary discovery failure"),
+        models(ORIGINAL),
+        models(ORIGINAL),
+    ]
+    sleep = AsyncMock()
+    monkeypatch.setattr(setup.module.asyncio, "sleep", sleep)
+    await setup.backend.async_check_model()
+    assert setup.lister.await_count == 4
+    sleep.assert_awaited_once_with(5)
+    assert setup.backend.active_model == ORIGINAL
+    assert setup.backend.active_task_model == ORIGINAL
+    await assert_clean(setup)
+
+
+async def test_startup_discovery_retries_are_bounded(setup, monkeypatch, caplog):
+    setup.lister.side_effect = RuntimeError("Temporary discovery failure")
+    sleep = AsyncMock()
+    monkeypatch.setattr(setup.module.asyncio, "sleep", sleep)
+    await setup.backend.async_check_model()
+    assert setup.lister.await_count == 6
+    assert [call.args[0] for call in sleep.await_args_list] == [5, 15]
+    assert "startup discovery retries exhausted" in caplog.text
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("failure", ["auth", "quota", "known-empty"])
+async def test_startup_discovery_does_not_retry_confirmed_account_state(
+    setup, monkeypatch, failure
+):
+    reauth = AsyncMock()
+    monkeypatch.setattr(setup.module, "async_start_reauth_flow", reauth)
+    sleep = AsyncMock()
+    monkeypatch.setattr(setup.module.asyncio, "sleep", sleep)
+    if failure == "auth":
+        setup.lister.side_effect = setup.module.ReauthenticationRequired("Rejected")
+    elif failure == "quota":
+        setup.lister.side_effect = RuntimeError("Quota exceeded")
+    else:
+        setup.lister.return_value = []
+    await setup.backend.async_check_model()
+    sleep.assert_not_awaited()
+    assert setup.lister.await_count <= 2
+    await assert_clean(setup)
+
+
+async def test_stopped_backend_does_not_retry_startup_discovery(setup, monkeypatch):
+    setup.lister.side_effect = RuntimeError("Temporary discovery failure")
+
+    async def sleep(delay):
+        setup.backend._closed = True
+
+    monkeypatch.setattr(setup.module.asyncio, "sleep", sleep)
+    await setup.backend.async_check_model()
+    assert setup.lister.await_count == 2
+    await assert_clean(setup)
+
+
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_task_disposal_has_its_own_deadline_and_survives_cancellation(
     setup, cancel

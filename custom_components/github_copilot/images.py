@@ -116,6 +116,7 @@ class ImageResultCollector:
             raise ValueError("Native image generation failed")
         images: dict[str, bytes] = {}
         encoded_seen: set[str] = set()
+        reserved_payloads = {asset["data"] for asset in tuple(self.assets.values())}
         total_encoded = 0
         for field in ("contents", "binaryResultsForLlm"):
             blocks = result.get(field) or []
@@ -137,7 +138,8 @@ class ImageResultCollector:
                 if digest in encoded_seen:
                     continue
                 encoded_seen.add(digest)
-                total_encoded += len(data)
+                if data not in reserved_payloads:
+                    total_encoded += len(data)
                 if (total_encoded + self.encoded_bytes) * 8 > IMAGE_WORKING_SET_BYTES:
                     raise ValueError("Image transport budget exceeded")
                 decoded = base64.b64decode(data, validate=True)

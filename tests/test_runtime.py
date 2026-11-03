@@ -710,6 +710,54 @@ async def test_runtime_stop_retains_client_for_retry_if_force_stop_also_fails(
     assert sdk_runtime.client.stop.await_count == 2
 
 
+@pytest.mark.parametrize("force_fails", [False, True])
+async def test_stop_cancellation_finalizes_only_confirmed_native_exit(
+    sdk_runtime, force_fails
+):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    image_guard = asyncio.Lock()
+    await image_guard.acquire()
+    sdk_runtime.backend.mark_runtime_stopped.side_effect = image_guard.release
+    entered, finish = asyncio.Event(), asyncio.Event()
+    sdk_runtime.client.stop.side_effect = RuntimeError("Graceful stop failed")
+
+    async def force_stop():
+        entered.set()
+        await finish.wait()
+        if force_fails:
+            raise OSError("Native termination failed")
+
+    sdk_runtime.client.force_stop.side_effect = force_stop
+    caller = asyncio.create_task(runtime.async_stop())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        caller.cancel()
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        assert not caller.done()
+        assert image_guard.locked()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        if force_fails:
+            assert runtime.client is sdk_runtime.client
+            assert runtime.backend is sdk_runtime.backend
+            sdk_runtime.backend.mark_runtime_stopped.assert_not_called()
+            assert image_guard.locked()
+        else:
+            assert runtime.client is runtime.backend is None
+            sdk_runtime.backend.mark_runtime_stopped.assert_called_once()
+            assert not image_guard.locked()
+    finally:
+        finish.set()
+        await asyncio.gather(caller, return_exceptions=True)
+        sdk_runtime.client.stop.side_effect = None
+        sdk_runtime.client.force_stop.side_effect = None
+        await runtime.async_stop()
+
+
 async def test_runtime_graceful_stop_timeout_forces_exit(sdk_runtime, monkeypatch):
     monkeypatch.setattr(sdk_runtime.module, "SDK_CLEANUP_TIMEOUT_SECONDS", 0.01)
     await sdk_runtime.runtime.async_start()

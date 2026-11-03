@@ -107,7 +107,6 @@ class GitHubCopilotAITaskEntity(ai_task.AITaskEntity):
 
     def _consume_context(self, chat_log: conversation.ChatLog) -> Context | None:
         captured = _request_context.get()
-        _request_context.set(None)
         session = current_session.get()
         if self.entry.options.get(CONF_ENABLE_DEVICE_CONTROL) and (
             session is None
@@ -121,6 +120,7 @@ class GitHubCopilotAITaskEntity(ai_task.AITaskEntity):
                 "AI Tasks with device control must use Home Assistant's task service "
                 "or public task helper so caller context can be preserved."
             )
+        _request_context.set(None)
         if (
             captured is not None
             and captured.entity is self
