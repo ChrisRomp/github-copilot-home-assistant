@@ -64,6 +64,24 @@ checksum, storage, and unsupported-platform failures are reported during setup.
 Removing an integration entry removes only that entry's runtime state, not
 this shared versioned cache.
 
+Per-entry SDK sessions are stored under
+`<config>/.storage/github_copilot/<entry-id>/session-state/<session-id>/`.
+Before creating the backend, startup scans a bounded number of directory entries
+for canonical SDK UUID directories and uses `delete_session()` to remove inactive
+sessions. Native `list_sessions()` omits sessions without recorded turns, so it
+cannot discover all crash leftovers. No session contents are read for discovery.
+Symlinked storage roots and session directories are rejected or skipped, and each
+candidate is checked again before deletion.
+
+Deletion relies on the native runtime's cross-process session ownership locks.
+The cleanup gate is pinned to the tested runtime version; reverify it when
+upgrading the SDK. The native contract test covers an active second process,
+disconnected/incomplete sessions, forced-stop leftovers, entry isolation, and
+nested links to unrelated files. There is no recursive filesystem-deletion
+fallback if SDK deletion fails. Startup cleanup is bounded to 200 entries,
+25 deletion attempts, and 10 seconds; failures are reported without session
+summaries, IDs, paths, or raw native errors.
+
 Session cleanup and backup implications are described in the
 [user guide](usage.md#conversation-data-and-privacy).
 

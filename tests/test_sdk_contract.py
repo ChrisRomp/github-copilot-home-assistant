@@ -21,6 +21,98 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+async def test_native_startup_cleanup_protects_active_owner_and_recovers_crash(
+    tmp_path, caplog
+):
+    import asyncio
+
+    from copilot import ToolSet
+
+    from custom_components.github_copilot.session_cleanup import (
+        VERIFIED_RUNTIME,
+        async_cleanup_startup_sessions,
+    )
+
+    assert CLI_VERSION == VERIFIED_RUNTIME, "Reverify native ownership before upgrading"
+    path = (
+        get_cache_dir(CLI_VERSION)
+        / "prebuilds"
+        / get_runtime_platform()
+        / "copilot-runtime"
+    )
+    if not path.is_file():
+        pytest.skip("Native SDK runtime is not already cached")
+    base = tmp_path / ".storage" / "github_copilot" / "entry"
+    clients = [
+        CopilotClient(
+            connection=RuntimeConnection.for_stdio(path=str(path)),
+            base_directory=str(base),
+            use_logged_in_user=False,
+            mode="empty",
+            log_level="error",
+            session_idle_timeout_seconds=0,
+        )
+        for _ in range(2)
+    ]
+    owner, cleaner = clients
+    try:
+        await owner.start()
+        options = {
+            "model": "gpt-4.1",
+            "available_tools": ToolSet().add_custom("*"),
+            "provider": {
+                "type": "openai",
+                "wire_api": "completions",
+                "base_url": "http://127.0.0.1:9/v1",
+                "api_key": "local-test-not-a-credential",
+            },
+            "enable_session_store": False,
+            "enable_config_discovery": False,
+            "enable_skills": False,
+            "enable_file_hooks": False,
+            "enable_host_git_operations": False,
+            "skip_custom_instructions": True,
+        }
+        active = await owner.create_session(**options)
+        abandoned = await owner.create_session(**options)
+        active_path = active.workspace_path
+        abandoned_path = abandoned.workspace_path
+        assert active_path is not None and abandoned_path is not None
+        await abandoned.disconnect()
+        sentinel = tmp_path / "outside" / "preserve.txt"
+        sentinel.parent.mkdir()
+        sentinel.write_text("PRESERVE_OUTSIDE_ENTRY")
+        (abandoned_path / "files" / "outside-link").symlink_to(
+            sentinel.parent, target_is_directory=True
+        )
+        other_entry = base.parent / "other-entry" / "session-state"
+        other_session = other_entry / abandoned.session_id
+        other_session.mkdir(parents=True)
+
+        await cleaner.start()
+        listed = await cleaner.list_sessions()
+        assert abandoned.session_id not in {s.session_id for s in listed}, (
+            "Native list omits sessions that have not recorded a turn"
+        )
+        await async_cleanup_startup_sessions(cleaner, base)
+        assert active_path.is_dir(), "Another live runtime must retain its session"
+        assert not abandoned_path.exists(), "Inactive incomplete sessions are cleaned"
+        assert other_session.is_dir()
+        assert sentinel.read_text() == "PRESERVE_OUTSIDE_ENTRY"
+        assert "failed=1" in caplog.text
+        assert active.session_id not in caplog.text
+
+        await owner.force_stop()
+        await async_cleanup_startup_sessions(cleaner, base)
+        assert not active_path.exists(), "Dead owner locks must not prevent recovery"
+        assert other_session.is_dir()
+        await async_cleanup_startup_sessions(cleaner, base)
+        assert sentinel.is_file()
+    finally:
+        for client in clients:
+            await asyncio.wait_for(client.force_stop(), 10)
+
+
 @pytest.mark.parametrize("context_source", ["assist_api", "request", "live_state"])
 async def test_native_device_context_is_tool_data_not_system_instructions(
     ha_boundary, tmp_path, context_source

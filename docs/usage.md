@@ -106,6 +106,20 @@ termination or failed deletion can leave SDK files behind; backups remain
 sensitive. If termination cannot be confirmed, image work stays blocked until
 the runtime can be stopped safely.
 
+On integration startup or reload, a bounded cleanup pass attempts to remove
+abandoned SDK sessions from that entry's `session-state` directory. It checks at
+most 200 directory entries and attempts at most 25 deletions within a total
+10-second budget, before admitting new requests. The verified native runtime
+refuses deletion of sessions still owned by another process. Linked directories
+and unrecognized names are not followed or removed.
+
+Cleanup failures and limits produce a warning with counts, not session contents.
+Remaining data can be revisited on a later startup; this is not a periodic
+retention service or a guarantee of capped disk usage. Cleanup is disabled on
+native runtime versions whose ownership safeguards have not been verified.
+Credentials, shared runtime caches, HA traces, generated media, and backups are
+not removed by this pass.
+
 ### Camera and image analysis
 
 Choose an AI Task model that reports vision support and image limits. Static
@@ -238,9 +252,10 @@ user, and originating device. The SDK can write session files while a chat is
 active. The integration deletes its SDK sessions when HA releases a chat, when
 an idle session is cleaned up, and during normal unload or shutdown.
 
-An abrupt exit or failed cleanup can leave files behind, and backups taken
-while a chat is active may include conversation data. A Home Assistant restart
-starts fresh conversations. Credentials and settings remain in Home Assistant's
+An abrupt exit or failed cleanup can leave files behind; startup cleanup attempts
+bounded recovery of abandoned SDK sessions. Backups taken while a chat is active
+may include conversation data. A Home Assistant restart starts fresh
+conversations. Credentials and settings remain in Home Assistant's
 config-entry storage; treat that storage and Home Assistant backups as sensitive.
 
 Device control only uses the Home Assistant Assist API selected for the request.

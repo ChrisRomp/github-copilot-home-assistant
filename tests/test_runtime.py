@@ -281,11 +281,14 @@ def sdk_runtime(ha_boundary, monkeypatch):
     monkeypatch.setattr(
         module, "async_runtime_path", AsyncMock(return_value="/unused-runtime")
     )
+    startup_cleanup = AsyncMock()
+    monkeypatch.setattr(module, "async_cleanup_startup_sessions", startup_cleanup)
     backend = SimpleNamespace(async_stop=AsyncMock(), mark_runtime_stopped=Mock())
+    backend_factory = Mock(return_value=backend)
     monkeypatch.setitem(
         sys.modules,
         "custom_components.github_copilot.backend",
-        SimpleNamespace(ConversationBackend=Mock(return_value=backend)),
+        SimpleNamespace(ConversationBackend=backend_factory),
     )
     directory = SimpleNamespace(name=str(Path.cwd()), cleanup=Mock())
     monkeypatch.setattr(module.tempfile, "mkdtemp", Mock(return_value=directory.name))
@@ -296,6 +299,8 @@ def sdk_runtime(ha_boundary, monkeypatch):
         client=client,
         factory=factory,
         backend=backend,
+        backend_factory=backend_factory,
+        startup_cleanup=startup_cleanup,
         directory=directory,
     )
 
@@ -307,6 +312,32 @@ async def test_runtime_disables_native_expiry_so_backend_owns_session_lifetime(
     assert sdk_runtime.factory.call_args.kwargs["session_idle_timeout_seconds"] == 0
     assert sdk_runtime.runtime.is_started
     await sdk_runtime.runtime.async_stop()
+
+
+async def test_runtime_cleans_abandoned_sessions_before_admitting_requests(sdk_runtime):
+    async def cleanup(client, directory):
+        sdk_runtime.client.start.assert_awaited_once()
+        assert client is sdk_runtime.client
+        assert directory is sdk_runtime.runtime.base_directory
+        assert not sdk_runtime.runtime.is_started
+        sdk_runtime.backend_factory.assert_not_called()
+
+    sdk_runtime.startup_cleanup.side_effect = cleanup
+    await sdk_runtime.runtime.async_start()
+    sdk_runtime.startup_cleanup.assert_awaited_once()
+    sdk_runtime.backend_factory.assert_called_once()
+    assert sdk_runtime.runtime.is_started
+    await sdk_runtime.runtime.async_stop()
+
+
+async def test_cancelled_startup_cleanup_does_not_create_backend(sdk_runtime):
+    sdk_runtime.startup_cleanup.side_effect = asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await sdk_runtime.runtime.async_start()
+    sdk_runtime.backend_factory.assert_not_called()
+    assert not sdk_runtime.runtime.is_started
+    await sdk_runtime.runtime.async_stop()
+    sdk_runtime.client.stop.assert_awaited_once()
 
 
 @pytest.mark.parametrize("failed_stage", ["start", "list_models"])

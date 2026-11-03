@@ -38,6 +38,7 @@ from .const import (
 )
 from .models import model_billing
 from .provisioning import async_runtime_path
+from .session_cleanup import async_cleanup_startup_sessions
 
 if TYPE_CHECKING:
     from copilot.client import GitHubTokenProviderArgs, GitHubTokenProviderResult
@@ -95,6 +96,7 @@ class CopilotRuntime:
             log_level="error",
         )
         await self.client.start()
+        await async_cleanup_startup_sessions(self.client, self.base_directory)
         from .backend import ConversationBackend
 
         client = self.client
