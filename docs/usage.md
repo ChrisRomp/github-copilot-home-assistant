@@ -255,6 +255,14 @@ On Home Assistant 2026.11 or newer, updates appear under **Settings > Updates**.
 On 2026.10, use HACS to update. Restart Home Assistant after updating an
 already-loaded integration.
 
+Upgrading from 0.2.x to 0.3.0 adds an AI Task entity to each existing entry without
+another sign-in. Its model is initially copied from the saved conversation model
+and then remains independently configurable; its timeout defaults to 180 seconds.
+Existing conversation settings and Assist exposure choices are preserved. The
+device-control setting also applies to data tasks, so review it before adding
+automations that should only generate text or analyze images. Your preferred
+AI Task provider is not changed automatically.
+
 When upgrading Home Assistant from HACS to Marketplace, Home Assistant carries
 over the custom repository. Keep the existing GitHub Copilot configuration;
 there is no need to remove and re-add the integration.

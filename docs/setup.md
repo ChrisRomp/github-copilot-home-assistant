@@ -1,8 +1,8 @@
 # Set up GitHub Copilot for Home Assistant
 
 This guide walks you through installing the integration, connecting your GitHub
-account, and testing a conversation. You can then use GitHub Copilot as the
-conversation agent for a Home Assistant voice assistant.
+account, and testing conversations and AI Tasks. You can then use GitHub Copilot
+in automations and as the conversation agent for a Home Assistant voice assistant.
 
 ## Before you begin
 
@@ -16,8 +16,9 @@ You need:
   [HACS](https://www.hacs.xyz/docs/use/download/download/) installed separately
   on 2026.10.
 
-GitHub Copilot processes conversations in the cloud. Prompts, relevant device
-information, and tool results are sent to GitHub Copilot. See
+GitHub Copilot processes conversations and AI Tasks in the cloud. Prompts,
+attached images, relevant device information, and tool results are sent to GitHub
+Copilot. See
 [conversation data and privacy](usage.md#conversation-data-and-privacy) for
 details.
 
@@ -96,10 +97,12 @@ Keep tokens private and out of screenshots, issue reports, and chat messages.
 ## 4. Choose your conversation and task settings
 
 After authentication, the **Configure GitHub Copilot** dialog lets you choose
-how the conversation agent and AI Task entity behave. The screenshot below
-predates the separate AI Task model and timeout fields.
+how the conversation agent and AI Task entity behave.
 
-![The configuration dialog showing the Model selector, device-control toggle, and Additional instructions field.](images/setup/configure-integration.png)
+![The configuration dialog with separate Conversation model and AI Task model selectors, a 180-second AI Task timeout, the device-control toggle, and Additional instructions.](images/setup/configure-integration.png)
+
+The selected models are examples; availability depends on your account. The
+screenshot shows device control enabled, but it is **off by default**.
 
 | Setting | What to choose |
 | --- | --- |
@@ -108,6 +111,11 @@ predates the separate AI Task model and timeout fields.
 | **AI Task timeout (seconds)** | Defaults to 180 seconds. This does not change Assist's 60-second timeout. |
 | **Allow control of Assist-exposed devices** | Allows conversations and AI Tasks to use Assist-exposed tools. It is **off by default**. |
 | **Additional instructions** | Instructions for conversations only, such as "Keep replies brief and use Celsius." AI Tasks use the instructions supplied by each action. |
+
+For camera or image analysis, choose an AI Task model with vision support.
+Supported image formats and the number of images per request vary by model.
+Native image generation uses the account's available image model, not either
+of these chat-model selections.
 
 Additional instructions are literal text, not Home Assistant templates. If you
 enable device control, review which entities you have exposed to Assist.
@@ -146,7 +154,45 @@ control, you can also try a request for a device you exposed to Assist, such as
 Device access depends on your settings; the example response in the screenshot
 does not enable those capabilities.
 
-## 6. Add a voice assistant (optional)
+## 6. Test an AI Task (optional)
+
+AI Tasks generate text or structured data for scripts and automations. They can
+also analyze attached camera snapshots and generate images when your account
+supports it. You do not need to configure a voice assistant or enable device
+control to use these features.
+
+1. Open **Developer tools > Actions** and switch to YAML mode.
+2. Paste the following action, replacing the entity ID if yours differs:
+
+   ```yaml
+   action: ai_task.generate_data
+   data:
+     entity_id: ai_task.github_copilot
+     task_name: recycling reminder
+     instructions: >-
+       Write a one-sentence reminder to take out the recycling.
+       Do not control any devices.
+   ```
+
+3. Select **Perform action**. The response should contain the reminder in `data`
+   and a `conversation_id`. This request uses your Copilot allowance.
+
+In a script or automation, add `response_variable: reminder` to the action and
+use `{{ reminder.data }}` in a later step. Task instructions can use Home
+Assistant templates; the conversation's **Additional instructions** cannot.
+
+To make GitHub Copilot the preferred provider for AI Tasks, open
+**Settings > System > AI** and select its AI Task entity for the relevant
+capability. This is optional; the example above selects the entity explicitly.
+The integration does not change your preferred provider automatically.
+
+See the user guide for [structured output](usage.md#ai-tasks),
+[camera and image analysis](usage.md#camera-and-image-analysis), and
+[image generation](usage.md#image-generation). Start with a small image or a
+lower-resolution camera source: model limits and host resource guards both
+apply. Reference-image editing and document attachments are not supported.
+
+## 7. Add a voice assistant (optional)
 
 GitHub Copilot supplies the **conversation agent**. It does not provide
 speech-to-text or text-to-speech services.
@@ -178,6 +224,7 @@ For tips on which entities to expose, naming devices and areas, and adding
 aliases, see Home Assistant's
 [best practices with Assist](https://www.home-assistant.io/voice_control/best_practices/).
 
-See the [user guide](usage.md) for model fallback, changing settings, updates,
-and data handling. If setup or a conversation fails, start with
+See the [user guide](usage.md) for AI Task examples, model fallback, changing
+settings, updates, and data handling. If setup, a conversation, or an AI Task
+fails, start with
 [troubleshooting](usage.md#troubleshooting).

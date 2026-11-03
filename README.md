@@ -14,7 +14,8 @@ analysis, and native image generation when available to your account. See
 
 **[Get started: setup guide with screenshots](docs/setup.md)**
 
-Walk through installation, sign-in, a test conversation, and optional voice setup.
+Walk through installation, sign-in, a test conversation, AI Tasks, and optional
+voice setup.
 
 **This is an unofficial, community-built project, not affiliated with GitHub or
 the Home Assistant project.**
@@ -46,20 +47,30 @@ For manual installation, copy `custom_components/github_copilot/` into
 ## Setup
 
 For a step-by-step walkthrough with screenshots, see the
-[setup guide](docs/setup.md), including sign-in, a test chat, and voice setup.
+[setup guide](docs/setup.md), including sign-in, a test chat, AI Tasks, and voice
+setup.
 
 1. Go to **Settings > Devices & services > Integrations > Add integration** and select
    **GitHub Copilot**.
 2. Sign in with GitHub (recommended). Alternatively, use a fine-grained PAT
    with the **Copilot Requests** account permission. Classic PATs are not supported.
-3. Choose a model. You can also enable **Allow control of Assist-exposed devices**
-   and provide **Additional instructions** on this setup screen.
+3. Choose a **Conversation model** and, optionally, a different **AI Task model**.
+   The task timeout defaults to 180 seconds. You can also enable
+   **Allow control of Assist-exposed devices** and provide conversation-only
+   **Additional instructions** on this setup screen.
 4. Under **Settings > Voice assistants**, add or edit an assistant and select
    **GitHub Copilot** as its conversation agent.
 
-Device control is off by default. Only entities you expose to Assist are
-available. You can change the model, device control, and additional instructions
+Device control is off by default and applies to both conversations and AI Tasks.
+Only entities you expose to Assist are available. You can change these settings
 later under **Settings > Devices & services > GitHub Copilot > Configure**.
+
+An AI Task entity is created alongside the conversation entity without another
+sign-in. Use it in scripts and automations, or choose it as your preferred provider
+under **Settings > System > AI**. Start with the
+[AI Task setup check](docs/setup.md#6-test-an-ai-task-optional), then see the
+[user guide](docs/usage.md#ai-tasks) for structured data, camera analysis, and
+image-generation examples.
 
 ## Privacy and limitations
 
