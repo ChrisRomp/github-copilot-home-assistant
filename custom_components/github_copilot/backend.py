@@ -43,6 +43,7 @@ from .api_errors import (
     is_model_unavailable_error,
     is_output_schema_error,
     is_quota_error,
+    unsupported_schema_keywords,
 )
 from .auth import OAuthError, ReauthenticationRequired, async_start_reauth_flow
 from .cleanup import async_wait_cleanup
@@ -83,7 +84,12 @@ from .models import (
     selectable_models,
     supports_vision,
 )
-from .schema import OutputSchema, convert_tool_schema, prepare_output_schema
+from .schema import (
+    OutputSchema,
+    OutputValidationError,
+    convert_tool_schema,
+    prepare_output_schema,
+)
 
 if TYPE_CHECKING:
     from copilot.client import GitHubTokenProviderArgs, GitHubTokenProviderResult
@@ -419,7 +425,15 @@ class ConversationBackend:
                 "GitHub Copilot returned no task result. The request was not "
                 "retried; completed actions have not been undone."
             )
-        data = request.output_schema.parse(text) if request.output_schema else text
+        try:
+            data = request.output_schema.parse(text) if request.output_schema else text
+        except OutputValidationError:
+            _LOGGER.warning(
+                "GitHub Copilot AI Task failed: operation=generate_data model=%s "
+                "category=output_validation_failed; no retry attempted",
+                request.model_id,
+            )
+            raise
         self._clear_quota_issue()
         return data
 
@@ -695,9 +709,21 @@ class ConversationBackend:
                     except Exception as err:
                         if is_task and is_output_schema_error(err, session_error):
                             self._raise_if_quota_exceeded(err, session_error)
+                            keywords = unsupported_schema_keywords(err, session_error)
+                            _LOGGER.warning(
+                                "GitHub Copilot AI Task failed: "
+                                "operation=generate_data "
+                                "model=%s category=provider_schema_rejected "
+                                "unsupported_keywords=%s; "
+                                "no fallback or retry attempted",
+                                record.model_id,
+                                ",".join(keywords) or "unknown",
+                            )
                             raise HomeAssistantError(
-                                "The AI Task model could not produce the requested "
-                                "structured response. No fallback or retry was "
+                                f"The AI Task model '{record.model_id}' rejected the "
+                                "requested structured response schema. Simplify the "
+                                "structure or select a different AI Task model. "
+                                "No fallback or retry was "
                                 "attempted; completed actions have not been undone."
                             ) from err
                         if is_task and not is_model_unavailable_error(

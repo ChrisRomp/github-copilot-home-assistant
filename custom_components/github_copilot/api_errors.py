@@ -32,8 +32,19 @@ _SCHEMA_CODES = {
     "schema_validation_error",
 }
 _SCHEMA_MESSAGE = re.compile(
-    r"\b(?:response[_ -]?format|json[_ -]?schema|structured (?:output|response))\b",
+    r"\b(?:response[_ -]?format|json[_ -]?schema|structured (?:output|response)"
+    r"|output_config\.format\.schema)\b",
     re.IGNORECASE,
+)
+_SCHEMA_KEYWORD = (
+    r"(?:additionalProperties|uniqueItems|minItems|maxItems|minimum|maximum|"
+    r"exclusiveMinimum|exclusiveMaximum|multipleOf|minLength|maxLength|pattern|format)"
+)
+_UNSUPPORTED_SCHEMA_KEYWORDS = re.compile(
+    rf"(?<!\w)(?P<keywords>['\"]?{_SCHEMA_KEYWORD}['\"]?"
+    rf"(?:\s*,\s*['\"]?{_SCHEMA_KEYWORD}['\"]?)*)\s+"
+    r"(?:values\b[^.\n]{0,80}\s+)?(?:is|are)\s+not\s+"
+    r"(?:supported|permitted|allowed)\b"
 )
 _AUTH_CODES = {
     "401",
@@ -90,23 +101,20 @@ def _details(payload: Mapping[str, Any]) -> Iterator[tuple[str, str]]:
             yield key, str(value)
 
 
-def _matches(
-    error: Exception,
-    event: SessionErrorData | None,
-    codes: set[str],
-    message_pattern: re.Pattern[str],
-) -> bool:
-    payloads: list[Mapping[str, Any]] = []
+def _error_details(
+    error: Exception, event: SessionErrorData | None
+) -> Iterator[tuple[str, str]]:
+    """Read only error metadata from events and exception chains."""
     if event is not None:
-        payloads.append(event.to_dict())
+        yield from _details(event.to_dict())
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         data = getattr(current, "data", None)
         if isinstance(data, Mapping):
-            payloads.append(data)
-        payloads.append(
+            yield from _details(data)
+        yield from _details(
             {
                 "code": getattr(current, "code", None),
                 "message": str(current),
@@ -115,6 +123,14 @@ def _matches(
             }
         )
         current = current.__cause__
+
+
+def _matches(
+    error: Exception,
+    event: SessionErrorData | None,
+    codes: set[str],
+    message_pattern: re.Pattern[str],
+) -> bool:
     return any(
         (
             bool(message_pattern.search(value))
@@ -125,8 +141,7 @@ def _matches(
         )
         if key == "message"
         else value.lower().replace("-", "_") in codes
-        for payload in payloads
-        for key, value in _details(payload)
+        for key, value in _error_details(error, event)
     )
 
 
@@ -147,6 +162,23 @@ def is_output_schema_error(
 ) -> bool:
     """Keep request-format failures out of model availability recovery."""
     return _matches(error, event, _SCHEMA_CODES, _SCHEMA_MESSAGE)
+
+
+def unsupported_schema_keywords(
+    error: Exception, event: SessionErrorData | None = None
+) -> tuple[str, ...]:
+    """Return only allowlisted keywords explicitly described as unsupported."""
+    return tuple(
+        sorted(
+            {
+                keyword
+                for key, value in _error_details(error, event)
+                if key == "message"
+                for match in _UNSUPPORTED_SCHEMA_KEYWORDS.finditer(value)
+                for keyword in re.findall(_SCHEMA_KEYWORD, match["keywords"])
+            }
+        )
+    )
 
 
 def is_authentication_error(

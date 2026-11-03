@@ -72,6 +72,15 @@ constraints, and array lengths that are not accepted by all models' strict outpu
 APIs. The original HA selectors still validate the returned selections, numeric
 bounds, and array lengths.
 
+If a model rejects the structured response schema, the error names the model
+and recommends simplifying the structure or selecting another AI Task model.
+This is different from HA rejecting an invalid generated result. Integration
+warning summaries distinguish `provider_schema_rejected` from
+`output_validation_failed`, identify the active model, and include recognized
+unsupported schema keywords when available. These summaries omit prompts,
+schemas, generated values, and raw provider error payloads. Neither failure
+automatically retries the task or switches models.
+
 Enabling **Allow control of Assist-exposed devices** also enables those tools
 for data tasks. Disabled means no device tools, not merely an instruction to
 avoid them. Tasks use the existing Assist exposure choices and the action's

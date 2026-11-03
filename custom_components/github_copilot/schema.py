@@ -24,9 +24,14 @@ except ModuleNotFoundError as err:
 __all__ = [
     "UNSUPPORTED",
     "OutputSchema",
+    "OutputValidationError",
     "convert_tool_schema",
     "prepare_output_schema",
 ]
+
+
+class OutputValidationError(HomeAssistantError):
+    """The generated result failed the original HA output contract."""
 
 
 def convert_tool_schema(
@@ -59,7 +64,7 @@ class OutputSchema:
                 raise ValueError("Expected a validated object")
             _check_finite(data)
         except (Invalid, ValueError, TypeError, OverflowError, RecursionError) as err:
-            raise HomeAssistantError(
+            raise OutputValidationError(
                 "GitHub Copilot returned data that does not match the requested "
                 "structure. The task was not retried; any completed actions "
                 "have not been undone."

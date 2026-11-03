@@ -391,26 +391,44 @@ async def test_task_uses_final_json_not_progress_text(setup, monkeypatch):
 
 
 async def test_invalid_task_data_does_not_clear_quota_or_trigger_fallback(
-    setup, monkeypatch
+    setup, monkeypatch, caplog
 ):
     from custom_components.github_copilot.schema import (
         HomeAssistantError as SchemaError,
     )
 
     monkeypatch.setattr(setup.module.llm, "selector_serializer", None, raising=False)
+    setup.entry.options["ai_task_model"] = FALLBACK
     setup.backend.report_quota_exceeded()
+    caplog.clear()
     setup.session.send_and_wait.return_value = SimpleNamespace(
-        data=AssistantMessageData(content='{"wrong":1}', message_id="final")
+        data=AssistantMessageData(
+            content='{"PRIVATE_GENERATED_FIELD":"PRIVATE_GENERATED_VALUE"}',
+            message_id="final",
+        )
     )
     # schema.py uses HA's real exception class rather than the backend boundary double.
     with pytest.raises((SchemaError, setup.error), match="does not match"):
         await setup.backend.async_generate_data(
             "task-agent",
-            task_request(setup, structure=vol.Schema({vol.Required("answer"): str})),
+            task_request(
+                setup,
+                text="PRIVATE_TASK_INSTRUCTIONS",
+                structure=vol.Schema({vol.Required("PRIVATE_SCHEMA_FIELD"): str}),
+            ),
             ChatLog(),
         )
+    assert "operation=generate_data" in caplog.text
+    assert f"model={FALLBACK}" in caplog.text
+    assert "category=output_validation_failed" in caplog.text
+    assert "provider_schema_rejected" not in caplog.text
+    assert "PRIVATE_" not in caplog.text
+    assert len(caplog.records) == 1
+    assert caplog.records[0].exc_info is None
     assert setup.backend._quota_exceeded
+    assert not setup.backend._rejected_models
     assert setup.lister.await_count == 1
+    setup.session.send_and_wait.assert_awaited_once()
     setup.client.delete_session.assert_awaited_once()
     await assert_clean(setup)
 
@@ -558,19 +576,101 @@ async def test_deadline_then_shutdown_cannot_release_running_image_validation(
         await setup.backend.async_stop()
 
 
-async def test_schema_rejection_does_not_mark_model_unavailable(setup, monkeypatch):
+@pytest.mark.parametrize(
+    ("message", "keywords"),
+    [
+        (
+            "model_not_supported: response_format json_schema is not supported",
+            "unknown",
+        ),
+        (
+            "400 Invalid schema for response_format 'response': "
+            "In context=('properties', 'PRIVATE_SCHEMA_FIELD'), "
+            "'uniqueItems' is not permitted.",
+            "uniqueItems",
+        ),
+        (
+            "400 output_config.format.schema: For 'number' type, "
+            "properties maximum, minimum are not supported",
+            "maximum,minimum",
+        ),
+        (
+            "400 output_config.format.schema: For 'array' type, "
+            "'minItems' values other than 0 or 1 are not supported (got: [2, 5])",
+            "minItems",
+        ),
+    ],
+)
+@pytest.mark.parametrize("source", ["exception", "event"])
+async def test_schema_rejection_does_not_mark_model_unavailable(
+    setup, monkeypatch, caplog, message, keywords, source
+):
     monkeypatch.setattr(setup.module.llm, "selector_serializer", None, raising=False)
-    setup.session.send_and_wait.side_effect = RuntimeError(
-        "model_not_supported: response_format json_schema is not supported"
+    setup.entry.options["ai_task_model"] = FALLBACK
+    message += " PRIVATE_PROVIDER_PAYLOAD"
+
+    async def send(*args, **kwargs):
+        if source == "event":
+            setup.session.on.call_args.args[0](
+                SimpleNamespace(
+                    agent_id=None,
+                    data=SessionErrorData(error_type="provider_error", message=message),
+                )
+            )
+            raise RuntimeError("PRIVATE_WRAPPED_ERROR")
+        raise JsonRpcError(-32603, message)
+
+    setup.session.send_and_wait.side_effect = send
+    with pytest.raises(
+        setup.error, match="rejected.*structured response schema"
+    ) as exc:
+        await setup.backend.async_generate_data(
+            "task-agent",
+            task_request(
+                setup,
+                text="PRIVATE_TASK_INSTRUCTIONS",
+                structure=vol.Schema({vol.Required("PRIVATE_SCHEMA_FIELD"): str}),
+            ),
+            ChatLog(),
+        )
+    assert FALLBACK in str(exc.value)
+    assert "Simplify the structure or select a different AI Task model" in str(
+        exc.value
     )
-    with pytest.raises(setup.error, match="structured response"):
+    assert "No fallback or retry" in str(exc.value)
+    assert "access and connection" not in str(exc.value)
+    assert "PRIVATE_" not in str(exc.value)
+    assert "operation=generate_data" in caplog.text
+    assert f"model={FALLBACK}" in caplog.text
+    assert "category=provider_schema_rejected" in caplog.text
+    assert f"unsupported_keywords={keywords};" in caplog.text
+    assert "PRIVATE_" not in caplog.text
+    assert len(caplog.records) == 1
+    assert caplog.records[0].exc_info is None
+    assert not setup.backend._rejected_models
+    assert setup.lister.await_count == 1
+    setup.session.send_and_wait.assert_awaited_once()
+    setup.client.delete_session.assert_awaited_once()
+    await assert_clean(setup)
+
+
+async def test_quota_takes_precedence_over_schema_rejection(setup, monkeypatch, caplog):
+    monkeypatch.setattr(setup.module.llm, "selector_serializer", None, raising=False)
+    setup.session.send_and_wait.side_effect = JsonRpcError(
+        -32603,
+        "response_format request failed: PRIVATE_PROVIDER_PAYLOAD",
+        data={"error": {"code": "quota_exceeded"}},
+    )
+    with pytest.raises(setup.error, match="quota exceeded"):
         await setup.backend.async_generate_data(
             "task-agent",
             task_request(setup, structure=vol.Schema({vol.Required("answer"): str})),
             ChatLog(),
         )
+    assert setup.backend._quota_exceeded
+    assert "provider_schema_rejected" not in caplog.text
+    assert "PRIVATE_" not in caplog.text
     assert not setup.backend._rejected_models
-    assert setup.lister.await_count == 1
     setup.session.send_and_wait.assert_awaited_once()
     setup.client.delete_session.assert_awaited_once()
     await assert_clean(setup)

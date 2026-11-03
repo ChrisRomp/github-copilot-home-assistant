@@ -108,6 +108,14 @@ sessions outside the conversation-history cache. Their structured responses use
 native SDK schemas plus original HA validation. Schema/refusal errors must not
 be treated as model removal.
 
+Provider schema errors are classified from both OpenAI-style `response_format`
+and Anthropic-style `output_config.format.schema` messages, SDK error codes, and
+wrapped exceptions. Diagnostic summaries log the operation, active model, and
+failure category; unsupported keywords are extracted only from an allowlist and
+explicit rejection phrases. Do not log full schemas, field names, response data,
+or raw provider errors in these summaries. SDK and HA logs are separate from
+these integration-owned summaries.
+
 One-shot session disposal runs in the admitting task after execution deadlines
 have ended. Abort, disconnect, delete, and graceful client stop each have a
 10-second cleanup budget; native force-stop has a separate 10-second budget.
