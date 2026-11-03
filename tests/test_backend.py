@@ -1487,7 +1487,11 @@ async def test_session_prompt_preserves_copilot_identity_and_safety(setup, model
     assert kwargs["model"] == model_id
     expected_content = (
         "You are GitHub Copilot, integrated into Home Assistant as the user's home "
-        "assistant. Answer plainly and "
+        "assistant. Your product identity is GitHub Copilot, not ChatGPT, Claude, or "
+        "another provider's chat application. Distinguish that identity from the "
+        "underlying model. Do not guess its name or version; if trusted runtime "
+        "context does not supply the exact model, say that information is unavailable. "
+        "Answer plainly and "
         "concisely in the user's language. Use only the tools explicitly provided "
         "for this request. Do not claim that an action succeeded unless the tool "
         "result confirms it. "
