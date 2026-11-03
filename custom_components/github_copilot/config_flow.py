@@ -39,12 +39,16 @@ from .const import (
     CONF_ACCESS_TOKEN,
     CONF_ACCESS_TOKEN_EXPIRES_AT,
     CONF_ACCOUNT_ID,
+    CONF_AI_TASK_MODEL,
+    CONF_AI_TASK_MODEL_BILLING,
+    CONF_AI_TASK_TIMEOUT,
     CONF_AUTH_METHOD,
     CONF_ENABLE_DEVICE_CONTROL,
     CONF_MODEL,
     CONF_MODEL_BILLING,
     CONF_REFRESH_TOKEN,
     CONF_REFRESH_TOKEN_EXPIRES_AT,
+    DEFAULT_AI_TASK_TIMEOUT,
     DOMAIN,
     NAME,
     OAUTH_CLIENT_ID,
@@ -73,6 +77,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
     """Set up GitHub Copilot credentials and conversation options."""
 
     VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._device: dict[str, Any] | None = None
@@ -196,9 +201,17 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
             self._credentials[CONF_MODEL_BILLING] = model_billing(
                 user_input[CONF_MODEL], self._models
             )
+            task_model = user_input.get(CONF_AI_TASK_MODEL, user_input[CONF_MODEL])
+            self._credentials[CONF_AI_TASK_MODEL_BILLING] = model_billing(
+                task_model, self._models
+            )
             device_control_enabled = user_input[CONF_ENABLE_DEVICE_CONTROL]
             options = {
                 CONF_MODEL: user_input[CONF_MODEL],
+                CONF_AI_TASK_MODEL: task_model,
+                CONF_AI_TASK_TIMEOUT: user_input.get(
+                    CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT
+                ),
                 CONF_ENABLE_DEVICE_CONTROL: device_control_enabled,
                 CONF_LLM_HASS_API: ["assist"] if device_control_enabled else None,
                 CONF_PROMPT: user_input.get(CONF_PROMPT, ""),
@@ -319,6 +332,11 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
         """Show editable integration options."""
         if user_input is not None:
             options = dict(user_input)
+            options.setdefault(
+                CONF_AI_TASK_MODEL,
+                self._entry.options.get(CONF_AI_TASK_MODEL, options[CONF_MODEL]),
+            )
+            options.setdefault(CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT)
             device_control_enabled = options[CONF_ENABLE_DEVICE_CONTROL]
             options[CONF_ENABLE_DEVICE_CONTROL] = device_control_enabled
             options[CONF_LLM_HASS_API] = ["assist"] if device_control_enabled else None
@@ -336,6 +354,11 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
                 data={
                     **self._entry.data,
                     CONF_MODEL_BILLING: billing,
+                    CONF_AI_TASK_MODEL_BILLING: _billing_snapshot(
+                        options[CONF_AI_TASK_MODEL],
+                        self._models,
+                        self._entry.data.get(CONF_AI_TASK_MODEL_BILLING, {}),
+                    ),
                 },
             )
             return self.async_create_entry(title="", data=options)
@@ -380,13 +403,34 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
                 errors["base"] = "model_unavailable"
                 placeholders = {"model": saved_model}
 
+        task_model = self._entry.options.get(CONF_AI_TASK_MODEL, saved_model)
+        task_default = task_model
+        if task_model not in model_ids:
+            task_default = (
+                find_fallback_model(
+                    task_model,
+                    self._models,
+                    max_multiplier=model_budget(
+                        task_model, self._entry.data.get(CONF_AI_TASK_MODEL_BILLING, {})
+                    ),
+                )
+                if task_model
+                else None
+            )
+            task_default = task_default or model_ids[0]
+            errors[CONF_AI_TASK_MODEL] = "task_model_unavailable"
+
         return self.async_show_form(
             step_id="init",
             errors=errors,
             description_placeholders=placeholders,
             data_schema=_options_schema(
                 self._model_options(),
-                {**self._entry.options, CONF_MODEL: default_model},
+                {
+                    **self._entry.options,
+                    CONF_MODEL: default_model,
+                    CONF_AI_TASK_MODEL: task_default,
+                },
             ),
         )
 
@@ -419,6 +463,20 @@ def _options_schema(
             ): SelectSelector(
                 SelectSelectorConfig(options=model_options, custom_value=False)
             ),
+            vol.Optional(
+                CONF_AI_TASK_MODEL,
+                **(
+                    {"default": options[CONF_AI_TASK_MODEL]}
+                    if CONF_AI_TASK_MODEL in options
+                    else {}
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(options=model_options, custom_value=False)
+            ),
+            vol.Required(
+                CONF_AI_TASK_TIMEOUT,
+                default=options.get(CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT),
+            ): vol.All(vol.Coerce(int), vol.Range(min=1)),
             vol.Required(
                 CONF_ENABLE_DEVICE_CONTROL,
                 default=bool(
@@ -440,3 +498,13 @@ def _model_label(model: Any) -> str:
     label = getattr(model, "name", None) or model.id
     multiplier = model_multiplier(model)
     return f"{label} ({multiplier:g}x)" if multiplier is not None else label
+
+
+def _billing_snapshot(
+    model: str, models: list[Any], previous: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep known billing only when it describes the unchanged model."""
+    billing = model_billing(model, models)
+    if billing["multiplier"] is None and model_budget(model, previous) is not None:
+        return dict(previous)
+    return billing

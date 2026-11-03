@@ -18,7 +18,7 @@ jobs:
           python-version: "3.14"
           cache: pip
       - run: python -m pip install -e '.[dev]'
-      - name: Install HA conversation requirements
+      - name: Install HA conversation and AI Task contract requirements
         run: |
           python - <<'PY'
           import json
@@ -26,8 +26,14 @@ jobs:
           import subprocess
           import sys
           import homeassistant
-          manifest = pathlib.Path(homeassistant.__file__).parent / "components/conversation/manifest.json"
-          requirements = json.loads(manifest.read_text())["requirements"]
+          components = pathlib.Path(homeassistant.__file__).parent / "components"
+          requirements = sorted({
+              requirement
+              for name in ("conversation", "camera", "image", "stream")
+              for requirement in json.loads(
+                  (components / name / "manifest.json").read_text()
+              ).get("requirements", [])
+          })
           subprocess.run([sys.executable, "-m", "pip", "install", *requirements], check=True)
           PY
       - run: ruff check .

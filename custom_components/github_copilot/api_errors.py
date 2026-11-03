@@ -25,6 +25,16 @@ _MODEL_CODES = {
     "model_unavailable",
     "model_disabled",
 }
+_SCHEMA_CODES = {
+    "invalid_json_schema",
+    "unsupported_response_format",
+    "invalid_response_format",
+    "schema_validation_error",
+}
+_SCHEMA_MESSAGE = re.compile(
+    r"\b(?:response[_ -]?format|json[_ -]?schema|structured (?:output|response))\b",
+    re.IGNORECASE,
+)
 _AUTH_CODES = {
     "401",
     "bad_credentials",
@@ -130,6 +140,13 @@ def is_model_unavailable_error(
 ) -> bool:
     """Identify explicit model rejection even if discovery is still stale."""
     return _matches(error, event, _MODEL_CODES, _MODEL_MESSAGE)
+
+
+def is_output_schema_error(
+    error: Exception, event: SessionErrorData | None = None
+) -> bool:
+    """Keep request-format failures out of model availability recovery."""
+    return _matches(error, event, _SCHEMA_CODES, _SCHEMA_MESSAGE)
 
 
 def is_authentication_error(

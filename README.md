@@ -6,6 +6,10 @@ Use GitHub Copilot as your Home Assistant Assist conversation agent, with
 streamed replies, follow-up conversations, and optional control of exposed
 devices.
 
+The integration also provides an AI Task entity for text, structured data, camera
+analysis, and native image generation when available to your account. See
+[AI Tasks](docs/usage.md#ai-tasks).
+
 [![Open in Home Assistant Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ChrisRomp&repository=github-copilot-home-assistant&category=integration)
 
 **[Get started: setup guide with screenshots](docs/setup.md)**
@@ -65,8 +69,11 @@ temporary conversation files can be included in Home Assistant backups; treat
 those backups as sensitive.
 
 Chats expire after five minutes of inactivity, and a Home Assistant restart
-starts fresh conversations. AI Tasks, local-model fallback, and remote runtime
-hosting are not supported.
+starts fresh conversations. AI Tasks use disposable sessions. Image requests are
+subject to model limits and conservative host resource guards; oversized inputs
+fail rather than being silently omitted. Native image generation depends on
+account availability. Reference-image editing, local-model fallback, and remote
+runtime hosting are not supported.
 
 See the [user guide](docs/usage.md) for model fallback, data handling, and
 troubleshooting.

@@ -42,6 +42,18 @@ def selectable_models(models: Iterable[Any]) -> list[Any]:
     return [model for model in models if _policy_state(model) != "disabled"]
 
 
+def supports_vision(model: Any) -> bool:
+    """Require affirmative model metadata before sending images."""
+    return (
+        getattr(
+            getattr(getattr(model, "capabilities", None), "supports", None),
+            "vision",
+            None,
+        )
+        is True
+    )
+
+
 def model_family(model_id: str) -> str:
     """Infer a model family by removing version tokens from its ID.
 

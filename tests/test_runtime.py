@@ -107,7 +107,8 @@ def _runtime_for_models() -> CopilotRuntime:
     runtime.entry = SimpleNamespace(
         entry_id="entry", data={}, options={"model": "model-1"}
     )
-    runtime.hass = SimpleNamespace()
+    runtime.hass = SimpleNamespace(data={}, verify_event_loop_thread=Mock())
+    runtime.image_models = None
     runtime.backend = None
     runtime._models = None
     runtime._models_fetched_at = 0.0
@@ -118,6 +119,45 @@ def _runtime_for_models() -> CopilotRuntime:
 
     runtime.credentials = SimpleNamespace(async_get_access_token=get_access_token)
     return runtime
+
+
+@pytest.mark.parametrize(
+    ("available", "default", "operations", "expected"),
+    [
+        ("available", True, ["generate", "edit"], True),
+        ("unavailable", True, ["generate"], False),
+        ("available", False, ["generate"], False),
+        ("available", True, ["edit"], False),
+    ],
+)
+def test_image_model_requires_authorized_default_generate_operation(
+    available, default, operations, expected
+):
+    runtime = _runtime_for_models()
+    model = SimpleNamespace(
+        id="native-image",
+        availability=available,
+        is_default=default,
+        supported_operations=operations,
+    )
+    runtime.image_models = [model]
+    assert (runtime.image_model() is model) is expected
+
+
+def test_image_model_is_disabled_for_unverified_runtime(monkeypatch):
+    from copilot import _cli_version
+
+    runtime = _runtime_for_models()
+    runtime.image_models = [
+        SimpleNamespace(
+            id="native-image",
+            availability="available",
+            is_default=True,
+            supported_operations=["generate"],
+        )
+    ]
+    monkeypatch.setattr(_cli_version, "CLI_VERSION", "unverified")
+    assert runtime.image_model() is None
 
 
 @pytest.mark.asyncio
@@ -214,6 +254,9 @@ def sdk_runtime(ha_boundary, monkeypatch):
     module = ha_boundary.load("runtime")
     hass = SimpleNamespace(
         data={},
+        is_stopping=False,
+        verify_event_loop_thread=Mock(),
+        config_entries=SimpleNamespace(async_schedule_reload=Mock()),
         config=SimpleNamespace(path=Mock(return_value=str(Path.cwd()))),
         bus=SimpleNamespace(async_listen_once=Mock(return_value=Mock())),
     )
@@ -238,7 +281,7 @@ def sdk_runtime(ha_boundary, monkeypatch):
     monkeypatch.setattr(
         module, "async_runtime_path", AsyncMock(return_value="/unused-runtime")
     )
-    backend = SimpleNamespace(async_stop=AsyncMock())
+    backend = SimpleNamespace(async_stop=AsyncMock(), mark_runtime_stopped=Mock())
     monkeypatch.setitem(
         sys.modules,
         "custom_components.github_copilot.backend",
@@ -569,8 +612,147 @@ async def test_runtime_stop_retains_client_for_retry_if_force_stop_also_fails(
     sdk_runtime.client.stop.side_effect = None
     await runtime.async_stop()
     assert runtime.client is None
-    sdk_runtime.backend.async_stop.assert_awaited_once()
+    assert sdk_runtime.backend.async_stop.await_count == 2
     assert sdk_runtime.client.stop.await_count == 2
+
+
+async def test_runtime_graceful_stop_timeout_forces_exit(sdk_runtime, monkeypatch):
+    monkeypatch.setattr(sdk_runtime.module, "SDK_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    await sdk_runtime.runtime.async_start()
+
+    async def wedged():
+        await asyncio.Event().wait()
+
+    sdk_runtime.client.stop.side_effect = wedged
+    await asyncio.wait_for(sdk_runtime.runtime.async_stop(), timeout=1)
+    sdk_runtime.client.force_stop.assert_awaited_once()
+    assert sdk_runtime.runtime.client is None
+    sdk_runtime.backend.mark_runtime_stopped.assert_called_once()
+
+
+async def test_failed_force_stop_has_a_bound_and_retains_runtime_for_retry(
+    sdk_runtime, monkeypatch
+):
+    monkeypatch.setattr(sdk_runtime.module, "SDK_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(sdk_runtime.module, "SDK_FORCE_STOP_TIMEOUT_SECONDS", 0.01)
+    await sdk_runtime.runtime.async_start()
+
+    async def wedged():
+        await asyncio.Event().wait()
+
+    sdk_runtime.client.stop.side_effect = wedged
+    sdk_runtime.client.force_stop.side_effect = wedged
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(sdk_runtime.runtime.async_stop(), timeout=1)
+    assert sdk_runtime.runtime.client is sdk_runtime.client
+    assert sdk_runtime.runtime.backend is sdk_runtime.backend
+    sdk_runtime.backend.mark_runtime_stopped.assert_not_called()
+    sdk_runtime.client.stop.side_effect = None
+    sdk_runtime.client.force_stop.side_effect = None
+    await sdk_runtime.runtime.async_stop()
+    sdk_runtime.backend.mark_runtime_stopped.assert_called_once()
+
+
+async def test_runtime_unload_can_reap_a_wedged_backend_without_stop_lock_deadlock(
+    sdk_runtime, ha_boundary, monkeypatch
+):
+    from custom_components.github_copilot.const import DATA_IMAGE_LOCK, DOMAIN
+
+    module = ha_boundary.load("backend")
+    constructor = sys.modules[
+        "custom_components.github_copilot.backend"
+    ].ConversationBackend
+    constructor.side_effect = module.ConversationBackend
+    monkeypatch.setattr(module, "SDK_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        sys.modules["homeassistant.components.conversation"],
+        "AssistantContent",
+        SimpleNamespace,
+        raising=False,
+    )
+    entered = asyncio.Event()
+
+    async def execute(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def abort():
+        await asyncio.Event().wait()
+
+    session = SimpleNamespace(
+        session_id="image-session",
+        on=Mock(return_value=Mock()),
+        abort=AsyncMock(side_effect=abort),
+        disconnect=AsyncMock(),
+        rpc=SimpleNamespace(
+            tools=SimpleNamespace(execute=AsyncMock(side_effect=execute))
+        ),
+    )
+    sdk_runtime.client.create_session = AsyncMock(return_value=session)
+    sdk_runtime.client.delete_session = AsyncMock()
+    runtime = sdk_runtime.runtime
+    runtime.credentials.async_get_access_token = AsyncMock(return_value="token")
+    runtime.async_list_models = AsyncMock(return_value=[])
+    runtime.hass.data[DOMAIN] = {"entry": runtime}
+    await runtime.async_start()
+    runtime.image_models = [
+        SimpleNamespace(
+            id="image",
+            availability="available",
+            is_default=True,
+            supported_operations=["generate"],
+        )
+    ]
+    caller = asyncio.create_task(
+        runtime.backend.async_generate_image(
+            "image",
+            module.ImageTaskRequest(text="Draw", context=SimpleNamespace()),
+            SimpleNamespace(conversation_id="image"),
+        )
+    )
+    await entered.wait()
+    await asyncio.wait_for(runtime.async_stop(), timeout=1)
+    with pytest.raises(ha_boundary.HomeAssistantError, match="shutting down"):
+        await caller
+    sdk_runtime.client.force_stop.assert_awaited_once()
+    sdk_runtime.client.delete_session.assert_awaited_once_with("image-session")
+    assert runtime.backend is runtime.client is None
+    assert not runtime.hass.data[DATA_IMAGE_LOCK].locked()
+    runtime.hass.config_entries.async_schedule_reload.assert_not_called()
+
+
+async def test_concurrent_force_stop_is_single_flight(sdk_runtime):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    await asyncio.gather(
+        runtime._async_force_stop_client(sdk_runtime.client),
+        runtime._async_force_stop_client(sdk_runtime.client),
+    )
+    sdk_runtime.client.force_stop.assert_awaited_once()
+    await runtime.async_stop()
+
+
+async def test_recovery_marks_unavailable_and_schedules_reload_without_awaiting_turns(
+    sdk_runtime,
+):
+    from custom_components.github_copilot.const import DOMAIN
+
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    runtime.hass.data[DOMAIN] = {runtime.entry.entry_id: runtime}
+    constructor = sys.modules[
+        "custom_components.github_copilot.backend"
+    ].ConversationBackend
+    callback = constructor.call_args.kwargs["on_runtime_failure"]
+    callback(True)
+    assert not runtime.is_started
+    assert runtime.image_models is None
+    runtime.hass.config_entries.async_schedule_reload.assert_called_once_with("entry")
+    runtime.hass.config_entries.async_schedule_reload.reset_mock()
+    runtime._stopping = True
+    callback(True)
+    runtime.hass.config_entries.async_schedule_reload.assert_not_called()
+    await runtime.async_stop()
 
 
 async def test_runtime_stop_force_stops_client_if_graceful_stop_is_cancelled(

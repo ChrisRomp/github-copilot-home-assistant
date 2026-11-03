@@ -56,7 +56,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await runtime.async_start()
         await hass.config_entries.async_forward_entry_setups(
-            entry, [Platform.CONVERSATION]
+            entry, [Platform.CONVERSATION, Platform.AI_TASK]
         )
         entry.async_on_unload(
             hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, async_stop_runtime)
@@ -86,7 +86,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.const import Platform
 
     if not await hass.config_entries.async_unload_platforms(
-        entry, [Platform.CONVERSATION]
+        entry, [Platform.CONVERSATION, Platform.AI_TASK]
     ):
         return False
 
@@ -106,6 +106,37 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
         await hass.config_entries.async_reload(entry.entry_id)
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Seed independent task settings once, preserving conversation choices."""
+    from .const import (
+        CONF_AI_TASK_MODEL,
+        CONF_AI_TASK_MODEL_BILLING,
+        CONF_AI_TASK_TIMEOUT,
+        CONF_MODEL,
+        CONF_MODEL_BILLING,
+        DEFAULT_AI_TASK_TIMEOUT,
+    )
+
+    if entry.version != 1:
+        return False
+    if entry.minor_version < 2:
+        options = dict(entry.options)
+        options.setdefault(CONF_AI_TASK_MODEL, options[CONF_MODEL])
+        options.setdefault(CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT)
+        data = dict(entry.data)
+        snapshot = data.get(CONF_MODEL_BILLING, {})
+        data.setdefault(
+            CONF_AI_TASK_MODEL_BILLING,
+            dict(snapshot)
+            if snapshot.get("model") == options[CONF_AI_TASK_MODEL]
+            else {"model": options[CONF_AI_TASK_MODEL], "multiplier": None},
+        )
+        hass.config_entries.async_update_entry(
+            entry, options=options, data=data, minor_version=2
+        )
+    return True
+
+
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove entry-owned state and Repairs, retaining the shared runtime cache."""
     import asyncio
@@ -117,6 +148,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ISSUE_MODEL_FALLBACK,
         ISSUE_MODEL_UNAVAILABLE,
         ISSUE_QUOTA_EXCEEDED,
+        ISSUE_TASK_MODEL_FALLBACK,
+        ISSUE_TASK_MODEL_UNAVAILABLE,
     )
     from .runtime import remove_entry_directory
 
@@ -128,5 +161,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await asyncio.to_thread(remove_entry_directory, hass, entry.entry_id)
     hass.data.get(DATA_CREDENTIAL_LOCKS, {}).pop(entry.entry_id, None)
 
-    for issue in (ISSUE_MODEL_FALLBACK, ISSUE_MODEL_UNAVAILABLE, ISSUE_QUOTA_EXCEEDED):
+    for issue in (
+        ISSUE_MODEL_FALLBACK,
+        ISSUE_MODEL_UNAVAILABLE,
+        ISSUE_QUOTA_EXCEEDED,
+        ISSUE_TASK_MODEL_FALLBACK,
+        ISSUE_TASK_MODEL_UNAVAILABLE,
+    ):
         ir.async_delete_issue(hass, DOMAIN, f"{issue}_{entry.entry_id}")

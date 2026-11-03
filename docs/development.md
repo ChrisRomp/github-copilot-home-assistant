@@ -15,11 +15,11 @@ ruff check .
 ruff format --check .
 ```
 
-Install HA's conversation requirements listed in its
-`components/conversation/manifest.json` to run:
+Install the requirements from HA's `conversation`, `camera`, `image`, and `stream`
+component manifests to run the real HA contracts:
 
 ```sh
-HA_COPILOT_HA_TESTS=1 pytest tests/test_ha_contract.py
+HA_COPILOT_HA_TESTS=1 pytest tests/test_ha_contract.py tests/test_ai_task.py
 ```
 
 This checks actual HA schema conversion, tool-result handling, and final speech
@@ -31,7 +31,7 @@ HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py
 ```
 
 This verifies prompt updates through the real runtime against a loopback-only
-fake model.
+fake model, including strict task schema transport and disposable task sessions.
 
 The validation workflow runs unit tests, the real HA contract test, hassfest,
 and HACS validation. HACS validation also requires the GitHub repository to
@@ -92,3 +92,73 @@ policy.
 
 If an action result cannot be serialized, the integration reports that the
 action may already have completed and does not replay it.
+
+## AI Task boundaries
+
+`ai_task.py` adapts HA's task contract without overriding final HA methods.
+The context hook captures the entity, HA chat session, asyncio task, and caller
+context together. The provider hook consumes that record only for the matching
+request, so interleaving, inherited task contexts, and failed preparation do not
+reuse another caller. The backend provisions only Assist tools, with
+`assistant="conversation"` to reuse existing exposure rules.
+
+Tasks share execution admission, credentials, tool handling, cancellation, and
+cleanup with conversations, but have their own model/Repair state and disposable
+sessions outside the conversation-history cache. Their structured responses use
+native SDK schemas plus original HA validation. Schema/refusal errors must not
+be treated as model removal.
+
+One-shot session disposal runs in the admitting task after execution deadlines
+have ended. Abort, disconnect, delete, and graceful client stop each have a
+10-second cleanup budget; native force-stop has a separate 10-second budget.
+Cleanup workers are shielded from caller cancellation and deletion is attempted
+even if disconnect is interrupted. A wedged native client is closed to new
+requests, terminated through a single-flight stop, and reloaded asynchronously
+without awaiting reload from the turn being drained. If termination fails,
+retain the client/backend and quarantine image admission for a later stop retry.
+Do not apply native cleanup deadlines to local image IO or HA device actions.
+
+Task Repair content is derived from both text and vision resolutions from the
+same catalog snapshot, while diagnostics retain the actual selected task model.
+HA time selectors request local `HH:MM:SS` strings rather than RFC 3339 `time`
+values with offsets; original HA validation remains authoritative.
+
+`images.py` uses a conservative 64 MiB admission estimate, accounting for decoded
+pixels and encoded transport amplification. Input accounting reserves 32 encoded
+payload copies after the first Linux profile showed that the earlier estimate
+could admit dense PNG batches that exhausted a 512 MiB container. This is not a
+64 MiB total-RSS guarantee. Reads are bounded and nonblocking, non-regular files
+are rejected, and raster buffers are explicitly closed before inference.
+
+`tests/image_resource_probe.py` exercises the production image helper and native
+SDK with a loopback-only fake model. It refuses to run unless the environment is
+Linux ARM64, limited to one CPU and at most 512 MiB. Run it in a disposable
+container with networking disabled, read-only source/dependency mounts, and a
+writable scratch directory. Generate bounded fixtures separately with
+`python tests/image_resource_probe.py --make-fixtures <directory>`, then supply
+`--fixtures` and `--runtime` inside the container. The Linux SDK/Pillow/aiohttp
+dependencies and checksum-verified native runtime must already be available.
+
+With runtime 1.0.103, PNG/JPEG/static GIF/WebP inputs reached the fake model;
+oversized inputs were rejected before inference. Successful input cases peaked
+below 457 MiB for the whole validation container, and the large valid output
+case peaked below 492 MiB. A deliberately oversized output reached the 512 MiB
+ceiling and was rejected, without OOM or process death. These numbers include
+Python, the native runtime, and test infrastructure, not a running HA server.
+Re-profile after changing the SDK, input/output bounds, or image processing.
+
+Native generation was verified on runtime 1.0.103, including explicit session
+credentials with logged-in-user fallback disabled. The implementation uses
+`session.tools.execute` with only `builtin:image_generation` offered, rather than
+asking a chat model to choose a tool. Permission approval is single-use and bound
+to the tool-call ID and exact prompt arguments; managed approvals are not
+bypassed. It requests `save_to_disk=False`, validates the canonical PNG, and
+deduplicates duplicate output representations. Referenced binary assets are
+handled only within the owning task.
+
+The image contract/resource gates are enabled for the verified runtime. A new
+runtime version does not automatically inherit image support: its contracts and
+resource behavior must be rechecked. Generation also requires the account's
+available default image model. Reference-image editing is not enabled. Never
+use blanket permission approval, another runtime profile, or unrelated built-ins
+to force capabilities to appear.

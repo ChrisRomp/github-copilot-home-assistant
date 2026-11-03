@@ -93,18 +93,21 @@ activation.
 renew PATs automatically; replace the token when it expires or is revoked.
 Keep tokens private and out of screenshots, issue reports, and chat messages.
 
-## 4. Choose your conversation settings
+## 4. Choose your conversation and task settings
 
 After authentication, the **Configure GitHub Copilot** dialog lets you choose
-how the conversation agent behaves.
+how the conversation agent and AI Task entity behave. The screenshot below
+predates the separate AI Task model and timeout fields.
 
 ![The configuration dialog showing the Model selector, device-control toggle, and Additional instructions field.](images/setup/configure-integration.png)
 
 | Setting | What to choose |
 | --- | --- |
-| **Model** | Select **Auto**, if available, or a specific model from your account's available models. Luna- or Haiku-class models are a good starting point for fast, efficient responses to many Home Assistant requests. |
-| **Allow control of Assist-exposed devices** | Enable this if you want Copilot to control devices through Home Assistant Assist. It is **off by default** and only allows access to entities you expose to Assist. |
-| **Additional instructions** | Optionally describe how you want the assistant to respond, such as "Keep replies brief and use Celsius." Leave this blank if you do not need custom instructions. |
+| **Conversation model** | Select **Auto**, if available, or a specific model from your account's available models. Luna- or Haiku-class models are a good starting point for fast, efficient responses to many Home Assistant requests. |
+| **AI Task model** | Optionally choose a different model for automations. Initially defaults to the conversation model, but later changes to the conversation model do not change it. |
+| **AI Task timeout (seconds)** | Defaults to 180 seconds. This does not change Assist's 60-second timeout. |
+| **Allow control of Assist-exposed devices** | Allows conversations and AI Tasks to use Assist-exposed tools. It is **off by default**. |
+| **Additional instructions** | Instructions for conversations only, such as "Keep replies brief and use Celsius." AI Tasks use the instructions supplied by each action. |
 
 Additional instructions are literal text, not Home Assistant templates. If you
 enable device control, review which entities you have exposed to Assist.
@@ -116,6 +119,10 @@ Select **Submit** to save. When Home Assistant shows **Success**, select
 You can change these settings later under
 **Settings > Devices & services > GitHub Copilot > Configure** (the gear icon
 beside the integration entry).
+
+An AI Task entity appears alongside the conversation entity without another
+sign-in. It normally uses `ai_task.github_copilot`; use the actual entity ID shown
+in your installation. See [AI Tasks](usage.md#ai-tasks) for examples.
 
 ## 5. Test a conversation
 

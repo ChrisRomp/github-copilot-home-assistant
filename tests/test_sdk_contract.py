@@ -234,3 +234,157 @@ async def test_native_device_context_is_tool_data_not_system_instructions(
         await backend.async_stop()
         await client.stop()
         await runner.cleanup()
+
+
+@pytest.mark.parametrize("cancel_during_disposal", [False, True])
+async def test_native_structured_tasks_use_disposable_sessions(
+    ha_boundary, tmp_path, monkeypatch, cancel_during_disposal
+):
+    import asyncio
+
+    path = (
+        get_cache_dir(CLI_VERSION)
+        / "prebuilds"
+        / get_runtime_platform()
+        / "copilot-runtime"
+    )
+    if not path.is_file():
+        pytest.skip("Native SDK runtime is not already cached")
+    requests = []
+
+    async def complete(request):
+        requests.append(await request.json())
+        event = {
+            "id": "test",
+            "object": "chat.completion.chunk",
+            "model": "gpt-4.1",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": '{"status":"ok","note":null}',
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        return web.Response(
+            text=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n",
+            content_type="text/event-stream",
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", complete)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    client = CopilotClient(
+        connection=RuntimeConnection.for_stdio(path=str(path)),
+        use_logged_in_user=False,
+        base_directory=str(tmp_path / "runtime"),
+        mode="empty",
+        log_level="error",
+    )
+    module = ha_boundary.load("backend")
+    monkeypatch.setattr(module.llm, "selector_serializer", None, raising=False)
+    sessions = []
+    disposal_entered, finish_disposal = asyncio.Event(), asyncio.Event()
+
+    async def create_session(**kwargs):
+        kwargs.pop("github_token")
+        kwargs.pop("github_token_provider")
+        kwargs["provider"] = {
+            "type": "openai",
+            "wire_api": "completions",
+            "base_url": f"http://127.0.0.1:{port}/v1",
+            "api_key": "local-test",
+        }
+        session = await client.create_session(**kwargs)
+        sessions.append(session)
+        if cancel_during_disposal and len(sessions) == 1:
+            disconnect = session.disconnect
+
+            async def delayed_disconnect():
+                disposal_entered.set()
+                await finish_disposal.wait()
+                await disconnect()
+
+            monkeypatch.setattr(session, "disconnect", delayed_disconnect)
+        return session
+
+    backend = module.ConversationBackend(
+        SimpleNamespace(data={}),
+        SimpleNamespace(
+            entry_id="entry",
+            data={},
+            options={
+                "model": "gpt-4.1",
+                "prompt": "CONVERSATION_ONLY_INSTRUCTIONS",
+            },
+        ),
+        SimpleNamespace(
+            create_session=create_session,
+            delete_session=client.delete_session,
+            force_stop=client.force_stop,
+        ),
+        AsyncMock(),
+        AsyncMock(return_value=[SimpleNamespace(id="gpt-4.1")]),
+        access_token_getter=AsyncMock(return_value="local-only"),
+    )
+
+    class ChatLog:
+        conversation_id = "same-ha-name"
+        llm_api = None
+
+        async def async_add_delta_content_stream(self, agent_id, stream):
+            async for delta in stream:
+                yield delta
+
+    try:
+        await client.start()
+        for marker in ("FIRST_TASK_ONLY", "SECOND_TASK_ONLY"):
+            request = backend.async_generate_data(
+                "task",
+                module.DataTaskRequest(
+                    text=marker,
+                    context=SimpleNamespace(),
+                    structure=vol.Schema(
+                        {
+                            vol.Required("status"): str,
+                            vol.Optional("note"): str,
+                        }
+                    ),
+                ),
+                ChatLog(),
+            )
+            if cancel_during_disposal and marker == "FIRST_TASK_ONLY":
+                caller = asyncio.create_task(request)
+                await disposal_entered.wait()
+                caller.cancel()
+                await asyncio.sleep(0)
+                finish_disposal.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await caller
+                assert not sessions[0].workspace_path.exists()
+            else:
+                assert await request == {"status": "ok"}
+        assert len(requests) == 2
+        assert sessions[0].session_id != sessions[1].session_id
+        assert "FIRST_TASK_ONLY" not in json.dumps(requests[1]["messages"])
+        for request in requests:
+            assert request["response_format"]["json_schema"]["strict"] is True
+            assert "CONVERSATION_ONLY_INSTRUCTIONS" not in json.dumps(
+                request["messages"]
+            )
+        assert not backend._sessions
+        for session in sessions:
+            assert session.workspace_path is not None
+            assert not session.workspace_path.exists()
+    finally:
+        finish_disposal.set()
+        await backend.async_stop()
+        await client.stop()
+        await runner.cleanup()

@@ -49,6 +49,14 @@ async def test_diagnostics_platform_returns_only_safe_status(state):
         "active_model": (
             None if state in ("missing", "no_backend") else "active-model"
         ),
+        "ai_task_model": "selected-model",
+        "active_ai_task_model": None,
+        "ai_task_timeout": 180,
+        "image_input_verified": True,
+        "image_generation_verified": True,
+        "image_host_budget_verified": True,
+        "native_image_model": None,
+        "native_image_model_availability": None,
         "device_control_enabled": True,
         "runtime_started": state == "started",
     }
@@ -69,6 +77,14 @@ async def test_diagnostics_handles_missing_optional_entry_values():
         "has_access_token": False,
         "selected_model": None,
         "active_model": None,
+        "ai_task_model": None,
+        "active_ai_task_model": None,
+        "ai_task_timeout": 180,
+        "image_input_verified": True,
+        "image_generation_verified": True,
+        "image_host_budget_verified": True,
+        "native_image_model": None,
+        "native_image_model_availability": None,
         "device_control_enabled": False,
         "runtime_started": False,
     }
