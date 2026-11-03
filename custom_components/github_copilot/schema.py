@@ -192,6 +192,21 @@ def _strict_schema(original: dict[str, Any]) -> dict[str, Any]:
         node.pop("format")
     types = node.get("type", [])
     types = [types] if isinstance(types, str) else types
+    if "number" in types or "integer" in types:
+        hints = []
+        for constraint, instruction in (
+            ("minimum", "at least"),
+            ("maximum", "at most"),
+            ("exclusiveMinimum", "greater than"),
+            ("exclusiveMaximum", "less than"),
+            ("multipleOf", "a multiple of"),
+        ):
+            if constraint in node:
+                hints.append(f"The value must be {instruction} {node.pop(constraint)}.")
+        if hints:
+            node["description"] = " ".join(
+                filter(None, (node.get("description"), *hints))
+            )
     if "object" in types:
         if node.get("additionalProperties", False) is not False or (
             "properties" not in node and node.get("additionalProperties") is not False

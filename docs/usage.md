@@ -66,9 +66,10 @@ missing required values, and invalid results fail explicitly; the integration
 does not substitute unstructured text. Open-ended object selectors are not
 supported by the strict output adapter.
 
-Multi-select fields are supported. Their provider schema includes a textual
-uniqueness hint because the strict output API does not accept `uniqueItems`;
-the original HA selector still validates the returned selections.
+Multi-select fields and bounded numbers are supported. Provider schemas use
+textual hints for uniqueness and numeric constraints that are not accepted by
+all models' strict output APIs. The original HA selectors still validate the
+returned selections and numeric bounds.
 
 Enabling **Allow control of Assist-exposed devices** also enables those tools
 for data tasks. Disabled means no device tools, not merely an instruction to

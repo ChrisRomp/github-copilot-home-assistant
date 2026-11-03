@@ -117,6 +117,35 @@ def test_real_ha_selector_structure():
         output.parse('{"description":"Kitchen","count":20}')
 
 
+@pytest.mark.parametrize("number_type", [int, float])
+def test_numeric_bounds_are_hints_but_original_validation_is_preserved(number_type):
+    from homeassistant.exceptions import HomeAssistantError
+
+    output = prepare_output_schema(
+        vol.Schema(
+            {
+                vol.Required("count"): vol.All(
+                    vol.Coerce(number_type), vol.Range(min=0, max=10)
+                )
+            }
+        ),
+        None,
+    )
+    field = output.provider["properties"]["count"]
+    assert "minimum" not in field
+    assert "maximum" not in field
+    assert "at least 0" in field["description"]
+    assert "at most 10" in field["description"]
+    original = output.original["properties"]["count"]
+    assert original["minimum"] == 0
+    assert original["maximum"] == 10
+    for value in (0, 5, 10):
+        assert output.parse('{"count":' + str(value) + "}") == {"count": value}
+    for value in (-1, 11):
+        with pytest.raises(HomeAssistantError, match="does not match"):
+            output.parse('{"count":' + str(value) + "}")
+
+
 def test_time_selector_uses_local_time_not_rfc3339_time():
     from homeassistant.exceptions import HomeAssistantError
     from homeassistant.helpers.llm import selector_serializer
