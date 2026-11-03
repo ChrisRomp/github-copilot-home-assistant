@@ -190,6 +190,29 @@ def test_multi_select_removes_provider_unsupported_uniqueness_constraint():
         output.parse('{"chores":["vacuuming"]}')
 
 
+def test_rgb_array_length_is_a_hint_but_original_validation_is_preserved():
+    from homeassistant.exceptions import HomeAssistantError
+    from homeassistant.helpers.llm import selector_serializer
+    from homeassistant.helpers.selector import ColorRGBSelector
+
+    output = prepare_output_schema(
+        vol.Schema({vol.Required("color"): ColorRGBSelector()}),
+        selector_serializer,
+    )
+    field = output.provider["properties"]["color"]
+    assert "minItems" not in field
+    assert "maxItems" not in field
+    assert "format" not in field
+    assert "at least 3" in field["description"]
+    assert "at most 3" in field["description"]
+    original = output.original["properties"]["color"]
+    assert original["minItems"] == original["maxItems"] == 3
+    assert output.parse('{"color":[12,34,56]}') == {"color": [12, 34, 56]}
+    for color in ("[]", "[12,34]", "[12,34,56,78]", "[-1,34,56]", "[12,34,256]"):
+        with pytest.raises(HomeAssistantError, match="does not match"):
+            output.parse('{"color":' + color + "}")
+
+
 def test_date_and_datetime_formats_are_not_removed():
     from homeassistant.helpers.llm import selector_serializer
     from homeassistant.helpers.selector import DateSelector, DateTimeSelector

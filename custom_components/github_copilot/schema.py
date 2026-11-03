@@ -227,10 +227,20 @@ def _strict_schema(original: dict[str, Any]) -> dict[str, Any]:
     if "array" in types:
         if "items" not in node:
             raise ValueError("Untyped array")
+        hints = []
+        for constraint, instruction in (
+            ("minItems", "at least"),
+            ("maxItems", "at most"),
+        ):
+            if constraint in node:
+                hints.append(
+                    f"Return {instruction} {node.pop(constraint)} array items."
+                )
         if node.pop("uniqueItems", False):
-            hint = "Return each selected value at most once."
-            node["description"] = (
-                f"{node['description']} {hint}" if node.get("description") else hint
+            hints.append("Return each selected value at most once.")
+        if hints:
+            node["description"] = " ".join(
+                filter(None, (node.get("description"), *hints))
             )
         node["items"] = _strict_schema(node["items"])
     if "anyOf" in node:
