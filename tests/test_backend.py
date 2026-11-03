@@ -679,6 +679,57 @@ async def test_quota_takes_precedence_over_schema_rejection(setup, monkeypatch, 
     await assert_clean(setup)
 
 
+async def test_plain_task_tool_schema_error_does_not_claim_output_structure(
+    setup, caplog
+):
+    setup.session.send_and_wait.side_effect = RuntimeError(
+        "Invalid JSON schema for tool parameters"
+    )
+    with pytest.raises(setup.error) as raised:
+        await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+    assert "structured response" not in str(raised.value)
+    assert "Simplify the structure" not in str(raised.value)
+    assert "provider_schema_rejected" not in caplog.text
+    assert not setup.backend._rejected_models
+    assert setup.lister.await_count == 1
+    setup.session.send_and_wait.assert_awaited_once()
+    setup.client.delete_session.assert_awaited_once()
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("structured", [False, True])
+async def test_task_event_only_quota_creates_repair_without_replay(
+    setup, monkeypatch, structured
+):
+    monkeypatch.setattr(setup.module.llm, "selector_serializer", None, raising=False)
+
+    async def send(*args, **kwargs):
+        setup.session.on.call_args.args[0](
+            SimpleNamespace(
+                data=SessionErrorData(
+                    error_type="provider_error",
+                    error_code="insufficient_quota",
+                    message="Request blocked",
+                )
+            )
+        )
+        raise RuntimeError("Request failed")
+
+    setup.session.send_and_wait.side_effect = send
+    structure = vol.Schema({vol.Required("answer"): str}) if structured else None
+    with pytest.raises(setup.error, match="quota exceeded"):
+        await setup.backend.async_generate_data(
+            "task", task_request(setup, structure=structure), ChatLog()
+        )
+    assert setup.backend._quota_exceeded
+    assert (DOMAIN, "quota_exceeded_entry") in setup.issues
+    assert not setup.backend._rejected_models
+    assert setup.lister.await_count == 1
+    setup.session.send_and_wait.assert_awaited_once()
+    setup.client.delete_session.assert_awaited_once()
+    await assert_clean(setup)
+
+
 async def test_task_fallback_does_not_modify_conversation_repairs(setup):
     setup.entry.options["ai_task_model"] = FALLBACK
     await turn(setup)
@@ -838,8 +889,11 @@ async def test_image_execution_is_native_only_and_permission_is_single_use(
         conversation_id="image",
         async_add_assistant_content_without_tools=Mock(),
     )
+    setup.backend.report_quota_exceeded()
     image = await setup.backend.async_generate_image("image-agent", request, chat)
     assert image.data == buffer.getvalue()
+    assert not setup.backend._quota_exceeded
+    assert (DOMAIN, "quota_exceeded_entry") not in setup.issues
     setup.session.send_and_wait.assert_not_awaited()
     setup.session.set_tools.assert_not_awaited()
     setup.client.delete_session.assert_awaited_once()
@@ -847,6 +901,35 @@ async def test_image_execution_is_native_only_and_permission_is_single_use(
     assert not setup.backend._sessions
     assert not setup.backend._task_active
     assert not setup.backend.hass.data[const.DATA_IMAGE_LOCK].locked()
+    await assert_clean(setup)
+
+
+async def test_invalid_generated_image_does_not_clear_quota_repair(setup, monkeypatch):
+    import sys
+
+    from custom_components.github_copilot.images import HomeAssistantError
+
+    monkeypatch.setattr(
+        sys.modules["homeassistant.components.conversation"],
+        "AssistantContent",
+        SimpleNamespace,
+        raising=False,
+    )
+    setup.backend._image_model_getter = lambda: SimpleNamespace(id="image-model")
+    setup.backend.report_quota_exceeded()
+    setup.session.rpc.tools = SimpleNamespace(
+        execute=AsyncMock(return_value={"resultType": "success", "contents": []})
+    )
+    with pytest.raises((HomeAssistantError, setup.error), match="valid image|generate"):
+        await setup.backend.async_generate_image(
+            "image",
+            setup.module.ImageTaskRequest(text="Draw", context=SimpleNamespace()),
+            ChatLog(),
+        )
+    assert setup.backend._quota_exceeded
+    assert (DOMAIN, "quota_exceeded_entry") in setup.issues
+    setup.session.rpc.tools.execute.assert_awaited_once()
+    setup.client.delete_session.assert_awaited_once()
     await assert_clean(setup)
 
 

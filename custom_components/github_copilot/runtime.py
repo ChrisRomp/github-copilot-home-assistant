@@ -253,7 +253,7 @@ class CopilotRuntime:
                         err,
                     )
                     self.image_models = None
-                    models = await async_probe_models(
+                    models, self.image_models = await async_probe_model_catalog(
                         token, flow_id=self.entry.entry_id, hass=self.hass
                     )
             except Exception as err:
@@ -309,16 +309,21 @@ class CopilotRuntime:
 
     async def _async_list_models_rpc(self, token: str) -> list[Any]:
         """List models with an explicit token on the already running client."""
-        from copilot.generated.rpc import ModelsListRequest
-
         if self.client is None:
             raise RuntimeError("The Copilot runtime is not started.")
-        result = await self.client.rpc.models.list(
-            ModelsListRequest(git_hub_token=token)
-        )
-        images = getattr(result, "image_models", None)
-        self.image_models = list(images) if images is not None else None
-        return list(result.models)
+        models, self.image_models = await _async_list_model_catalog(self.client, token)
+        return models
+
+
+async def _async_list_model_catalog(
+    client: Any, access_token: str
+) -> tuple[list[Any], list[Any] | None]:
+    """Keep chat and image capabilities from the same authenticated discovery."""
+    from copilot.generated.rpc import ModelsListRequest
+
+    result = await client.rpc.models.list(ModelsListRequest(git_hub_token=access_token))
+    images = getattr(result, "image_models", None)
+    return list(result.models), list(images) if images is not None else None
 
 
 class _ModelProbeCleanup:
@@ -403,7 +408,17 @@ class _ModelProbeCleanup:
 async def async_probe_models(
     access_token: str, *, flow_id: str, hass: HomeAssistant
 ) -> list[Any]:
-    """Start an isolated client, validate the token, and retrieve models."""
+    """Return chat models for configuration flows."""
+    models, _ = await async_probe_model_catalog(
+        access_token, flow_id=flow_id, hass=hass
+    )
+    return models
+
+
+async def async_probe_model_catalog(
+    access_token: str, *, flow_id: str, hass: HomeAssistant
+) -> tuple[list[Any], list[Any] | None]:
+    """Start an isolated client and discover authorized chat and image models."""
     from copilot import CopilotClient
     from copilot.client import RuntimeConnection
 
@@ -437,9 +452,9 @@ async def async_probe_models(
             log_level="error",
         )
         await client.start()
-        models = await client.list_models()
+        catalog = await _async_list_model_catalog(client, access_token)
         probe_failed = False
-        return models
+        return catalog
     except ReauthenticationRequired:
         raise
     except Exception as err:

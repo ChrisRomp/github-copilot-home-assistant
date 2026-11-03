@@ -188,12 +188,12 @@ async def test_model_list_falls_back_to_temporary_client(monkeypatch) -> None:
     async def failing_rpc(token: str) -> list[SimpleNamespace]:
         raise RuntimeError("experimental RPC unavailable")
 
-    async def probe(token: str, *, flow_id: str, hass) -> list[SimpleNamespace]:
+    async def probe(token: str, *, flow_id: str, hass):
         assert token == "token"
-        return [SimpleNamespace(id="probed-model")]
+        return [SimpleNamespace(id="probed-model")], None
 
     runtime._async_list_models_rpc = failing_rpc
-    monkeypatch.setattr(runtime_module, "async_probe_models", probe)
+    monkeypatch.setattr(runtime_module, "async_probe_model_catalog", probe)
 
     models = await runtime.async_list_models()
     assert [model.id for model in models] == ["probed-model"]
@@ -213,7 +213,7 @@ async def test_model_discovery_quota_is_reported_without_temporary_client_retry(
         side_effect=RuntimeError("Quota exceeded")
     )
     probe = AsyncMock()
-    monkeypatch.setattr(runtime_module, "async_probe_models", probe)
+    monkeypatch.setattr(runtime_module, "async_probe_model_catalog", probe)
     with pytest.raises(RuntimeError, match="quota exceeded"):
         await runtime.async_list_models()
     runtime.backend.report_quota_exceeded.assert_called_once()
@@ -239,7 +239,7 @@ async def test_running_discovery_rejected_pat_requires_reauth_without_retry(
     runtime.entry.data = {"auth_method": "pat", "access_token": "revoked-pat"}
     runtime._async_list_models_rpc = AsyncMock(side_effect=error)
     probe = AsyncMock()
-    monkeypatch.setattr(runtime_module, "async_probe_models", probe)
+    monkeypatch.setattr(runtime_module, "async_probe_model_catalog", probe)
     with pytest.raises(ReauthenticationRequired):
         await runtime.async_list_models()
     probe.assert_not_awaited()
@@ -274,7 +274,15 @@ def sdk_runtime(ha_boundary, monkeypatch):
         start=AsyncMock(),
         stop=AsyncMock(),
         force_stop=AsyncMock(),
-        list_models=AsyncMock(return_value=[SimpleNamespace(id="model")]),
+        rpc=SimpleNamespace(
+            models=SimpleNamespace(
+                list=AsyncMock(
+                    return_value=SimpleNamespace(
+                        models=[SimpleNamespace(id="model")], image_models=None
+                    )
+                )
+            )
+        ),
     )
     factory = Mock(return_value=client)
     monkeypatch.setattr(copilot, "CopilotClient", factory)
@@ -314,6 +322,56 @@ async def test_runtime_disables_native_expiry_so_backend_owns_session_lifetime(
     await sdk_runtime.runtime.async_stop()
 
 
+@pytest.mark.parametrize("availability", ["available", "unavailable", None])
+async def test_fallback_probe_recovers_image_catalog_without_bypassing_gate(
+    sdk_runtime, monkeypatch, availability
+):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    runtime.credentials.async_get_access_token = AsyncMock(return_value="token")
+    runtime._async_list_models_rpc = AsyncMock(
+        side_effect=RuntimeError("Running client discovery failed")
+    )
+    image = SimpleNamespace(
+        id="native-image",
+        is_default=True,
+        availability=availability,
+        supported_operations=["generate"],
+    )
+    images = [image] if availability is not None else None
+    runtime.image_models = [
+        SimpleNamespace(
+            id="stale-image",
+            is_default=True,
+            availability="available",
+            supported_operations=["generate"],
+        )
+    ]
+    sdk_runtime.client.rpc = SimpleNamespace(
+        models=SimpleNamespace(
+            list=AsyncMock(
+                return_value=SimpleNamespace(
+                    models=[SimpleNamespace(id="model")], image_models=images
+                )
+            )
+        )
+    )
+    notified = Mock()
+    monkeypatch.setattr(sdk_runtime.module, "async_dispatcher_send", notified)
+    models = await runtime.async_list_models()
+    assert [model.id for model in models] == ["model"]
+    assert runtime.image_models == images
+    assert (runtime.image_model() is image) is (availability == "available")
+    assert (
+        sdk_runtime.client.rpc.models.list.await_args.args[0].git_hub_token == "token"
+    )
+    notified.assert_called_once()
+    await runtime.async_list_models()
+    assert runtime._async_list_models_rpc.await_count == 1
+    assert (runtime.image_model() is image) is (availability == "available")
+    await runtime.async_stop()
+
+
 async def test_runtime_cleans_abandoned_sessions_before_admitting_requests(sdk_runtime):
     async def cleanup(client, directory):
         sdk_runtime.client.start.assert_awaited_once()
@@ -340,7 +398,7 @@ async def test_cancelled_startup_cleanup_does_not_create_backend(sdk_runtime):
     sdk_runtime.client.stop.assert_awaited_once()
 
 
-@pytest.mark.parametrize("failed_stage", ["start", "list_models"])
+@pytest.mark.parametrize("failed_stage", ["start", "model_catalog"])
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
@@ -360,7 +418,12 @@ async def test_cancelled_startup_cleanup_does_not_create_backend(sdk_runtime):
 async def test_probe_classifies_only_confirmed_auth_rejections_and_cleans_up(
     sdk_runtime, failed_stage, error, expected
 ):
-    getattr(sdk_runtime.client, failed_stage).side_effect = error
+    failing_call = (
+        sdk_runtime.client.start
+        if failed_stage == "start"
+        else sdk_runtime.client.rpc.models.list
+    )
+    failing_call.side_effect = error
     with pytest.raises(expected):
         await sdk_runtime.module.async_probe_models(
             "test-pat", flow_id="flow", hass=sdk_runtime.runtime.hass
@@ -465,7 +528,7 @@ async def test_probe_retains_client_and_directory_if_force_stop_fails(
 async def test_probe_cleanup_does_not_replace_original_error(
     sdk_runtime, original_error, force_fails, caplog
 ):
-    sdk_runtime.client.list_models.side_effect = original_error
+    sdk_runtime.client.rpc.models.list.side_effect = original_error
     sdk_runtime.client.stop.side_effect = RuntimeError("graceful stop failed")
     if force_fails:
         sdk_runtime.client.force_stop.side_effect = OSError("process still running")

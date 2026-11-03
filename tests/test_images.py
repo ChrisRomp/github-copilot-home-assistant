@@ -1,6 +1,8 @@
 """Image guards use small fixtures rather than stressing the validation host."""
 
 import base64
+import struct
+import zlib
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -59,6 +61,36 @@ def test_corrupt_image_fails_instead_of_being_omitted(image_setup):
 
     image_setup.path.write_bytes(b"not an image")
     with pytest.raises(HomeAssistantError, match="valid image"):
+        prepare_images([image_setup.attachment], image_setup.model)
+
+
+def png_chunk(kind, data):
+    return (
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    )
+
+
+def small_png(pixel_data, extra_chunk=b""):
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + png_chunk(b"IDAT", pixel_data)
+        + extra_chunk
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def test_invalid_png_chunk_syntax_is_reported_as_invalid_attachment(image_setup):
+    from homeassistant.exceptions import HomeAssistantError
+
+    raw = small_png(zlib.compress(b""), png_chunk(b"BAD!", b""))
+    with Image.open(BytesIO(raw)) as image, pytest.raises(SyntaxError):
+        image.load()
+    image_setup.path.write_bytes(raw)
+    with pytest.raises(HomeAssistantError, match="valid image attachment"):
         prepare_images([image_setup.attachment], image_setup.model)
 
 
@@ -159,6 +191,38 @@ def test_native_output_duplicate_representations_are_one_image(image_setup):
     assert image.width == image.height == 32
     assert image.data == image_setup.path.read_bytes()
     assert image.mime_type == "image/png"
+
+
+def test_output_png_with_valid_crc_but_invalid_pixels_is_rejected():
+    from homeassistant.exceptions import HomeAssistantError
+
+    raw = small_png(b"not a zlib stream")
+    with Image.open(BytesIO(raw)) as image:
+        image.verify()
+    with pytest.raises(HomeAssistantError, match="one valid image"):
+        ImageResultCollector().decode(image_result(raw))
+
+
+def test_output_png_chunk_syntax_is_reported_as_invalid_image():
+    from homeassistant.exceptions import HomeAssistantError
+
+    raw = small_png(zlib.compress(b""), png_chunk(b"BAD!", b""))
+    with pytest.raises(HomeAssistantError, match="one valid image"):
+        ImageResultCollector().decode(image_result(raw))
+
+
+def test_output_pixel_budget_is_checked_before_decode(monkeypatch, image_setup):
+    from homeassistant.exceptions import HomeAssistantError
+
+    image = Mock(format="PNG", is_animated=False, size=(100_000, 100_000))
+    opened = Mock(return_value=image)
+    monkeypatch.setattr(Image, "open", opened)
+    with pytest.raises(HomeAssistantError, match="processing budget"):
+        ImageResultCollector().decode(image_result(image_setup.path.read_bytes()))
+    opened.assert_called_once()
+    image.verify.assert_not_called()
+    image.load.assert_not_called()
+    image.close.assert_called_once()
 
 
 def test_native_asset_reference_is_resolved_and_cleared(image_setup):

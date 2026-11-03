@@ -707,8 +707,12 @@ class ConversationBackend:
                     except TimeoutError:
                         raise
                     except Exception as err:
-                        if is_task and is_output_schema_error(err, session_error):
-                            self._raise_if_quota_exceeded(err, session_error)
+                        self._raise_if_quota_exceeded(err, session_error)
+                        if (
+                            is_task
+                            and user_input.output_schema is not None
+                            and is_output_schema_error(err, session_error)
+                        ):
                             keywords = unsupported_schema_keywords(err, session_error)
                             _LOGGER.warning(
                                 "GitHub Copilot AI Task failed: "
@@ -944,6 +948,7 @@ class ConversationBackend:
         chat_log.async_add_assistant_content_without_tools(
             AssistantContent(agent_id=agent_id, content="Generated an image.")
         )
+        self._clear_quota_issue()
         return image
 
     async def _async_abort_request(

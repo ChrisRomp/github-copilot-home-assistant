@@ -173,12 +173,13 @@ writable scratch directory. Generate bounded fixtures separately with
 dependencies and checksum-verified native runtime must already be available.
 
 With runtime 1.0.103, PNG/JPEG/static GIF/WebP inputs reached the fake model;
-oversized inputs were rejected before inference. Successful input cases peaked
-below 457 MiB for the whole validation container, and the large valid output
-case peaked below 492 MiB. A deliberately oversized output reached the 512 MiB
-ceiling and was rejected, without OOM or process death. These numbers include
-Python, the native runtime, and test infrastructure, not a running HA server.
-Re-profile after changing the SDK, input/output bounds, or image processing.
+oversized inputs were rejected before inference. The latest profile, including
+generated-PNG pixel decoding after integrity and budget checks, peaked below
+463 MiB for successful input cases and below 497 MiB for the large valid output.
+A deliberately oversized output reached the 512 MiB ceiling and was rejected,
+without OOM or process death. These numbers include Python, the native runtime,
+and test infrastructure, not a running HA server. Re-profile after changing the
+SDK, input/output bounds, or image processing.
 
 Native generation was verified on runtime 1.0.103, including explicit session
 credentials with logged-in-user fallback disabled. The implementation uses

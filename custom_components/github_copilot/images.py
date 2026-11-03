@@ -98,6 +98,7 @@ class ImageResultCollector:
             TypeError,
             KeyError,
             OSError,
+            SyntaxError,
             Image.DecompressionBombError,
         ) as err:
             raise HomeAssistantError(
@@ -158,6 +159,8 @@ class ImageResultCollector:
             ):
                 raise ValueError("Image dimensions exceed host budget")
             image.verify()
+        with closing(Image.open(BytesIO(raw))) as image:
+            image.load()
         structured = result.get("structuredContent") or {}
         if not isinstance(structured, dict):
             raise ValueError("Invalid image metadata")
@@ -272,6 +275,7 @@ def prepare_images(attachments: list[Attachment], model: Any) -> list[SDKAttachm
         except (
             OSError,
             ValueError,
+            SyntaxError,
             UnidentifiedImageError,
             Image.DecompressionBombError,
         ) as err:
