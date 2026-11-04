@@ -98,7 +98,7 @@ def ha_boundary(monkeypatch):
             "CONF_LLM_HASS_API": "llm_hass_api",
             "CONF_PROMPT": "prompt",
             "MATCH_ALL": "*",
-            "Platform": SimpleNamespace(CONVERSATION="conversation"),
+            "Platform": SimpleNamespace(CONVERSATION="conversation", AI_TASK="ai_task"),
         },
         "homeassistant.helpers": {},
         "homeassistant.helpers.chat_session": {

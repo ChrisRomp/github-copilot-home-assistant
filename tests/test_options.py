@@ -22,6 +22,8 @@ def options_setup(ha_boundary):
         entry_id="entry",
         options={
             CONF_MODEL: "gpt-6-sol",
+            "ai_task_model": "gpt-6-sol",
+            "ai_task_timeout": 180,
             CONF_PROMPT: "Previous instructions",
             CONF_ENABLE_DEVICE_CONTROL: True,
             CONF_LLM_HASS_API: ["assist"],
@@ -30,6 +32,7 @@ def options_setup(ha_boundary):
             "account_id": "123",
             "access_token": "test-token",
             CONF_MODEL_BILLING: {"model": "gpt-6-sol", "multiplier": 1.0},
+            "ai_task_model_billing": {"model": "gpt-6-sol", "multiplier": 0.5},
         },
     )
     runtime = SimpleNamespace(
@@ -66,6 +69,8 @@ async def test_prompt_edit_preserves_unchanged_model_billing(options_setup, mult
 
     assert result["data"] == {
         CONF_MODEL: "gpt-6-sol",
+        "ai_task_model": "gpt-6-sol",
+        "ai_task_timeout": 180,
         CONF_ENABLE_DEVICE_CONTROL: True,
         CONF_LLM_HASS_API: ["assist"],
         CONF_PROMPT: "Updated instructions",
@@ -197,7 +202,9 @@ async def test_options_default_is_always_selectable(
     runtime.async_list_models.assert_awaited_once_with(force_refresh=True)
     values = form["data_schema"]({})
     assert values[CONF_MODEL] == expected
-    assert form["errors"] == ({"base": error} if error else {})
+    assert form["errors"] == (
+        {"base": error, "ai_task_model": "task_model_unavailable"} if error else {}
+    )
     if error:
         assert form["description_placeholders"]["model"] == saved
         with pytest.raises(vol.Invalid):
@@ -233,3 +240,21 @@ async def test_options_reports_discovery_quota(ha_boundary):
     )
     flow.hass = SimpleNamespace(data={DOMAIN: {"entry": runtime}})
     assert await flow.async_step_init() == {"type": "abort", "reason": "quota_exceeded"}
+
+
+async def test_conversation_model_change_does_not_change_task_model(options_setup):
+    setup = options_setup
+    form = await setup.flow.async_step_init()
+    result = await setup.flow.async_step_init(
+        form["data_schema"]({CONF_MODEL: "gpt-6.1-sol", "ai_task_timeout": 240})
+    )
+    assert result["data"]["ai_task_model"] == "gpt-6-sol"
+    assert result["data"]["ai_task_timeout"] == 240
+    assert setup.entry.data["ai_task_model_billing"]["model"] == "gpt-6-sol"
+
+
+@pytest.mark.parametrize("timeout", [0, -1, "invalid"])
+async def test_invalid_task_timeout_is_rejected(options_setup, timeout):
+    form = await options_setup.flow.async_step_init()
+    with pytest.raises(vol.Invalid):
+        form["data_schema"]({"ai_task_timeout": timeout})

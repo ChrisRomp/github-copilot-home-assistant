@@ -195,8 +195,11 @@ async def test_real_chat_log_records_external_tool_once_and_returns_speech(
         await hass.async_stop()
 
 
+@pytest.mark.parametrize("task_mode", [False, True])
 async def test_real_live_context_filters_exposed_entities_without_promoting_data(
     tmp_path,
+    task_mode,
+    monkeypatch,
 ):
     from homeassistant.components.conversation import ConversationInput
     from homeassistant.components.conversation.chat_log import ChatLog
@@ -312,7 +315,27 @@ async def test_real_live_context_filters_exposed_entities_without_promoting_data
             )
 
         session.send_and_wait.side_effect = send
-        await backend.async_handle_message(user.agent_id, user, chat)
+        from homeassistant.helpers import llm
+
+        from custom_components.github_copilot.backend import DataTaskRequest
+
+        get_api = AsyncMock(return_value=api)
+        if task_mode:
+            monkeypatch.setattr(llm, "async_get_api", get_api)
+
+        async def run():
+            if task_mode:
+                await backend.async_generate_data(
+                    user.agent_id,
+                    DataTaskRequest(
+                        text=user.text, context=user.as_llm_context("github_copilot")
+                    ),
+                    chat,
+                )
+            else:
+                await backend.async_handle_message(user.agent_id, user, chat)
+
+        await run()
         assert results[0].result_type == "success"
         assert "Kitchen temperature" in results[0].text_result_for_llm
         assert "21" in results[0].text_result_for_llm
@@ -326,9 +349,13 @@ async def test_real_live_context_filters_exposed_entities_without_promoting_data
             client.create_session.await_args.kwargs["system_message"]
         )
         filters = {"name": "Private sensor", "domain": "sensor"}
-        await backend.async_handle_message(user.agent_id, user, chat)
+        await run()
         assert results[1].result_type == "failure"
         assert "PRIVATE_VALUE" not in results[1].text_result_for_llm
+        if task_mode:
+            assert get_api.await_args.args[1] == ["assist"]
+            assert get_api.await_args.args[2].assistant == "conversation"
+            assert not backend._sessions
     finally:
         if backend is not None:
             await backend.async_stop()

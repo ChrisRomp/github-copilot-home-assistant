@@ -78,11 +78,17 @@ async def test_oauth_progress_reuses_one_poll_and_returns_model_form(
     form = await setup.flow.async_step_oauth_complete()
     assert form["step_id"] == "model"
     submitted = form["data_schema"]({"model": "gpt-6-luna"})
-    assert submitted == {"model": "gpt-6-luna", "enable_device_control": False}
+    assert submitted == {
+        "model": "gpt-6-luna",
+        "enable_device_control": False,
+        "ai_task_timeout": 180,
+    }
     result = await setup.flow.async_step_model(submitted)
     assert result["data"]["account_id"] == "123"
     assert result["options"] == {
         "model": "gpt-6-luna",
+        "ai_task_model": "gpt-6-luna",
+        "ai_task_timeout": 180,
         "enable_device_control": False,
         "llm_hass_api": None,
         "prompt": "",
@@ -126,6 +132,8 @@ async def test_initial_conversation_options_are_saved(
     assert result["type"] == "create_entry"
     assert result["options"] == {
         "model": "gpt-6-luna",
+        "ai_task_model": "gpt-6-luna",
+        "ai_task_timeout": 180,
         "enable_device_control": device_control_enabled,
         "llm_hass_api": ["assist"] if device_control_enabled else None,
         "prompt": prompt if prompt is not None else "",
@@ -136,6 +144,7 @@ async def test_initial_conversation_options_are_saved(
         "model": "gpt-6-luna",
         "multiplier": 0.5,
     }
+    assert result["data"]["ai_task_model_billing"] == result["data"]["model_billing"]
     setup.flow.async_remove()
 
 
@@ -146,6 +155,7 @@ async def test_initial_options_require_an_available_model_and_default_control_of
     schema = form["data_schema"]
     assert schema({"model": "gpt-6-luna"}) == {
         "model": "gpt-6-luna",
+        "ai_task_timeout": 180,
         "enable_device_control": False,
     }
     with pytest.raises(vol.Invalid):

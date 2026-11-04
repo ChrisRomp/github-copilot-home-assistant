@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+
 from .api_errors import is_authentication_error, is_quota_error
 from .auth import (
     CredentialStore,
@@ -18,17 +20,25 @@ from .auth import (
     ReauthenticationRequired,
     async_start_reauth_flow,
 )
+from .cleanup import async_wait_cleanup
 from .const import (
     CONF_ACCESS_TOKEN_EXPIRES_AT,
+    CONF_AI_TASK_MODEL,
+    CONF_AI_TASK_MODEL_BILLING,
     CONF_MODEL,
     CONF_MODEL_BILLING,
     DOMAIN,
     MODEL_CACHE_SECONDS,
+    MODELS_UPDATED_SIGNAL,
     OAUTH_CLIENT_ID,
+    SDK_CLEANUP_TIMEOUT_SECONDS,
+    SDK_FORCE_STOP_TIMEOUT_SECONDS,
     SDK_TOKEN_MIN_LIFETIME_SECONDS,
+    VERIFIED_IMAGE_RUNTIME,
 )
 from .models import model_billing
 from .provisioning import async_runtime_path
+from .session_cleanup import async_cleanup_startup_sessions
 
 if TYPE_CHECKING:
     from copilot.client import GitHubTokenProviderArgs, GitHubTokenProviderResult
@@ -52,15 +62,20 @@ class CopilotRuntime:
         self.base_directory = Path(hass.config.path(".storage", DOMAIN, entry.entry_id))
         self.is_started = False
         self._models: list[Any] | None = None
+        self.image_models: list[Any] | None = None
         self._models_fetched_at = 0.0
         self._models_lock = asyncio.Lock()
         self._stop_lock = asyncio.Lock()
+        self._force_stop_task: asyncio.Task[None] | None = None
+        self._force_stop_client: Any | None = None
+        self._stopping = False
 
     async def async_start(self) -> None:
         """Provision and start the pinned native runtime."""
         from copilot import CopilotClient
         from copilot.client import RuntimeConnection
 
+        self._stopping = False
         try:
             await self.credentials.async_ensure_account_id()
         except ReauthenticationRequired:
@@ -81,21 +96,75 @@ class CopilotRuntime:
             log_level="error",
         )
         await self.client.start()
+        await async_cleanup_startup_sessions(self.client, self.base_directory)
         from .backend import ConversationBackend
 
-        self.backend = ConversationBackend(
+        client = self.client
+
+        def on_runtime_failure(stopped: bool) -> None:
+            """Never await reload from a turn whose teardown reload must drain."""
+            if (
+                self.client is not client
+                or self.backend is not backend
+                or self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id) is not self
+            ):
+                return
+            self.is_started = False
+            self.image_models = None
+            async_dispatcher_send(
+                self.hass, f"{MODELS_UPDATED_SIGNAL}_{self.entry.entry_id}"
+            )
+            if stopped and not self._stopping and not self.hass.is_stopping:
+                self.hass.config_entries.async_schedule_reload(self.entry.entry_id)
+
+        backend = ConversationBackend(
             self.hass,
             self.entry,
             self.client,
             self.async_github_token_provider,
             self.async_list_models,
             access_token_getter=self.credentials.async_get_access_token,
+            image_model_getter=self.image_model,
+            force_stop=lambda: self._async_force_stop_client(client),
+            on_runtime_failure=on_runtime_failure,
         )
+        self.backend = backend
         self.is_started = True
+
+    async def _async_force_stop_client(self, client: Any) -> None:
+        """Share native termination between turn recovery and runtime shutdown."""
+        if (
+            self._force_stop_client is not client
+            or self._force_stop_task is None
+            or (
+                self._force_stop_task.done()
+                and (
+                    self._force_stop_task.cancelled()
+                    or self._force_stop_task.exception() is not None
+                )
+            )
+        ):
+            self._force_stop_client = client
+
+            async def stop() -> None:
+                try:
+                    async with asyncio.timeout(SDK_FORCE_STOP_TIMEOUT_SECONDS):
+                        await client.force_stop()
+                except BaseException as err:
+                    _LOGGER.error(
+                        "Unable to confirm native Copilot termination (%s); "
+                        "retaining the client for retry",
+                        type(err).__name__,
+                    )
+                    raise
+
+            self._force_stop_task = asyncio.create_task(stop())
+        await async_wait_cleanup(self._force_stop_task)
 
     async def async_stop(self) -> None:
         """Stop the SDK runtime and release its process resources."""
         async with self._stop_lock:
+            self._stopping = True
             backend, self.backend = self.backend, None
             client, self.client = self.client, None
             self.is_started = False
@@ -105,12 +174,34 @@ class CopilotRuntime:
             finally:
                 if client is not None:
                     try:
-                        await client.stop()
-                    except BaseException:
+                        async with asyncio.timeout(SDK_CLEANUP_TIMEOUT_SECONDS):
+                            await client.stop()
+                    except BaseException as err:
+                        # Keep ownership until native termination is confirmed.
                         self.client = client
-                        await client.force_stop()
-                        self.client = None
-                        raise
+                        self.backend = backend
+
+                        # Caller cancellation must not skip confirmed-stop bookkeeping.
+                        async def force_stop_and_finalize() -> None:
+                            await self._async_force_stop_client(client)
+                            if backend is not None:
+                                backend.mark_runtime_stopped()
+                            self.client = None
+                            self.backend = None
+
+                        await async_wait_cleanup(
+                            asyncio.create_task(force_stop_and_finalize())
+                        )
+                        if isinstance(err, TimeoutError):
+                            _LOGGER.warning(
+                                "Copilot graceful shutdown timed out; "
+                                "the native process was stopped forcibly"
+                            )
+                        else:
+                            raise
+                    else:
+                        if backend is not None:
+                            backend.mark_runtime_stopped()
 
     async def async_github_token_provider(
         self, request: GitHubTokenProviderArgs
@@ -168,7 +259,8 @@ class CopilotRuntime:
                         "using a temporary client",
                         err,
                     )
-                    models = await async_probe_models(
+                    self.image_models = None
+                    models, self.image_models = await async_probe_model_catalog(
                         token, flow_id=self.entry.entry_id, hass=self.hass
                     )
             except Exception as err:
@@ -183,27 +275,62 @@ class CopilotRuntime:
                 raise
 
             self._models = list(models)
-            billing = model_billing(self.entry.options[CONF_MODEL], self._models)
-            if (
-                billing["multiplier"] is not None
-                and self.entry.data.get(CONF_MODEL_BILLING) != billing
+            data = dict(self.entry.data)
+            for model_key, billing_key in (
+                (CONF_MODEL, CONF_MODEL_BILLING),
+                (CONF_AI_TASK_MODEL, CONF_AI_TASK_MODEL_BILLING),
             ):
-                self.hass.config_entries.async_update_entry(
-                    self.entry, data={**self.entry.data, CONF_MODEL_BILLING: billing}
-                )
+                model = self.entry.options.get(model_key)
+                if model is None:
+                    continue
+                billing = model_billing(model, self._models)
+                if billing["multiplier"] is not None:
+                    data[billing_key] = billing
+            if data != self.entry.data:
+                self.hass.config_entries.async_update_entry(self.entry, data=data)
             self._models_fetched_at = time.monotonic()
+            async_dispatcher_send(
+                self.hass, f"{MODELS_UPDATED_SIGNAL}_{self.entry.entry_id}"
+            )
             return list(models)
+
+    def image_model(self) -> Any | None:
+        """Return the runtime-selected, account-authorized generation model."""
+        from copilot._cli_version import CLI_VERSION
+
+        if CLI_VERSION != VERIFIED_IMAGE_RUNTIME:
+            return None
+        for model in self.image_models or []:
+            availability = getattr(model.availability, "value", model.availability)
+            operations = {
+                getattr(operation, "value", operation)
+                for operation in model.supported_operations
+            }
+            if (
+                model.is_default
+                and availability == "available"
+                and "generate" in operations
+            ):
+                return model
+        return None
 
     async def _async_list_models_rpc(self, token: str) -> list[Any]:
         """List models with an explicit token on the already running client."""
-        from copilot.generated.rpc import ModelsListRequest
-
         if self.client is None:
             raise RuntimeError("The Copilot runtime is not started.")
-        result = await self.client.rpc.models.list(
-            ModelsListRequest(git_hub_token=token)
-        )
-        return list(result.models)
+        models, self.image_models = await _async_list_model_catalog(self.client, token)
+        return models
+
+
+async def _async_list_model_catalog(
+    client: Any, access_token: str
+) -> tuple[list[Any], list[Any] | None]:
+    """Keep chat and image capabilities from the same authenticated discovery."""
+    from copilot.generated.rpc import ModelsListRequest
+
+    result = await client.rpc.models.list(ModelsListRequest(git_hub_token=access_token))
+    images = getattr(result, "image_models", None)
+    return list(result.models), list(images) if images is not None else None
 
 
 class _ModelProbeCleanup:
@@ -224,11 +351,13 @@ class _ModelProbeCleanup:
             try:
                 if self.client is not None:
                     try:
-                        await self.client.stop()
+                        async with asyncio.timeout(SDK_CLEANUP_TIMEOUT_SECONDS):
+                            await self.client.stop()
                     except BaseException as err:
                         stop_error = err
                         try:
-                            await self.client.force_stop()
+                            async with asyncio.timeout(SDK_FORCE_STOP_TIMEOUT_SECONDS):
+                                await self.client.force_stop()
                         except BaseException:
                             _LOGGER.exception(
                                 "Failed to force-stop a Copilot model probe; "
@@ -286,7 +415,17 @@ class _ModelProbeCleanup:
 async def async_probe_models(
     access_token: str, *, flow_id: str, hass: HomeAssistant
 ) -> list[Any]:
-    """Start an isolated client, validate the token, and retrieve models."""
+    """Return chat models for configuration flows."""
+    models, _ = await async_probe_model_catalog(
+        access_token, flow_id=flow_id, hass=hass
+    )
+    return models
+
+
+async def async_probe_model_catalog(
+    access_token: str, *, flow_id: str, hass: HomeAssistant
+) -> tuple[list[Any], list[Any] | None]:
+    """Start an isolated client and discover authorized chat and image models."""
     from copilot import CopilotClient
     from copilot.client import RuntimeConnection
 
@@ -320,9 +459,9 @@ async def async_probe_models(
             log_level="error",
         )
         await client.start()
-        models = await client.list_models()
+        catalog = await _async_list_model_catalog(client, access_token)
         probe_failed = False
-        return models
+        return catalog
     except ReauthenticationRequired:
         raise
     except Exception as err:

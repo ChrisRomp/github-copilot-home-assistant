@@ -9,16 +9,23 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import voluptuous as vol
 from copilot import ToolSet
-from copilot.generated.rpc import PermissionDecisionReject, SessionUpdateOptionsParams
+from copilot.generated.rpc import (
+    PermissionDecisionApproveOnce,
+    PermissionDecisionReject,
+    SessionUpdateOptionsParams,
+    ToolsExecuteRequest,
+)
 from copilot.session import SYSTEM_MESSAGE_SECTIONS
 from copilot.session_events import (
     AssistantMessageData,
     AssistantMessageDeltaData,
+    SessionBinaryAssetData,
     SessionErrorData,
 )
 from copilot.tools import Tool as CopilotTool
@@ -32,35 +39,72 @@ from homeassistant.helpers.chat_session import current_session
 from homeassistant.helpers.json import json_dumps
 from homeassistant.util import dt as dt_util
 
-from .api_errors import is_model_unavailable_error, is_quota_error
+from .api_errors import (
+    is_authentication_error,
+    is_model_unavailable_error,
+    is_output_schema_error,
+    is_quota_error,
+    unsupported_schema_keywords,
+)
 from .auth import OAuthError, ReauthenticationRequired, async_start_reauth_flow
+from .cleanup import async_wait_cleanup
 from .const import (
+    AI_TASK_SYSTEM_PROMPT,
     AUTH_METHOD_PAT,
+    CONF_AI_TASK_MODEL,
+    CONF_AI_TASK_MODEL_BILLING,
+    CONF_AI_TASK_TIMEOUT,
     CONF_AUTH_METHOD,
     CONF_ENABLE_DEVICE_CONTROL,
     CONF_MODEL,
     CONF_MODEL_BILLING,
     CONF_PROMPT,
     CONTEXT_TOOL_NAME,
+    DATA_IMAGE_LOCK,
+    DEFAULT_AI_TASK_TIMEOUT,
     DEFAULT_SYSTEM_PROMPT,
     DOMAIN,
+    IMAGE_TOOL_NAME,
     ISSUE_MODEL_FALLBACK,
     ISSUE_MODEL_UNAVAILABLE,
     ISSUE_QUOTA_EXCEEDED,
+    ISSUE_TASK_MODEL_FALLBACK,
+    ISSUE_TASK_MODEL_UNAVAILABLE,
     MAX_ACTIVE_SESSIONS,
     MAX_CONCURRENT_TURNS,
     MODEL_CACHE_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
+    SDK_CLEANUP_TIMEOUT_SECONDS,
+    SDK_FORCE_STOP_TIMEOUT_SECONDS,
     SESSION_IDLE_SECONDS,
+    STARTUP_MODEL_RETRY_DELAYS,
 )
-from .models import ModelResolution, model_budget, resolve_model, selectable_models
-from .schema import convert_tool_schema
+from .models import (
+    ModelResolution,
+    model_budget,
+    resolve_model,
+    selectable_models,
+    supports_vision,
+)
+from .schema import (
+    OutputSchema,
+    OutputValidationError,
+    convert_tool_schema,
+    prepare_output_schema,
+)
 
 if TYPE_CHECKING:
     from copilot.client import GitHubTokenProviderArgs, GitHubTokenProviderResult
+    from copilot.session import Attachment as SDKAttachment
     from copilot.session import CopilotSession
-    from homeassistant.components.conversation import ChatLog, ConversationInput
+    from homeassistant.components.conversation import (
+        Attachment,
+        ChatLog,
+        ConversationInput,
+    )
     from homeassistant.config_entries import ConfigEntry
+
+    from .images import GeneratedImage
 
 _LOGGER = logging.getLogger(__name__)
 _CONTEXT_PARAMETERS = vol.Schema(
@@ -82,11 +126,40 @@ class _SessionRecord:
     """A short-lived Copilot conversation session."""
 
     session: CopilotSession
-    model_id: str
+    model_id: str | None
     prompt_context: dict[str, str] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_used: float = field(default_factory=time.monotonic)
     current_handler: Any | None = None
+
+
+@dataclass
+class DataTaskRequest:
+    """One task's inputs, independent of conversation/voice input types."""
+
+    text: str
+    context: llm.LLMContext
+    api: llm.APIInstance | None = None
+    structure: Callable[[Any], Any] | None = None
+    attachments: list[Attachment] = field(default_factory=list)
+    extra_system_prompt: str = ""
+    model_id: str | None = None
+    sdk_attachments: list[SDKAttachment] | None = None
+    output_schema: OutputSchema | None = None
+    session: CopilotSession | None = field(default=None, init=False, repr=False)
+
+
+@dataclass
+class ImageTaskRequest(DataTaskRequest):
+    """An explicitly requested native image operation, not a model tool loop."""
+
+    call_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    active: bool = False
+    permission_used: bool = False
+
+    @property
+    def arguments(self) -> dict[str, str]:
+        return {"prompt": self.text}
 
 
 class ConversationBackend:
@@ -103,6 +176,9 @@ class ConversationBackend:
         model_lister: Callable[..., Awaitable[list[Any]]],
         *,
         access_token_getter: Callable[[], Awaitable[str]],
+        image_model_getter: Callable[[], Any | None] | None = None,
+        force_stop: Callable[[], Awaitable[None]] | None = None,
+        on_runtime_failure: Callable[[bool], None] | None = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
@@ -110,8 +186,20 @@ class ConversationBackend:
         self.token_provider = token_provider
         self._access_token_getter = access_token_getter
         self._model_lister = model_lister
+        self._image_model_getter = image_model_getter
+        self._force_stop = force_stop or self._async_force_client
+        self._on_runtime_failure = on_runtime_failure
+        self._force_stop_task: asyncio.Task[None] | None = None
+        self._stop_unconfirmed = False
+        self._quarantined_image_lock: asyncio.Lock | None = None
         self._model_resolution: ModelResolution | None = None
         self.active_model: str | None = None
+        self.active_task_model: str | None = None
+        self._task_model_resolution: ModelResolution | None = None
+        self._task_vision_resolution: ModelResolution | None = None
+        self._catalog: dict[str, Any] = {}
+        self._model_catalog_loaded = False
+        self._task_active = False
         self._sessions: dict[str, _SessionRecord] = {}
         self._turn_slots = asyncio.Semaphore(MAX_CONCURRENT_TURNS)
         self._turn_tasks: set[asyncio.Task[Any]] = set()
@@ -129,6 +217,37 @@ class ConversationBackend:
         chat_log: ChatLog,
     ) -> None:
         """Stream a Copilot response into Home Assistant's chat log."""
+        await self._async_submit_turn(agent_id, user_input, chat_log)
+
+    async def async_generate_data(
+        self, agent_id: str, request: DataTaskRequest, chat_log: ChatLog
+    ) -> str | dict[str, Any]:
+        """Run an isolated, bounded task using the same execution protections."""
+        result = await self._async_submit_turn(agent_id, request, chat_log)
+        if not isinstance(result, (str, dict)):
+            raise HomeAssistantError("Unexpected AI Task result type.")
+        return result
+
+    async def async_generate_image(
+        self, agent_id: str, request: ImageTaskRequest, chat_log: ChatLog
+    ) -> GeneratedImage:
+        from .images import GeneratedImage
+
+        try:
+            result = await self._async_submit_turn(agent_id, request, chat_log)
+        except Exception as err:
+            self._raise_if_quota_exceeded(err)
+            raise
+        if not isinstance(result, GeneratedImage):
+            raise HomeAssistantError("Unexpected image task result type.")
+        return result
+
+    async def _async_submit_turn(
+        self,
+        agent_id: str,
+        user_input: ConversationInput | DataTaskRequest,
+        chat_log: ChatLog,
+    ) -> str | dict[str, Any] | GeneratedImage:
         if self._closed:
             raise HomeAssistantError("GitHub Copilot is shutting down.")
         caller = asyncio.current_task()
@@ -137,12 +256,12 @@ class ConversationBackend:
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
         try:
-            await asyncio.shield(task)
+            return await asyncio.shield(task)
         except asyncio.CancelledError as err:
             if not task.done() and not task.cancelling():
                 task.cancel()
             # A caller's cancellation must not interrupt an already-draining turn.
-            await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+            await self._async_drain_work(task)
             if self._closed and not caller.cancelling():
                 raise HomeAssistantError("GitHub Copilot is shutting down.") from err
             raise
@@ -150,12 +269,22 @@ class ConversationBackend:
     async def _async_run_turn(
         self,
         agent_id: str,
-        user_input: ConversationInput,
+        user_input: ConversationInput | DataTaskRequest,
         chat_log: ChatLog,
-    ) -> None:
+    ) -> str | dict[str, Any] | GeneratedImage:
         """Own admission and execution without tracking HA's caller task."""
         acquired = False
+        task_admitted = False
+        image_lock: asyncio.Lock | None = None
         try:
+            is_task = isinstance(user_input, DataTaskRequest)
+            if is_task:
+                if self._task_active:
+                    raise HomeAssistantError(
+                        "GitHub Copilot is busy with another AI Task. Use queued "
+                        "automation/script mode if requests should wait."
+                    )
+                self._task_active = task_admitted = True
             try:
                 await asyncio.wait_for(self._turn_slots.acquire(), timeout=0.1)
             except TimeoutError as err:
@@ -165,21 +294,166 @@ class ConversationBackend:
             acquired = True
             if self._closed:
                 raise HomeAssistantError("GitHub Copilot is shutting down.")
-            await self._async_handle_message(agent_id, user_input, chat_log)
+            if not isinstance(user_input, DataTaskRequest):
+                return await self._async_handle_message(agent_id, user_input, chat_log)
+            timeout = self.entry.options.get(
+                CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT
+            )
+            if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1:
+                raise HomeAssistantError("Configure a positive AI Task timeout.")
+            is_image = isinstance(user_input, ImageTaskRequest)
+            if user_input.attachments or is_image:
+                from . import const
+                from .images import verified_image_runtime
+
+                if user_input.attachments and not (
+                    const.IMAGE_INPUT_VERIFIED
+                    and const.IMAGE_HOST_BUDGET_VERIFIED
+                    and verified_image_runtime()
+                ):
+                    raise HomeAssistantError(
+                        "Image input is not enabled: pinned-runtime and modest-host "
+                        "resource validation has not been completed."
+                    )
+                if is_image and not (
+                    const.IMAGE_GENERATION_VERIFIED and const.IMAGE_HOST_BUDGET_VERIFIED
+                ):
+                    raise HomeAssistantError(
+                        "Image generation is not enabled until its native and "
+                        "modest-host resource contracts are verified."
+                    )
+                lock = self.hass.data.setdefault(DATA_IMAGE_LOCK, asyncio.Lock())
+                if lock.locked():
+                    raise HomeAssistantError(
+                        "GitHub Copilot is busy processing images."
+                    )
+                await lock.acquire()
+                image_lock = lock
+            work = asyncio.create_task(
+                self._async_task_work(agent_id, user_input, chat_log, timeout)
+            )
+            try:
+                return await asyncio.wait_for(asyncio.shield(work), timeout)
+            except TimeoutError as err:
+                raise HomeAssistantError(
+                    (
+                        "GitHub Copilot image generation timed out. The request "
+                        "was not retried and may have incurred usage."
+                    )
+                    if is_image
+                    else (
+                        "GitHub Copilot AI Task timed out. "
+                        "The request was not retried; "
+                        "any actions already completed have not been undone."
+                    )
+                ) from err
+            finally:
+                if not work.done():
+                    if not work.cancelling():
+                        work.cancel()
+                    await self._async_drain_work(work)
         finally:
-            if acquired:
-                self._turn_slots.release()
+            try:
+                # The execution deadline has ended; disposal has its own bounds.
+                if (
+                    isinstance(user_input, DataTaskRequest)
+                    and user_input.session is not None
+                ):
+                    await self._async_dispose_session(user_input.session)
+            finally:
+                if isinstance(user_input, DataTaskRequest):
+                    user_input.sdk_attachments = None
+                    user_input.session = None
+                if image_lock is not None:
+                    if self._stop_unconfirmed:
+                        self._quarantined_image_lock = image_lock
+                    else:
+                        image_lock.release()
+                if task_admitted:
+                    self._task_active = False
+                if acquired:
+                    self._turn_slots.release()
+
+    @staticmethod
+    async def _async_drain_work(work: asyncio.Future[Any]) -> None:
+        """Keep admission until cleanup finishes, even across repeated cancellation."""
+        drained = asyncio.gather(work, return_exceptions=True)
+        interrupted: asyncio.CancelledError | None = None
+        while not drained.done():
+            try:
+                await asyncio.shield(drained)
+            except asyncio.CancelledError as err:
+                interrupted = err
+        if interrupted is not None:
+            raise interrupted
+
+    async def _async_task_work(
+        self, agent_id: str, request: DataTaskRequest, chat_log: ChatLog, timeout: int
+    ) -> str | dict[str, Any] | GeneratedImage:
+        if isinstance(request, ImageTaskRequest):
+            if request.attachments:
+                raise HomeAssistantError(
+                    "Reference-image generation has not yet been verified."
+                )
+            return await self._async_handle_image(agent_id, request, chat_log, timeout)
+        if request.api is None and self.entry.options.get(CONF_ENABLE_DEVICE_CONTROL):
+            request.api = await llm.async_get_api(
+                self.hass, ["assist"], request.context
+            )
+        if request.structure is not None:
+            request.output_schema = prepare_output_schema(
+                request.structure, llm.selector_serializer
+            )
+        request.model_id = await self.async_resolve_model(
+            task_mode=True, require_vision=bool(request.attachments)
+        )
+        if request.attachments:
+            from .images import ImageMetadataError, prepare_images, vision_limits
+
+            try:
+                vision_limits(self._catalog[request.model_id])
+            except ImageMetadataError:
+                request.model_id = await self.async_resolve_model(
+                    task_mode=True, require_vision=True, force_refresh=True
+                )
+            preparation = asyncio.create_task(
+                asyncio.to_thread(
+                    prepare_images, request.attachments, self._catalog[request.model_id]
+                )
+            )
+            try:
+                request.sdk_attachments = await asyncio.shield(preparation)
+            except asyncio.CancelledError:
+                await self._async_drain_work(preparation)
+                raise
+        text = await self._async_handle_message(agent_id, request, chat_log)
+        if not text.strip():
+            raise HomeAssistantError(
+                "GitHub Copilot returned no task result. The request was not "
+                "retried; completed actions have not been undone."
+            )
+        try:
+            data = request.output_schema.parse(text) if request.output_schema else text
+        except OutputValidationError:
+            _LOGGER.warning(
+                "GitHub Copilot AI Task failed: operation=generate_data model=%s "
+                "category=output_validation_failed; no retry attempted",
+                request.model_id,
+            )
+            raise
+        self._clear_quota_issue()
+        return data
 
     async def _async_handle_message(
         self,
         agent_id: str,
-        user_input: ConversationInput,
+        user_input: ConversationInput | DataTaskRequest,
         chat_log: ChatLog,
-    ) -> None:
+    ) -> str:
         """Serialize turns for one conversation and stream its events."""
-        if chat_log.llm_api is not None and not self.entry.options.get(
-            CONF_ENABLE_DEVICE_CONTROL
-        ):
+        is_task = isinstance(user_input, DataTaskRequest)
+        api = user_input.api if is_task else chat_log.llm_api
+        if api is not None and not self.entry.options.get(CONF_ENABLE_DEVICE_CONTROL):
             raise HomeAssistantError("Device control is disabled for this agent.")
         try:
             await self._access_token_getter()
@@ -193,14 +467,17 @@ class ConversationBackend:
                 "Could not renew GitHub sign-in. Check the Home Assistant connection."
             ) from err
 
-        context = user_input.as_llm_context(DOMAIN)
+        context = user_input.context if is_task else user_input.as_llm_context(DOMAIN)
         session_key = self._session_key(chat_log.conversation_id, context)
-        instructions = self._system_instructions()
-        record = await self._async_get_session(
-            session_key, chat_log.llm_api, instructions
-        )
+        instructions = "" if is_task else self._system_instructions()
 
-        async with record.lock:
+        async with (
+            self._async_request_session(
+                session_key, api, instructions, user_input
+            ) as record,
+            record.lock,
+        ):
+            assert record.model_id is not None
             if self._closed:
                 raise HomeAssistantError("GitHub Copilot is shutting down.")
             record.last_used = time.monotonic()
@@ -212,12 +489,13 @@ class ConversationBackend:
                     )
                 )
                 record.prompt_context["instructions"] = instructions
-            await self._async_update_session_model(record)
+            if not is_task:
+                await self._async_update_session_model(record)
             queue: asyncio.Queue[dict[str, Any] | _ToolRequest] = asyncio.Queue()
             active = True
             tool_names: dict[str, str] = {}
             pending_tools: list[_ToolRequest] = []
-            ha_api = chat_log.llm_api
+            ha_api = api
 
             def on_tool(invocation: ToolInvocation) -> Any:
                 if not active or self._closed:
@@ -244,7 +522,7 @@ class ConversationBackend:
                     return
                 if isinstance(event.data, SessionErrorData):
                     session_error = event.data
-                if isinstance(event.data, AssistantMessageDeltaData):
+                if isinstance(event.data, AssistantMessageDeltaData) and not is_task:
                     loop.call_soon_threadsafe(
                         queue.put_nowait,
                         {"content": event.data.delta_content},
@@ -398,10 +676,32 @@ class ConversationBackend:
                 unsubscribe = record.session.on(on_event)
                 send_task = asyncio.create_task(
                     record.session.send_and_wait(
-                        user_input.text, timeout=REQUEST_TIMEOUT_SECONDS
+                        user_input.text,
+                        timeout=(
+                            self.entry.options.get(
+                                CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT
+                            )
+                            if is_task
+                            else REQUEST_TIMEOUT_SECONDS
+                        ),
+                        **(
+                            {
+                                "attachments": user_input.sdk_attachments,
+                                "response_schema": (
+                                    user_input.output_schema.provider
+                                    if user_input.output_schema is not None
+                                    else None
+                                ),
+                            }
+                            if is_task
+                            else {}
+                        ),
                     )
                 )
-                async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                # The task admission owner already applies its execution deadline.
+                async with asyncio.timeout(
+                    None if is_task else REQUEST_TIMEOUT_SECONDS
+                ):
                     async for _ in chat_log.async_add_delta_content_stream(
                         agent_id, stream()
                     ):
@@ -411,8 +711,43 @@ class ConversationBackend:
                     except TimeoutError:
                         raise
                     except Exception as err:
+                        self._raise_if_quota_exceeded(err, session_error)
+                        if is_task:
+                            await self._async_raise_if_authentication_error(
+                                err, session_error
+                            )
+                        if (
+                            is_task
+                            and user_input.output_schema is not None
+                            and is_output_schema_error(err, session_error)
+                        ):
+                            keywords = unsupported_schema_keywords(err, session_error)
+                            _LOGGER.warning(
+                                "GitHub Copilot AI Task failed: "
+                                "operation=generate_data "
+                                "model=%s category=provider_schema_rejected "
+                                "unsupported_keywords=%s; "
+                                "no fallback or retry attempted",
+                                record.model_id,
+                                ",".join(keywords) or "unknown",
+                            )
+                            raise HomeAssistantError(
+                                f"The AI Task model '{record.model_id}' rejected the "
+                                "requested structured response schema. Simplify the "
+                                "structure or select a different AI Task model. "
+                                "No fallback or retry was "
+                                "attempted; completed actions have not been undone."
+                            ) from err
+                        if is_task and not is_model_unavailable_error(
+                            err, session_error
+                        ):
+                            self._raise_sdk_error(record.model_id, err)
                         replacement = await self._async_recover_model(
-                            record.model_id, err, session_error
+                            record.model_id,
+                            err,
+                            session_error,
+                            task_mode=is_task,
+                            require_vision=is_task and bool(user_input.attachments),
                         )
                         # Replaying a failed turn could repeat a device action.
                         raise HomeAssistantError(
@@ -434,21 +769,32 @@ class ConversationBackend:
                     ):
                         pass
                 record.last_used = time.monotonic()
-                if streamed_content or (
-                    response is not None
-                    and isinstance(response.data, AssistantMessageData)
-                    and response.data.content
-                ):
-                    self._quota_exceeded = False
-                    ir.async_delete_issue(
-                        self.hass,
-                        DOMAIN,
-                        f"{ISSUE_QUOTA_EXCEEDED}_{self.entry.entry_id}",
+                if not is_task and (
+                    streamed_content
+                    or (
+                        response is not None
+                        and isinstance(response.data, AssistantMessageData)
+                        and response.data.content
                     )
+                ):
+                    self._clear_quota_issue()
+                return (
+                    response.data.content
+                    if response is not None
+                    and isinstance(response.data, AssistantMessageData)
+                    and not response.data.tool_requests
+                    else ""
+                )
             except TimeoutError as err:
                 self._raise_if_quota_exceeded(err, session_error)
                 raise HomeAssistantError(
                     "GitHub Copilot did not respond before the request timed out."
+                    + (
+                        " The task was not retried; completed actions "
+                        "have not been undone."
+                        if is_task
+                        else ""
+                    )
                 ) from err
             finally:
                 active = False
@@ -464,22 +810,255 @@ class ConversationBackend:
                             )
                         )
                 if not completed and send_task is not None:
-                    abort_task = asyncio.create_task(record.session.abort())
-                    try:
-                        try:
-                            await asyncio.shield(abort_task)
-                        except asyncio.CancelledError:
-                            await asyncio.gather(abort_task, return_exceptions=True)
-                            raise
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Unable to abort a failed Copilot turn (%s)",
-                            type(err).__name__,
-                        )
-                    finally:
-                        if not send_task.done():
-                            send_task.cancel()
-                        await asyncio.gather(send_task, return_exceptions=True)
+                    await self._async_abort_request(record.session, send_task)
+
+    @asynccontextmanager
+    async def _async_request_session(
+        self,
+        key: str,
+        api: llm.APIInstance | None,
+        instructions: str,
+        request: ConversationInput | DataTaskRequest,
+    ):
+        if not isinstance(request, DataTaskRequest):
+            yield await self._async_get_session(key, api, instructions)
+            return
+        image_request = request if isinstance(request, ImageTaskRequest) else None
+        assert request.model_id is not None or image_request is not None
+        try:
+            session = await self._async_create_sdk_session(
+                request.model_id,
+                [],
+                {"instructions": ""},
+                task_mode=True,
+                image_request=image_request,
+                task_request=request,
+            )
+        except Exception as err:
+            await self._async_raise_if_authentication_error(err)
+            if image_request is not None:
+                raise HomeAssistantError(
+                    "Could not start the native image task. Check Copilot access "
+                    "and account policy."
+                ) from err
+            assert request.model_id is not None
+            if is_model_unavailable_error(err):
+                replacement = await self._async_recover_model(
+                    request.model_id,
+                    err,
+                    task_mode=True,
+                    require_vision=bool(request.attachments),
+                )
+                raise HomeAssistantError(
+                    f"The GitHub Copilot model '{request.model_id}' is no longer "
+                    f"available. Model '{replacement}' will be used for your next "
+                    "task. This task was not retried."
+                ) from err
+            self._raise_sdk_error(request.model_id, err)
+        # The admitting task owns disposal, outside the inference deadline.
+        yield _SessionRecord(
+            session=session,
+            model_id=request.model_id,
+            prompt_context={"instructions": ""},
+        )
+
+    async def _async_handle_image(
+        self, agent_id: str, request: ImageTaskRequest, chat_log: ChatLog, timeout: int
+    ) -> GeneratedImage:
+        from homeassistant.components.conversation import AssistantContent
+
+        from .images import ImageResultCollector
+
+        if self._image_model_getter is None:
+            raise HomeAssistantError(
+                "Native image capability discovery is unavailable."
+            )
+        try:
+            await self._access_token_getter()
+            await self._model_lister(force_refresh=False)
+            if self._image_model_getter() is None:
+                await self._model_lister(force_refresh=True)
+        except ReauthenticationRequired as err:
+            await async_start_reauth_flow(self.hass, self.entry)
+            raise HomeAssistantError(
+                "Reauthenticate GitHub before generating images."
+            ) from err
+        except (OAuthError, OSError, RuntimeError) as err:
+            raise HomeAssistantError(
+                "Could not check Copilot image-model access."
+            ) from err
+        if self._image_model_getter() is None:
+            raise HomeAssistantError(
+                "The pinned runtime has no available native image model "
+                "for this account."
+            )
+        collector = ImageResultCollector()
+        async with self._async_request_session("", None, "", request) as record:
+            session_error: SessionErrorData | None = None
+
+            def on_event(event: Any) -> None:
+                nonlocal session_error
+                if not request.active or getattr(event, "agent_id", None):
+                    return
+                if isinstance(event.data, SessionErrorData):
+                    session_error = event.data
+                elif isinstance(event.data, SessionBinaryAssetData):
+                    collector.add_asset(event.data.to_dict())
+
+            unsubscribe = record.session.on(on_event)
+            request.active = True
+            operation = asyncio.create_task(
+                record.session.rpc.tools.execute(
+                    ToolsExecuteRequest(
+                        name=IMAGE_TOOL_NAME,
+                        arguments=request.arguments,
+                        tool_call_id=request.call_id,
+                    ),
+                    timeout=timeout,
+                )
+            )
+            completed = False
+            try:
+                result = await operation
+                completed = True
+                if isinstance(result, dict) and result.get("resultType") in (
+                    "failure",
+                    "rejected",
+                    "denied",
+                    "timeout",
+                ):
+                    raise HomeAssistantError(
+                        "Native image generation failed or permission was denied. "
+                        "Check image-model access, quota, and policy. The operation "
+                        "was not retried and may have incurred usage."
+                    )
+                decoding = asyncio.create_task(
+                    asyncio.to_thread(collector.decode, result)
+                )
+                try:
+                    image = await asyncio.shield(decoding)
+                except asyncio.CancelledError:
+                    await asyncio.shield(
+                        asyncio.gather(decoding, return_exceptions=True)
+                    )
+                    raise
+            except (TimeoutError, asyncio.CancelledError):
+                raise
+            except Exception as err:
+                self._raise_if_quota_exceeded(err, session_error)
+                await self._async_raise_if_authentication_error(err, session_error)
+                if isinstance(err, HomeAssistantError):
+                    raise
+                _LOGGER.warning(
+                    "Native Copilot image task failed (%s)", type(err).__name__
+                )
+                raise HomeAssistantError(
+                    "GitHub Copilot could not generate an image. Check image-model "
+                    "access, quota, and policy. The operation was not retried and "
+                    "may have incurred usage."
+                ) from err
+            finally:
+                request.active = False
+                unsubscribe()
+                collector.assets.clear()
+                if not completed:
+                    await self._async_abort_request(record.session, operation)
+        chat_log.async_add_assistant_content_without_tools(
+            AssistantContent(agent_id=agent_id, content="Generated an image.")
+        )
+        self._clear_quota_issue()
+        return image
+
+    async def _async_abort_request(
+        self, session: CopilotSession, operation: asyncio.Task[Any]
+    ) -> None:
+        """Drain native work before releasing its session and admission slots."""
+
+        async def cleanup() -> None:
+            try:
+                await self._async_cleanup_rpc(
+                    session.abort(),
+                    "abort a failed Copilot turn",
+                    force_stop_on_error=True,
+                )
+            finally:
+                if not operation.done():
+                    operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
+
+        await async_wait_cleanup(asyncio.create_task(cleanup()))
+
+    async def _async_cleanup_rpc(
+        self,
+        operation: Awaitable[Any],
+        label: str,
+        *,
+        force_stop_on_error: bool = False,
+    ) -> None:
+        """Bound SDK cleanup without applying the bound to HA actions or image IO."""
+        try:
+            async with asyncio.timeout(SDK_CLEANUP_TIMEOUT_SECONDS):
+                await operation
+        except TimeoutError:
+            _LOGGER.error(
+                "Timed out trying to %s; stopping the Copilot runtime. "
+                "This request will not be replayed.",
+                label,
+            )
+            await self._async_emergency_stop()
+        except Exception as err:
+            _LOGGER.warning("Unable to %s (%s)", label, type(err).__name__)
+            if force_stop_on_error:
+                await self._async_emergency_stop()
+
+    async def _async_force_client(self) -> None:
+        async with asyncio.timeout(SDK_FORCE_STOP_TIMEOUT_SECONDS):
+            await self.client.force_stop()
+
+    async def _async_emergency_stop(self) -> None:
+        """One stop attempt per failure, independent of the backend's stop lock."""
+        self._closed = True
+        if self._force_stop_task is None or (
+            self._force_stop_task.done()
+            and (
+                self._force_stop_task.cancelled()
+                or self._force_stop_task.exception() is not None
+            )
+        ):
+            self._stop_unconfirmed = True
+            self._force_stop_task = asyncio.create_task(
+                self._async_stop_failed_runtime()
+            )
+        await async_wait_cleanup(self._force_stop_task)
+
+    async def _async_stop_failed_runtime(self) -> None:
+        try:
+            await self._force_stop()
+        except BaseException as err:
+            _LOGGER.error(
+                "Could not confirm that the Copilot runtime stopped (%s). "
+                "Image admission remains blocked until termination is confirmed.",
+                type(err).__name__,
+            )
+            if self._on_runtime_failure is not None:
+                self._on_runtime_failure(False)
+            raise
+        self.mark_runtime_stopped()
+        if self._on_runtime_failure is not None:
+            self._on_runtime_failure(True)
+
+    def mark_runtime_stopped(self) -> None:
+        """Release only admission retained after a failed native termination."""
+        self._stop_unconfirmed = False
+        if self._quarantined_image_lock is not None:
+            self._quarantined_image_lock.release()
+            self._quarantined_image_lock = None
+
+    def _clear_quota_issue(self) -> None:
+        self._quota_exceeded = False
+        ir.async_delete_issue(
+            self.hass, DOMAIN, f"{ISSUE_QUOTA_EXCEEDED}_{self.entry.entry_id}"
+        )
 
     async def async_stop(self) -> None:
         """Drain turns before disconnecting and deleting their SDK sessions."""
@@ -492,6 +1071,8 @@ class ConversationBackend:
                 if not task.cancelling():
                     task.cancel()
             await asyncio.gather(*turns, return_exceptions=True)
+            if self._stop_unconfirmed:
+                await self._async_emergency_stop()
             async with self._session_lock:
                 sessions = list(self._sessions.values())
                 self._sessions.clear()
@@ -501,19 +1082,19 @@ class ConversationBackend:
 
     async def _async_dispose_session(self, session: CopilotSession) -> None:
         """Release handlers and erase the owned session's persisted SDK data."""
-        try:
-            await session.disconnect()
-        except Exception as err:
-            _LOGGER.warning(
-                "Unable to disconnect a Copilot session (%s)", type(err).__name__
-            )
-        try:
-            await self.client.delete_session(session.session_id)
-        except Exception as err:
-            _LOGGER.warning(
-                "Unable to delete persisted Copilot session data (%s)",
-                type(err).__name__,
-            )
+
+        async def cleanup() -> None:
+            try:
+                await self._async_cleanup_rpc(
+                    session.disconnect(), "disconnect a Copilot session"
+                )
+            finally:
+                await self._async_cleanup_rpc(
+                    self.client.delete_session(session.session_id),
+                    "delete persisted Copilot session data",
+                )
+
+        await async_wait_cleanup(asyncio.create_task(cleanup()))
 
     async def _async_get_session(
         self, key: str, api: Any | None, instructions: str
@@ -603,10 +1184,15 @@ class ConversationBackend:
         model_id: str,
         error: Exception,
         event: SessionErrorData | None = None,
+        *,
+        task_mode: bool = False,
+        require_vision: bool = False,
     ) -> str:
         """Refresh discovery on SDK failure, without treating quota as model loss."""
         self._raise_if_quota_exceeded(error, event)
         replacement = await self.async_resolve_model(
+            task_mode=task_mode,
+            require_vision=require_vision,
             force_refresh=True,
             unavailable_model=(
                 model_id if is_model_unavailable_error(error, event) else None
@@ -630,6 +1216,18 @@ class ConversationBackend:
         raise HomeAssistantError(
             f"GitHub Copilot could not complete the request using model '{model_id}'. "
             "Check your Copilot access and connection, then try again."
+        ) from error
+
+    async def _async_raise_if_authentication_error(
+        self, error: Exception, event: SessionErrorData | None = None
+    ) -> None:
+        """Report confirmed task authentication failures without replaying work."""
+        if not is_authentication_error(error, event):
+            return
+        await async_start_reauth_flow(self.hass, self.entry)
+        raise HomeAssistantError(
+            "GitHub sign-in was rejected. Reauthenticate in Home Assistant. "
+            "This task was not retried; completed actions have not been undone."
         ) from error
 
     def _raise_if_quota_exceeded(
@@ -662,9 +1260,13 @@ class ConversationBackend:
 
     async def _async_create_sdk_session(
         self,
-        model_id: str,
+        model_id: str | None,
         sdk_tools: list[CopilotTool],
         prompt_context: dict[str, str],
+        *,
+        task_mode: bool = False,
+        image_request: ImageTaskRequest | None = None,
+        task_request: DataTaskRequest | None = None,
     ) -> CopilotSession:
         """Create an isolated SDK session with only the provided HA tools."""
         # PATs have no known lifetime; use the SDK's static-token path rather than
@@ -674,33 +1276,60 @@ class ConversationBackend:
             if self.entry.data.get(CONF_AUTH_METHOD) == AUTH_METHOD_PAT
             else None
         )
+
+        def permission(request: Any, invocation: Any):
+            if (
+                image_request is not None
+                and image_request.active
+                and not self._closed
+                and not image_request.permission_used
+                and getattr(request, "kind", None) == "custom-tool"
+                and getattr(request, "tool_name", None) == IMAGE_TOOL_NAME
+                and getattr(request, "tool_call_id", None) == image_request.call_id
+                and getattr(request, "args", None) == image_request.arguments
+                and not getattr(request, "managed_approval_required", False)
+            ):
+                image_request.permission_used = True
+                return PermissionDecisionApproveOnce()
+            return PermissionDecisionReject(
+                feedback="Only explicitly exposed HA tools or the exact requested "
+                "native image operation are permitted."
+            )
+
         creation = asyncio.create_task(
             self.client.create_session(
                 model=model_id,
                 system_message={
                     "mode": "customize",
-                    "content": DEFAULT_SYSTEM_PROMPT,
                     "sections": {
                         **{
                             section: {"action": "remove"}
                             for section in SYSTEM_MESSAGE_SECTIONS
-                            if section not in ("safety", "custom_instructions")
+                            if section
+                            not in ("identity", "safety", "custom_instructions")
+                        },
+                        "identity": {
+                            "action": "replace",
+                            "content": AI_TASK_SYSTEM_PROMPT
+                            if task_mode
+                            else DEFAULT_SYSTEM_PROMPT,
                         },
                     },
                 },
                 organization_custom_instructions=prompt_context["instructions"],
                 tools=sdk_tools,
-                available_tools=ToolSet().add_custom("*"),
+                available_tools=(
+                    [f"builtin:{IMAGE_TOOL_NAME}"]
+                    if image_request is not None
+                    else ToolSet().add_custom("*")
+                ),
+                image_generation={
+                    "enabled": image_request is not None,
+                    "save_to_disk": False,
+                },
                 github_token=github_token,
                 github_token_provider=None if github_token else self.token_provider,
-                on_permission_request=lambda request, invocation: (
-                    PermissionDecisionReject(
-                        feedback=(
-                            "Only explicitly exposed Home Assistant tools "
-                            "are permitted."
-                        )
-                    )
-                ),
+                on_permission_request=permission,
                 streaming=True,
                 enable_session_store=False,
                 enable_skills=False,
@@ -715,35 +1344,84 @@ class ConversationBackend:
             )
         )
         try:
-            return await asyncio.shield(creation)
+            session = await asyncio.shield(creation)
         except asyncio.CancelledError:
             # SDK creation can persist data before returning the session handle.
-            # Finish it so shutdown can erase that exact owned session, too.
-            try:
-                session = await creation
-            except Exception as err:
-                _LOGGER.warning(
-                    "Unable to finish cancelled Copilot session creation (%s)",
-                    type(err).__name__,
-                )
-            else:
-                await self._async_dispose_session(session)
+            # Finish it within a cleanup budget, or stop the native process.
+            async def finish_creation() -> None:
+                try:
+                    async with asyncio.timeout(SDK_CLEANUP_TIMEOUT_SECONDS):
+                        created = await asyncio.shield(creation)
+                except TimeoutError:
+                    _LOGGER.error(
+                        "Cancelled Copilot session creation did not finish; "
+                        "stopping the runtime. Unreturned session files may remain."
+                    )
+                    try:
+                        await self._async_emergency_stop()
+                    finally:
+                        creation.cancel()
+                        await asyncio.gather(creation, return_exceptions=True)
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Unable to finish cancelled Copilot session creation (%s)",
+                        type(err).__name__,
+                    )
+                else:
+                    if task_request is not None:
+                        task_request.session = created
+                    else:
+                        await self._async_dispose_session(created)
+
+            await async_wait_cleanup(asyncio.create_task(finish_creation()))
             raise
+        if task_request is not None:
+            task_request.session = session
+        return session
 
     async def async_check_model(self) -> None:
         """Verify the configured model at startup so Repairs is current."""
-        try:
-            await self.async_resolve_model()
-        except HomeAssistantError:
-            pass
-        except Exception as err:  # noqa: BLE001 - startup check is best effort
-            _LOGGER.warning("Unable to verify the GitHub Copilot model: %s", err)
+        for attempt in range(len(STARTUP_MODEL_RETRY_DELAYS) + 1):
+            for task_mode in (False, True):
+                if self._closed:
+                    return
+                try:
+                    await self.async_resolve_model(task_mode=task_mode)
+                except HomeAssistantError as err:
+                    if (
+                        self._quota_exceeded
+                        or isinstance(err.__cause__, ReauthenticationRequired)
+                        or is_authentication_error(err)
+                    ):
+                        return
+                except Exception as err:  # noqa: BLE001 - startup check is best effort
+                    _LOGGER.warning(
+                        "Unable to verify the GitHub Copilot model (%s)",
+                        type(err).__name__,
+                    )
+            if self._model_catalog_loaded or self._closed:
+                return
+            if attempt < len(STARTUP_MODEL_RETRY_DELAYS):
+                await asyncio.sleep(STARTUP_MODEL_RETRY_DELAYS[attempt])
+        _LOGGER.warning(
+            "Copilot startup discovery retries exhausted; image generation remains "
+            "unavailable until model discovery succeeds"
+        )
 
     async def async_resolve_model(
-        self, *, force_refresh: bool = False, unavailable_model: str | None = None
+        self,
+        *,
+        force_refresh: bool = False,
+        unavailable_model: str | None = None,
+        task_mode: bool = False,
+        require_vision: bool = False,
     ) -> str:
         """Return the configured model or a same-family fallback."""
-        configured = self.entry.options[CONF_MODEL]
+        configured = (
+            self.entry.options.get(CONF_AI_TASK_MODEL, self.entry.options[CONF_MODEL])
+            if task_mode
+            else self.entry.options[CONF_MODEL]
+        )
         try:
             models = await self._model_lister(force_refresh=force_refresh)
         except ReauthenticationRequired as err:
@@ -772,15 +1450,37 @@ class ConversationBackend:
         # Discovery can briefly advertise a model the inference API just rejected.
         models = [model for model in models if model.id not in self._rejected_models]
         self._available_model_ids = {model.id for model in selectable_models(models)}
+        self._catalog = {model.id: model for model in selectable_models(models)}
+        self._model_catalog_loaded = True
 
-        resolution = resolve_model(
+        budget = model_budget(
             configured,
-            models,
-            max_multiplier=model_budget(
-                configured, self.entry.data.get(CONF_MODEL_BILLING, {})
+            self.entry.data.get(
+                CONF_AI_TASK_MODEL_BILLING if task_mode else CONF_MODEL_BILLING, {}
             ),
         )
-        self._apply_model_resolution(resolution)
+        resolution = resolve_model(configured, models, max_multiplier=budget)
+        vision_resolution: ModelResolution | None = None
+        if task_mode or require_vision:
+            vision_resolution = resolve_model(
+                configured,
+                [model for model in models if supports_vision(model)],
+                max_multiplier=budget,
+            )
+        self._apply_model_resolution(
+            resolution, task_mode=task_mode, vision_resolution=vision_resolution
+        )
+        if require_vision:
+            if configured in self._catalog and not supports_vision(
+                self._catalog[configured]
+            ):
+                raise HomeAssistantError(
+                    f"AI Task model '{configured}' does not report vision support. "
+                    "Choose a vision-capable AI Task model."
+                )
+            assert vision_resolution is not None
+            resolution = vision_resolution
+            self.active_task_model = resolution.model_id
         if resolution.model_id is None:
             raise HomeAssistantError(
                 f"The GitHub Copilot model '{configured}' is no longer available "
@@ -790,13 +1490,32 @@ class ConversationBackend:
             )
         return resolution.model_id
 
-    def _apply_model_resolution(self, resolution: ModelResolution) -> None:
+    def _apply_model_resolution(
+        self,
+        resolution: ModelResolution,
+        *,
+        task_mode: bool = False,
+        vision_resolution: ModelResolution | None = None,
+    ) -> None:
         """Log model availability changes and keep Repairs issues in sync."""
-        changed = resolution != self._model_resolution
-        self._model_resolution = resolution
-        self.active_model = resolution.model_id
-        fallback_issue = f"{ISSUE_MODEL_FALLBACK}_{self.entry.entry_id}"
-        unavailable_issue = f"{ISSUE_MODEL_UNAVAILABLE}_{self.entry.entry_id}"
+        if task_mode:
+            changed = (
+                resolution != self._task_model_resolution
+                or vision_resolution != self._task_vision_resolution
+            )
+            self._task_model_resolution = resolution
+            self._task_vision_resolution = vision_resolution
+            self.active_task_model = resolution.model_id
+        else:
+            changed = resolution != self._model_resolution
+            self._model_resolution = resolution
+            self.active_model = resolution.model_id
+        fallback_key = ISSUE_TASK_MODEL_FALLBACK if task_mode else ISSUE_MODEL_FALLBACK
+        unavailable_key = (
+            ISSUE_TASK_MODEL_UNAVAILABLE if task_mode else ISSUE_MODEL_UNAVAILABLE
+        )
+        fallback_issue = f"{fallback_key}_{self.entry.entry_id}"
+        unavailable_issue = f"{unavailable_key}_{self.entry.entry_id}"
 
         if resolution.is_available:
             ir.async_delete_issue(self.hass, DOMAIN, fallback_issue)
@@ -805,15 +1524,24 @@ class ConversationBackend:
 
         if resolution.is_fallback:
             if changed:
-                _LOGGER.warning(
-                    "GitHub Copilot model '%s' is unavailable; falling back to "
-                    "same-family model '%s' (billing multiplier: %s)",
-                    resolution.requested,
-                    resolution.model_id,
-                    resolution.multiplier
-                    if resolution.multiplier is not None
-                    else "unknown; usage cost may differ",
-                )
+                if task_mode:
+                    _LOGGER.warning(
+                        "GitHub Copilot AI Task model '%s' is unavailable; "
+                        "text fallback '%s', image-analysis fallback '%s'",
+                        resolution.requested,
+                        resolution.model_id,
+                        vision_resolution.model_id if vision_resolution else None,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "GitHub Copilot model '%s' is unavailable; falling back to "
+                        "same-family model '%s' (billing multiplier: %s)",
+                        resolution.requested,
+                        resolution.model_id,
+                        resolution.multiplier
+                        if resolution.multiplier is not None
+                        else "unknown; usage cost may differ",
+                    )
             ir.async_delete_issue(self.hass, DOMAIN, unavailable_issue)
             ir.async_create_issue(
                 self.hass,
@@ -821,7 +1549,7 @@ class ConversationBackend:
                 fallback_issue,
                 is_fixable=False,
                 severity=ir.IssueSeverity.WARNING,
-                translation_key=ISSUE_MODEL_FALLBACK,
+                translation_key=fallback_key,
                 translation_placeholders={
                     "model": resolution.requested,
                     "fallback": str(resolution.model_id),
@@ -829,6 +1557,28 @@ class ConversationBackend:
                         f"{resolution.multiplier:g}x"
                         if resolution.multiplier is not None
                         else "unknown; usage cost may differ"
+                    ),
+                    **(
+                        {
+                            "vision_fallback": (
+                                vision_resolution.model_id or "-"
+                                if vision_resolution is not None
+                                else "-"
+                            ),
+                            "vision_billing": (
+                                f"{vision_resolution.multiplier:g}x"
+                                if vision_resolution is not None
+                                and vision_resolution.multiplier is not None
+                                else (
+                                    "unknown; usage cost may differ"
+                                    if vision_resolution is not None
+                                    and vision_resolution.model_id is not None
+                                    else "-"
+                                )
+                            ),
+                        }
+                        if task_mode
+                        else {}
                     ),
                 },
             )
@@ -847,7 +1597,7 @@ class ConversationBackend:
             unavailable_issue,
             is_fixable=False,
             severity=ir.IssueSeverity.ERROR,
-            translation_key=ISSUE_MODEL_UNAVAILABLE,
+            translation_key=unavailable_key,
             translation_placeholders={"model": resolution.requested},
         )
 
@@ -885,17 +1635,22 @@ class ConversationBackend:
     @staticmethod
     def _context_tool_result(
         arguments: dict[str, Any],
-        user_input: ConversationInput,
+        user_input: ConversationInput | DataTaskRequest,
         chat_log: ChatLog,
     ) -> dict[str, Any]:
         """Read one context section without invoking HA or changing any state."""
         section = _CONTEXT_PARAMETERS(arguments)["section"]
         if section == "assist_api":
-            if chat_log.llm_api is None:
+            api = (
+                user_input.api
+                if isinstance(user_input, DataTaskRequest)
+                else chat_log.llm_api
+            )
+            if api is None:
                 raise HomeAssistantError("Assist device access is disabled.")
             return {
                 "source": "home_assistant_assist_api",
-                "content": chat_log.llm_api.api_prompt,
+                "content": api.api_prompt,
             }
         return {
             "source": "home_assistant_request",

@@ -6,6 +6,10 @@ Use GitHub Copilot as your Home Assistant Assist conversation agent, with
 streamed replies, follow-up conversations, and optional control of exposed
 devices.
 
+The integration also provides an AI Task entity for text, structured data, camera
+analysis, and native image generation when available to your account. See
+[AI Tasks](docs/usage.md#ai-tasks).
+
 [![Open in Home Assistant Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ChrisRomp&repository=github-copilot-home-assistant&category=integration)
 
 **[Get started: setup guide with screenshots](docs/setup.md)**
@@ -48,14 +52,22 @@ For a step-by-step walkthrough with screenshots, see the
    **GitHub Copilot**.
 2. Sign in with GitHub (recommended). Alternatively, use a fine-grained PAT
    with the **Copilot Requests** account permission. Classic PATs are not supported.
-3. Choose a model. You can also enable **Allow control of Assist-exposed devices**
-   and provide **Additional instructions** on this setup screen.
+3. Choose a **Conversation model** and, optionally, a different **AI Task model**.
+   The task timeout defaults to 180 seconds. You can also enable
+   **Allow control of Assist-exposed devices** and provide conversation-only
+   **Additional instructions** on this setup screen.
 4. Under **Settings > Voice assistants**, add or edit an assistant and select
    **GitHub Copilot** as its conversation agent.
 
-Device control is off by default. Only entities you expose to Assist are
-available. You can change the model, device control, and additional instructions
+Device control is off by default and applies to both conversations and AI Tasks.
+Only entities you expose to Assist are available. You can change these settings
 later under **Settings > Devices & services > GitHub Copilot > Configure**.
+
+An AI Task entity is created alongside the conversation entity without another
+sign-in. Use it in scripts and automations, or choose it as your preferred provider
+under **Settings > System > AI**. See the [AI Task usage guide](docs/usage.md#ai-tasks)
+for a first task, structured data, camera analysis, and image-generation examples,
+with links to Home Assistant's authoritative documentation.
 
 ## Privacy and limitations
 
@@ -65,8 +77,11 @@ temporary conversation files can be included in Home Assistant backups; treat
 those backups as sensitive.
 
 Chats expire after five minutes of inactivity, and a Home Assistant restart
-starts fresh conversations. AI Tasks, local-model fallback, and remote runtime
-hosting are not supported.
+starts fresh conversations. AI Tasks use disposable sessions. Image requests are
+subject to model limits and conservative host resource guards; oversized inputs
+fail rather than being silently omitted. Native image generation depends on
+account availability. Reference-image editing, local-model fallback, and remote
+runtime hosting are not supported.
 
 See the [user guide](docs/usage.md) for model fallback, data handling, and
 troubleshooting.

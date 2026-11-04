@@ -107,7 +107,8 @@ def _runtime_for_models() -> CopilotRuntime:
     runtime.entry = SimpleNamespace(
         entry_id="entry", data={}, options={"model": "model-1"}
     )
-    runtime.hass = SimpleNamespace()
+    runtime.hass = SimpleNamespace(data={}, verify_event_loop_thread=Mock())
+    runtime.image_models = None
     runtime.backend = None
     runtime._models = None
     runtime._models_fetched_at = 0.0
@@ -118,6 +119,45 @@ def _runtime_for_models() -> CopilotRuntime:
 
     runtime.credentials = SimpleNamespace(async_get_access_token=get_access_token)
     return runtime
+
+
+@pytest.mark.parametrize(
+    ("available", "default", "operations", "expected"),
+    [
+        ("available", True, ["generate", "edit"], True),
+        ("unavailable", True, ["generate"], False),
+        ("available", False, ["generate"], False),
+        ("available", True, ["edit"], False),
+    ],
+)
+def test_image_model_requires_authorized_default_generate_operation(
+    available, default, operations, expected
+):
+    runtime = _runtime_for_models()
+    model = SimpleNamespace(
+        id="native-image",
+        availability=available,
+        is_default=default,
+        supported_operations=operations,
+    )
+    runtime.image_models = [model]
+    assert (runtime.image_model() is model) is expected
+
+
+def test_image_model_is_disabled_for_unverified_runtime(monkeypatch):
+    from copilot import _cli_version
+
+    runtime = _runtime_for_models()
+    runtime.image_models = [
+        SimpleNamespace(
+            id="native-image",
+            availability="available",
+            is_default=True,
+            supported_operations=["generate"],
+        )
+    ]
+    monkeypatch.setattr(_cli_version, "CLI_VERSION", "unverified")
+    assert runtime.image_model() is None
 
 
 @pytest.mark.asyncio
@@ -148,12 +188,12 @@ async def test_model_list_falls_back_to_temporary_client(monkeypatch) -> None:
     async def failing_rpc(token: str) -> list[SimpleNamespace]:
         raise RuntimeError("experimental RPC unavailable")
 
-    async def probe(token: str, *, flow_id: str, hass) -> list[SimpleNamespace]:
+    async def probe(token: str, *, flow_id: str, hass):
         assert token == "token"
-        return [SimpleNamespace(id="probed-model")]
+        return [SimpleNamespace(id="probed-model")], None
 
     runtime._async_list_models_rpc = failing_rpc
-    monkeypatch.setattr(runtime_module, "async_probe_models", probe)
+    monkeypatch.setattr(runtime_module, "async_probe_model_catalog", probe)
 
     models = await runtime.async_list_models()
     assert [model.id for model in models] == ["probed-model"]
@@ -173,7 +213,7 @@ async def test_model_discovery_quota_is_reported_without_temporary_client_retry(
         side_effect=RuntimeError("Quota exceeded")
     )
     probe = AsyncMock()
-    monkeypatch.setattr(runtime_module, "async_probe_models", probe)
+    monkeypatch.setattr(runtime_module, "async_probe_model_catalog", probe)
     with pytest.raises(RuntimeError, match="quota exceeded"):
         await runtime.async_list_models()
     runtime.backend.report_quota_exceeded.assert_called_once()
@@ -199,7 +239,7 @@ async def test_running_discovery_rejected_pat_requires_reauth_without_retry(
     runtime.entry.data = {"auth_method": "pat", "access_token": "revoked-pat"}
     runtime._async_list_models_rpc = AsyncMock(side_effect=error)
     probe = AsyncMock()
-    monkeypatch.setattr(runtime_module, "async_probe_models", probe)
+    monkeypatch.setattr(runtime_module, "async_probe_model_catalog", probe)
     with pytest.raises(ReauthenticationRequired):
         await runtime.async_list_models()
     probe.assert_not_awaited()
@@ -214,6 +254,9 @@ def sdk_runtime(ha_boundary, monkeypatch):
     module = ha_boundary.load("runtime")
     hass = SimpleNamespace(
         data={},
+        is_stopping=False,
+        verify_event_loop_thread=Mock(),
+        config_entries=SimpleNamespace(async_schedule_reload=Mock()),
         config=SimpleNamespace(path=Mock(return_value=str(Path.cwd()))),
         bus=SimpleNamespace(async_listen_once=Mock(return_value=Mock())),
     )
@@ -231,18 +274,29 @@ def sdk_runtime(ha_boundary, monkeypatch):
         start=AsyncMock(),
         stop=AsyncMock(),
         force_stop=AsyncMock(),
-        list_models=AsyncMock(return_value=[SimpleNamespace(id="model")]),
+        rpc=SimpleNamespace(
+            models=SimpleNamespace(
+                list=AsyncMock(
+                    return_value=SimpleNamespace(
+                        models=[SimpleNamespace(id="model")], image_models=None
+                    )
+                )
+            )
+        ),
     )
     factory = Mock(return_value=client)
     monkeypatch.setattr(copilot, "CopilotClient", factory)
     monkeypatch.setattr(
         module, "async_runtime_path", AsyncMock(return_value="/unused-runtime")
     )
-    backend = SimpleNamespace(async_stop=AsyncMock())
+    startup_cleanup = AsyncMock()
+    monkeypatch.setattr(module, "async_cleanup_startup_sessions", startup_cleanup)
+    backend = SimpleNamespace(async_stop=AsyncMock(), mark_runtime_stopped=Mock())
+    backend_factory = Mock(return_value=backend)
     monkeypatch.setitem(
         sys.modules,
         "custom_components.github_copilot.backend",
-        SimpleNamespace(ConversationBackend=Mock(return_value=backend)),
+        SimpleNamespace(ConversationBackend=backend_factory),
     )
     directory = SimpleNamespace(name=str(Path.cwd()), cleanup=Mock())
     monkeypatch.setattr(module.tempfile, "mkdtemp", Mock(return_value=directory.name))
@@ -253,6 +307,8 @@ def sdk_runtime(ha_boundary, monkeypatch):
         client=client,
         factory=factory,
         backend=backend,
+        backend_factory=backend_factory,
+        startup_cleanup=startup_cleanup,
         directory=directory,
     )
 
@@ -266,7 +322,83 @@ async def test_runtime_disables_native_expiry_so_backend_owns_session_lifetime(
     await sdk_runtime.runtime.async_stop()
 
 
-@pytest.mark.parametrize("failed_stage", ["start", "list_models"])
+@pytest.mark.parametrize("availability", ["available", "unavailable", None])
+async def test_fallback_probe_recovers_image_catalog_without_bypassing_gate(
+    sdk_runtime, monkeypatch, availability
+):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    runtime.credentials.async_get_access_token = AsyncMock(return_value="token")
+    runtime._async_list_models_rpc = AsyncMock(
+        side_effect=RuntimeError("Running client discovery failed")
+    )
+    image = SimpleNamespace(
+        id="native-image",
+        is_default=True,
+        availability=availability,
+        supported_operations=["generate"],
+    )
+    images = [image] if availability is not None else None
+    runtime.image_models = [
+        SimpleNamespace(
+            id="stale-image",
+            is_default=True,
+            availability="available",
+            supported_operations=["generate"],
+        )
+    ]
+    sdk_runtime.client.rpc = SimpleNamespace(
+        models=SimpleNamespace(
+            list=AsyncMock(
+                return_value=SimpleNamespace(
+                    models=[SimpleNamespace(id="model")], image_models=images
+                )
+            )
+        )
+    )
+    notified = Mock()
+    monkeypatch.setattr(sdk_runtime.module, "async_dispatcher_send", notified)
+    models = await runtime.async_list_models()
+    assert [model.id for model in models] == ["model"]
+    assert runtime.image_models == images
+    assert (runtime.image_model() is image) is (availability == "available")
+    assert (
+        sdk_runtime.client.rpc.models.list.await_args.args[0].git_hub_token == "token"
+    )
+    notified.assert_called_once()
+    await runtime.async_list_models()
+    assert runtime._async_list_models_rpc.await_count == 1
+    assert (runtime.image_model() is image) is (availability == "available")
+    await runtime.async_stop()
+
+
+async def test_runtime_cleans_abandoned_sessions_before_admitting_requests(sdk_runtime):
+    async def cleanup(client, directory):
+        sdk_runtime.client.start.assert_awaited_once()
+        assert client is sdk_runtime.client
+        assert directory is sdk_runtime.runtime.base_directory
+        assert not sdk_runtime.runtime.is_started
+        sdk_runtime.backend_factory.assert_not_called()
+
+    sdk_runtime.startup_cleanup.side_effect = cleanup
+    await sdk_runtime.runtime.async_start()
+    sdk_runtime.startup_cleanup.assert_awaited_once()
+    sdk_runtime.backend_factory.assert_called_once()
+    assert sdk_runtime.runtime.is_started
+    await sdk_runtime.runtime.async_stop()
+
+
+async def test_cancelled_startup_cleanup_does_not_create_backend(sdk_runtime):
+    sdk_runtime.startup_cleanup.side_effect = asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await sdk_runtime.runtime.async_start()
+    sdk_runtime.backend_factory.assert_not_called()
+    assert not sdk_runtime.runtime.is_started
+    await sdk_runtime.runtime.async_stop()
+    sdk_runtime.client.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failed_stage", ["start", "model_catalog"])
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
@@ -286,7 +418,12 @@ async def test_runtime_disables_native_expiry_so_backend_owns_session_lifetime(
 async def test_probe_classifies_only_confirmed_auth_rejections_and_cleans_up(
     sdk_runtime, failed_stage, error, expected
 ):
-    getattr(sdk_runtime.client, failed_stage).side_effect = error
+    failing_call = (
+        sdk_runtime.client.start
+        if failed_stage == "start"
+        else sdk_runtime.client.rpc.models.list
+    )
+    failing_call.side_effect = error
     with pytest.raises(expected):
         await sdk_runtime.module.async_probe_models(
             "test-pat", flow_id="flow", hass=sdk_runtime.runtime.hass
@@ -391,7 +528,7 @@ async def test_probe_retains_client_and_directory_if_force_stop_fails(
 async def test_probe_cleanup_does_not_replace_original_error(
     sdk_runtime, original_error, force_fails, caplog
 ):
-    sdk_runtime.client.list_models.side_effect = original_error
+    sdk_runtime.client.rpc.models.list.side_effect = original_error
     sdk_runtime.client.stop.side_effect = RuntimeError("graceful stop failed")
     if force_fails:
         sdk_runtime.client.force_stop.side_effect = OSError("process still running")
@@ -569,8 +706,195 @@ async def test_runtime_stop_retains_client_for_retry_if_force_stop_also_fails(
     sdk_runtime.client.stop.side_effect = None
     await runtime.async_stop()
     assert runtime.client is None
-    sdk_runtime.backend.async_stop.assert_awaited_once()
+    assert sdk_runtime.backend.async_stop.await_count == 2
     assert sdk_runtime.client.stop.await_count == 2
+
+
+@pytest.mark.parametrize("force_fails", [False, True])
+async def test_stop_cancellation_finalizes_only_confirmed_native_exit(
+    sdk_runtime, force_fails
+):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    image_guard = asyncio.Lock()
+    await image_guard.acquire()
+    sdk_runtime.backend.mark_runtime_stopped.side_effect = image_guard.release
+    entered, finish = asyncio.Event(), asyncio.Event()
+    sdk_runtime.client.stop.side_effect = RuntimeError("Graceful stop failed")
+
+    async def force_stop():
+        entered.set()
+        await finish.wait()
+        if force_fails:
+            raise OSError("Native termination failed")
+
+    sdk_runtime.client.force_stop.side_effect = force_stop
+    caller = asyncio.create_task(runtime.async_stop())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        caller.cancel()
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        assert not caller.done()
+        assert image_guard.locked()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        if force_fails:
+            assert runtime.client is sdk_runtime.client
+            assert runtime.backend is sdk_runtime.backend
+            sdk_runtime.backend.mark_runtime_stopped.assert_not_called()
+            assert image_guard.locked()
+        else:
+            assert runtime.client is runtime.backend is None
+            sdk_runtime.backend.mark_runtime_stopped.assert_called_once()
+            assert not image_guard.locked()
+    finally:
+        finish.set()
+        await asyncio.gather(caller, return_exceptions=True)
+        sdk_runtime.client.stop.side_effect = None
+        sdk_runtime.client.force_stop.side_effect = None
+        await runtime.async_stop()
+
+
+async def test_runtime_graceful_stop_timeout_forces_exit(sdk_runtime, monkeypatch):
+    monkeypatch.setattr(sdk_runtime.module, "SDK_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    await sdk_runtime.runtime.async_start()
+
+    async def wedged():
+        await asyncio.Event().wait()
+
+    sdk_runtime.client.stop.side_effect = wedged
+    await asyncio.wait_for(sdk_runtime.runtime.async_stop(), timeout=1)
+    sdk_runtime.client.force_stop.assert_awaited_once()
+    assert sdk_runtime.runtime.client is None
+    sdk_runtime.backend.mark_runtime_stopped.assert_called_once()
+
+
+async def test_failed_force_stop_has_a_bound_and_retains_runtime_for_retry(
+    sdk_runtime, monkeypatch
+):
+    monkeypatch.setattr(sdk_runtime.module, "SDK_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(sdk_runtime.module, "SDK_FORCE_STOP_TIMEOUT_SECONDS", 0.01)
+    await sdk_runtime.runtime.async_start()
+
+    async def wedged():
+        await asyncio.Event().wait()
+
+    sdk_runtime.client.stop.side_effect = wedged
+    sdk_runtime.client.force_stop.side_effect = wedged
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(sdk_runtime.runtime.async_stop(), timeout=1)
+    assert sdk_runtime.runtime.client is sdk_runtime.client
+    assert sdk_runtime.runtime.backend is sdk_runtime.backend
+    sdk_runtime.backend.mark_runtime_stopped.assert_not_called()
+    sdk_runtime.client.stop.side_effect = None
+    sdk_runtime.client.force_stop.side_effect = None
+    await sdk_runtime.runtime.async_stop()
+    sdk_runtime.backend.mark_runtime_stopped.assert_called_once()
+
+
+async def test_runtime_unload_can_reap_a_wedged_backend_without_stop_lock_deadlock(
+    sdk_runtime, ha_boundary, monkeypatch
+):
+    from custom_components.github_copilot.const import DATA_IMAGE_LOCK, DOMAIN
+
+    module = ha_boundary.load("backend")
+    constructor = sys.modules[
+        "custom_components.github_copilot.backend"
+    ].ConversationBackend
+    constructor.side_effect = module.ConversationBackend
+    monkeypatch.setattr(module, "SDK_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        sys.modules["homeassistant.components.conversation"],
+        "AssistantContent",
+        SimpleNamespace,
+        raising=False,
+    )
+    entered = asyncio.Event()
+
+    async def execute(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def abort():
+        await asyncio.Event().wait()
+
+    session = SimpleNamespace(
+        session_id="image-session",
+        on=Mock(return_value=Mock()),
+        abort=AsyncMock(side_effect=abort),
+        disconnect=AsyncMock(),
+        rpc=SimpleNamespace(
+            tools=SimpleNamespace(execute=AsyncMock(side_effect=execute))
+        ),
+    )
+    sdk_runtime.client.create_session = AsyncMock(return_value=session)
+    sdk_runtime.client.delete_session = AsyncMock()
+    runtime = sdk_runtime.runtime
+    runtime.credentials.async_get_access_token = AsyncMock(return_value="token")
+    runtime.async_list_models = AsyncMock(return_value=[])
+    runtime.hass.data[DOMAIN] = {"entry": runtime}
+    await runtime.async_start()
+    runtime.image_models = [
+        SimpleNamespace(
+            id="image",
+            availability="available",
+            is_default=True,
+            supported_operations=["generate"],
+        )
+    ]
+    caller = asyncio.create_task(
+        runtime.backend.async_generate_image(
+            "image",
+            module.ImageTaskRequest(text="Draw", context=SimpleNamespace()),
+            SimpleNamespace(conversation_id="image"),
+        )
+    )
+    await entered.wait()
+    await asyncio.wait_for(runtime.async_stop(), timeout=1)
+    with pytest.raises(ha_boundary.HomeAssistantError, match="shutting down"):
+        await caller
+    sdk_runtime.client.force_stop.assert_awaited_once()
+    sdk_runtime.client.delete_session.assert_awaited_once_with("image-session")
+    assert runtime.backend is runtime.client is None
+    assert not runtime.hass.data[DATA_IMAGE_LOCK].locked()
+    runtime.hass.config_entries.async_schedule_reload.assert_not_called()
+
+
+async def test_concurrent_force_stop_is_single_flight(sdk_runtime):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    await asyncio.gather(
+        runtime._async_force_stop_client(sdk_runtime.client),
+        runtime._async_force_stop_client(sdk_runtime.client),
+    )
+    sdk_runtime.client.force_stop.assert_awaited_once()
+    await runtime.async_stop()
+
+
+async def test_recovery_marks_unavailable_and_schedules_reload_without_awaiting_turns(
+    sdk_runtime,
+):
+    from custom_components.github_copilot.const import DOMAIN
+
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    runtime.hass.data[DOMAIN] = {runtime.entry.entry_id: runtime}
+    constructor = sys.modules[
+        "custom_components.github_copilot.backend"
+    ].ConversationBackend
+    callback = constructor.call_args.kwargs["on_runtime_failure"]
+    callback(True)
+    assert not runtime.is_started
+    assert runtime.image_models is None
+    runtime.hass.config_entries.async_schedule_reload.assert_called_once_with("entry")
+    runtime.hass.config_entries.async_schedule_reload.reset_mock()
+    runtime._stopping = True
+    callback(True)
+    runtime.hass.config_entries.async_schedule_reload.assert_not_called()
+    await runtime.async_stop()
 
 
 async def test_runtime_stop_force_stops_client_if_graceful_stop_is_cancelled(

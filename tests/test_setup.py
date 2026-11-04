@@ -66,7 +66,7 @@ async def test_successful_setup_registers_shutdown_and_unload_cleanup(setup_entr
     assert setup.hass.data[DOMAIN]["entry"] is setup.runtime
     setup.runtime.async_start.assert_awaited_once()
     setup.hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(
-        setup.entry, ["conversation"]
+        setup.entry, ["conversation", "ai_task"]
     )
     setup.hass.bus.async_listen_once.assert_called_once()
     assert setup.hass.bus.async_listen_once.call_args.args[0] == "homeassistant_stop"

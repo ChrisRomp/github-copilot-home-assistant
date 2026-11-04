@@ -4,10 +4,10 @@
   "categories": ["ai_voice.ai_models"],
   "codeowners": ["@ChrisRomp"],
   "config_flow": true,
-  "dependencies": ["conversation"],
+  "dependencies": ["ai_task", "conversation"],
   "documentation": "https://github.com/ChrisRomp/github-copilot-home-assistant",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/ChrisRomp/github-copilot-home-assistant/issues",
   "requirements": ["github-copilot-sdk==1.0.26"],
-  "version": "0.2.0"
+  "version": "0.3.0"
 }
