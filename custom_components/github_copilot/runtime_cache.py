@@ -373,6 +373,16 @@ class _PrunePass:
             os.close(fd)
         return self.root_fd
 
+    def _names(self, name: str) -> set[str]:
+        names = {name}
+        trash = _TRASH.fullmatch(name)
+        # Static argv keeps a claimed version's original path. For the current
+        # pin, that path names the rebuilt current directory instead, so only
+        # rename-following exe, cwd, and maps evidence identifies trash users.
+        if trash is not None and trash[1] != self.pin:
+            names.add(trash[1])
+        return names
+
     def claim(self) -> None:
         try:
             self.budget.check()
@@ -416,11 +426,7 @@ class _PrunePass:
                         self.outcome.limited = True
                         break
                     attempted += 1
-                    trash = _TRASH.fullmatch(name)
-                    versions = {name}
-                    if trash is not None:
-                        versions.add(trash[1])
-                    if _in_use(self.root, versions, self.budget):
+                    if _in_use(self.root, self._names(name), self.budget):
                         self.outcome.protected += 1
                         continue
                     self.budget.check()
@@ -500,11 +506,7 @@ class _PrunePass:
         name, identity = candidate
         try:
             self.budget.check()
-            trash = _TRASH.fullmatch(name)
-            versions = {name}
-            if trash is not None:
-                versions.add(trash[1])
-            if _in_use(self.root, versions, self.budget):
+            if _in_use(self.root, self._names(name), self.budget):
                 self.outcome.protected += 1
                 return
             root_fd = self._verify_root()

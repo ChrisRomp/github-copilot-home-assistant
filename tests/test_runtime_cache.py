@@ -124,7 +124,7 @@ async def test_upgrade_and_rollback_preserve_pin(unused, monkeypatch, pin, old):
     assert list(current.rglob("*")) == contents
     assert not previous.exists()
     assert not list(unused.root.glob(".pruning-*"))
-    assert all(call.args[1] != pin for call in unused.guard.call_args_list)
+    assert all(pin not in call.args[1] for call in unused.guard.call_args_list)
 
 
 @pytest.mark.parametrize(
@@ -318,19 +318,26 @@ async def test_live_original_version_argv_protects_claimed_trash(filesystem, pro
         pruning.close()
 
 
-async def test_current_pin_trash_is_removed_after_its_process_exits(filesystem, procfs):
+async def test_current_pin_trash_is_reclaimed_while_current_runtime_runs(
+    filesystem, procfs, monkeypatch
+):
+    monkeypatch.setattr(_cli_version, "CLI_VERSION", "1.0.102")
     old = filesystem.version("1.0.102", "copilot-runtime")
     trash = filesystem.root / f".pruning-1.0.102-{'a' * 32}"
     old.rename(trash)
-    filesystem.version("1.0.102")
+    current = filesystem.version("1.0.102", "copilot-runtime")
     procfs.process(
-        12345, args=["launcher", f"{filesystem.root}/1.0.102/copilot-runtime"]
+        12345,
+        exe=current / "copilot-runtime",
+        args=[f"{current}/copilot-runtime"],
     )
+    stale = procfs.process(12346, exe=trash / "copilot-runtime")
     await cache.async_prune_runtime_cache(filesystem.hass)
-    assert trash.is_dir()
-    shutil.rmtree(procfs.root / "12345")
+    assert (trash / "copilot-runtime").is_file()
+    shutil.rmtree(stale)
     await cache.async_prune_runtime_cache(filesystem.hass)
     assert not trash.exists()
+    assert (current / "copilot-runtime").is_file()
 
 
 async def test_live_trash_is_retained(filesystem, procfs):

@@ -102,7 +102,10 @@ revalidated after each process check before claiming or deleting. Partial trash 
 eligible for a future startup, including trash whose encoded version becomes
 the current pin after a rollback. The post-claim process check matches both the
 trash name and its original version so unchanged command-line paths still
-protect a claimed runtime. Nested mounts, including same-filesystem bind mounts,
+protect a claimed runtime. When the original version is the current pin, that
+path names the rebuilt current directory, so only rename-following executable,
+working-directory, and mapping paths protect the trash. This lets the running
+current runtime coexist with reclaiming its leftover trash. Nested mounts, including same-filesystem bind mounts,
 are not traversed.
 
 Each pass examines at most 64 cache-root entries, attempts four version/trash
