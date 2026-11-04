@@ -21,16 +21,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def test_native_startup_cleanup_protects_active_owner_and_recovers_crash(
+async def test_native_cleanup_protects_local_and_remote_owners_and_recovers_crash(
     tmp_path, caplog
 ):
     import asyncio
+    from uuid import uuid4
 
     from copilot import ToolSet
 
     from custom_components.github_copilot.session_cleanup import (
         VERIFIED_RUNTIME,
-        async_cleanup_startup_sessions,
+        SessionCleanup,
     )
 
     assert CLI_VERSION == VERIFIED_RUNTIME, "Reverify native ownership before upgrading"
@@ -55,6 +56,7 @@ async def test_native_startup_cleanup_protects_active_owner_and_recovers_crash(
         for _ in range(2)
     ]
     owner, cleaner = clients
+    maintenance = SessionCleanup(cleaner, base, asyncio.Lock())
     try:
         await owner.start()
         options = {
@@ -94,7 +96,7 @@ async def test_native_startup_cleanup_protects_active_owner_and_recovers_crash(
         assert abandoned.session_id not in {s.session_id for s in listed}, (
             "Native list omits sessions that have not recorded a turn"
         )
-        await async_cleanup_startup_sessions(cleaner, base)
+        await maintenance.async_run("startup", lambda session_id: False)
         assert active_path.is_dir(), "Another live runtime must retain its session"
         assert not abandoned_path.exists(), "Inactive incomplete sessions are cleaned"
         assert other_session.is_dir()
@@ -102,15 +104,33 @@ async def test_native_startup_cleanup_protects_active_owner_and_recovers_crash(
         assert "failed=1" in caplog.text
         assert active.session_id not in caplog.text
 
+        local_id = str(uuid4())
+        local = await cleaner.create_session(session_id=local_id, **options)
+        assert local.session_id == local_id
+        local_path = local.workspace_path
+        assert local_path is not None
+        os.utime(local_path, (0, 0))
+        protected = {local_id}
+        await maintenance.async_run("periodic", protected.__contains__)
+        assert local_path.is_dir(), "Old local sessions must still be protected"
+        assert active_path.is_dir(), "Other native owners must still be protected"
+
         await owner.force_stop()
-        await async_cleanup_startup_sessions(cleaner, base)
+        await maintenance.async_run("periodic", protected.__contains__)
         assert not active_path.exists(), "Dead owner locks must not prevent recovery"
+        assert local_path.is_dir()
         assert other_session.is_dir()
-        await async_cleanup_startup_sessions(cleaner, base)
+        await local.disconnect()
+        protected.clear()
+        await maintenance.async_run("periodic", protected.__contains__)
+        assert not local_path.exists()
+        await maintenance.async_run("periodic", protected.__contains__)
         assert sentinel.is_file()
+        assert local_id not in caplog.text
     finally:
         for client in clients:
             await asyncio.wait_for(client.force_stop(), 10)
+        await maintenance.async_close()
 
 
 @pytest.mark.parametrize("context_source", ["assist_api", "request", "live_state"])

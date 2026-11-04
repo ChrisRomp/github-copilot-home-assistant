@@ -87,6 +87,10 @@ fail rather than being silently omitted. Native image generation depends on
 account availability. Reference-image editing, local-model fallback, and remote
 runtime hosting are not supported.
 
+Abandoned SDK session data is cleaned up at startup and once daily, with bounded
+work and protection for live sessions. Cleanup is best-effort, not a disk-usage
+cap, and does not remove data from existing backups.
+
 See the [user guide](docs/usage.md) for model fallback, data handling, and
 troubleshooting.
 

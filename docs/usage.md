@@ -132,18 +132,35 @@ sensitive. If termination cannot be confirmed, image work stays blocked until
 the runtime can be stopped safely.
 
 On integration startup or reload, a bounded cleanup pass attempts to remove
-abandoned SDK sessions from that entry's `session-state` directory. It checks at
-most 200 directory entries and attempts at most 25 deletions within a total
-10-second budget, before admitting new requests. The verified native runtime
-refuses deletion of sessions still owned by another process. Linked directories
-and unrecognized names are not followed or removed.
+abandoned SDK sessions from that entry's `session-state` directory before
+admitting new requests. A periodic pass runs after 24 hours, then waits another
+24 hours after each attempt. These defaults are fixed; there is no retention
+setting or extra retention period for abandoned data.
 
-Cleanup failures and limits produce a warning with counts, not session contents.
-Remaining data can be revisited on a later startup; this is not a periodic
-retention service or a guarantee of capped disk usage. Cleanup is disabled on
-native runtime versions whose ownership safeguards have not been verified.
-Credentials, shared runtime caches, HA traces, generated media, and backups are
-not removed by this pass.
+Each pass checks at most 200 directory entries and attempts at most 25 deletions
+with a 10-second maintenance budget. Deletions are sequential, and maintenance
+passes are serialized across entries. Scan progress carries forward between
+passes so protected or failing candidates do not indefinitely hide a backlog.
+An unfinished operation remains owned after a timeout; no overlapping replacement
+is started. The budget cannot interrupt an operating-system filesystem call or
+undo a deletion already issued to the native runtime.
+
+Live conversations, AI Tasks, and sessions being created or disposed are
+protected regardless of age. The verified native runtime also refuses deletion
+of sessions owned by another process. Linked directories and unrecognized names
+are not followed or removed. Cleanup does not require working authentication or
+a model, and does not resume old conversations.
+
+Failures, deferred work, and limits produce warnings without session contents or
+IDs; outcome summaries include removed, protected, skipped, and failed counts.
+Remaining data can be revisited on a later daily pass or startup. This is
+best-effort recovery, not a guarantee of capped disk usage or a maximum retention
+age. A large backlog can require multiple passes. Restart or reload resets the
+daily timer and in-memory scan progress; missed passes are not replayed.
+
+Cleanup is disabled on native runtime versions whose ownership safeguards have
+not been verified. Credentials, shared runtime caches, HA traces, generated
+media, and existing backups are not removed by these passes.
 
 ### Camera and image analysis
 
@@ -284,10 +301,11 @@ user, and originating device. The SDK can write session files while a chat is
 active. The integration deletes its SDK sessions when HA releases a chat, when
 an idle session is cleaned up, and during normal unload or shutdown.
 
-An abrupt exit or failed cleanup can leave files behind; startup cleanup attempts
-bounded recovery of abandoned SDK sessions. Backups taken while a chat is active
-may include conversation data. A Home Assistant restart starts fresh
-conversations. Credentials and settings remain in Home Assistant's
+An abrupt exit or failed cleanup can leave files behind; startup and daily
+cleanup attempt bounded recovery of abandoned SDK sessions. Backups taken while
+a chat is active or residual files remain may include conversation data.
+Cleanup does not rewrite existing backups. A Home Assistant restart starts fresh
+conversations, not restored SDK sessions. Credentials and settings remain in HA's
 config-entry storage; treat that storage and Home Assistant backups as sensitive.
 
 Device control only uses the Home Assistant Assist API selected for the request.
