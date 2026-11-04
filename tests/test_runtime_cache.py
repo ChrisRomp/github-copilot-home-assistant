@@ -318,7 +318,33 @@ async def test_live_original_version_argv_protects_claimed_trash(filesystem, pro
         pruning.close()
 
 
-async def test_current_pin_trash_is_reclaimed_while_current_runtime_runs(
+@pytest.mark.parametrize("stage", ["claim", "delete"])
+def test_original_version_argv_protects_current_pin_trash(filesystem, procfs, stage):
+    old = filesystem.version("1.0.102", "copilot-runtime")
+    trash = filesystem.root / f".pruning-1.0.102-{'a' * 32}"
+    old.rename(trash)
+    current = filesystem.version("1.0.102", "copilot-runtime")
+    pruning = cache._PrunePass(filesystem.root, "1.0.102", budget())
+    try:
+        if stage == "delete":
+            pruning.claim()
+            assert len(pruning.claimed) == 1
+
+        procfs.process(12345, args=["launcher", f"{current}/copilot-runtime"])
+        if stage == "claim":
+            pruning.claim()
+            assert not pruning.claimed
+        else:
+            pruning.delete(pruning.claimed[0])
+
+        assert (trash / "copilot-runtime").read_text() == "cached runtime"
+        assert (current / "copilot-runtime").read_text() == "cached runtime"
+        assert pruning.outcome.protected == 1
+    finally:
+        pruning.close()
+
+
+async def test_current_pin_trash_is_removed_after_matching_processes_exit(
     filesystem, procfs, monkeypatch
 ):
     monkeypatch.setattr(_cli_version, "CLI_VERSION", "1.0.102")
@@ -326,7 +352,7 @@ async def test_current_pin_trash_is_reclaimed_while_current_runtime_runs(
     trash = filesystem.root / f".pruning-1.0.102-{'a' * 32}"
     old.rename(trash)
     current = filesystem.version("1.0.102", "copilot-runtime")
-    procfs.process(
+    current_process = procfs.process(
         12345,
         exe=current / "copilot-runtime",
         args=[f"{current}/copilot-runtime"],
@@ -336,8 +362,11 @@ async def test_current_pin_trash_is_reclaimed_while_current_runtime_runs(
     assert (trash / "copilot-runtime").is_file()
     shutil.rmtree(stale)
     await cache.async_prune_runtime_cache(filesystem.hass)
+    assert (trash / "copilot-runtime").is_file()
+    shutil.rmtree(current_process)
+    await cache.async_prune_runtime_cache(filesystem.hass)
     assert not trash.exists()
-    assert (current / "copilot-runtime").is_file()
+    assert (current / "copilot-runtime").read_text() == "cached runtime"
 
 
 async def test_live_trash_is_retained(filesystem, procfs):

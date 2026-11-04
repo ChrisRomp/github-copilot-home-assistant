@@ -376,10 +376,9 @@ class _PrunePass:
     def _names(self, name: str) -> set[str]:
         names = {name}
         trash = _TRASH.fullmatch(name)
-        # Static argv keeps a claimed version's original path. For the current
-        # pin, that path names the rebuilt current directory instead, so only
-        # rename-following exe, cwd, and maps evidence identifies trash users.
-        if trash is not None and trash[1] != self.pin:
+        # Static argv keeps a claimed version's original path. Rebuilding the
+        # current pin does not disambiguate those references to its trash.
+        if trash is not None:
             names.add(trash[1])
         return names
 

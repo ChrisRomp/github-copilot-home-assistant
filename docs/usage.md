@@ -337,6 +337,12 @@ cleanup. Large caches, interrupted deletion, and safety deferrals may leave
 versions or `.pruning-*` directories until a later restart. Cleanup affects future
 backup contents, not backups already taken.
 
+After a rollback, a running current-pin runtime can also retain leftover
+`.pruning-<pin>-*` trash. Original command-line paths cannot reliably distinguish
+users of the rebuilt runtime from users of its trash, so cleanup keeps both.
+Restarts alone may not reclaim that trash while the version remains active; use
+the manual recovery procedure below if needed.
+
 For manual recovery:
 
 1. Stop Home Assistant. Disabling integration entries is not enough: configuration

@@ -98,15 +98,20 @@ After a fresh process check, an atomic no-replace rename claims an obsolete
 version. Outside the lock, another process check precedes incremental,
 descriptor-relative deletion. Nested links are unlinked, never followed;
 directory identities are checked around opens and claims, and the cache root is
-revalidated after each process check before claiming or deleting. Partial trash remains
-eligible for a future startup, including trash whose encoded version becomes
-the current pin after a rollback. The post-claim process check matches both the
-trash name and its original version so unchanged command-line paths still
-protect a claimed runtime. When the original version is the current pin, that
-path names the rebuilt current directory, so only rename-following executable,
-working-directory, and mapping paths protect the trash. This lets the running
-current runtime coexist with reclaiming its leftover trash. Nested mounts, including same-filesystem bind mounts,
-are not traversed.
+revalidated after each process check before claiming or deleting. Partial trash
+remains eligible for a future startup, including trash whose encoded version
+becomes the current pin after a rollback. Both recovery and pre-deletion process
+checks match the trash name and its original version so unchanged command-line
+paths still protect a claimed runtime.
+
+This deliberately retains ambiguous trash: references to a rebuilt current-pin
+directory also protect leftover trash for that version. Original command-line
+paths cannot reliably distinguish consumers of the rebuilt directory from
+consumers of its trash. Because cleanup runs after runtime startup, restarting HA
+may keep retaining that trash while the same version is active. Reclamation
+requires no matching process references or the stopped-HA manual recovery
+procedure below. Nested mounts, including same-filesystem bind mounts, are not
+traversed.
 
 Each pass examines at most 64 cache-root entries, attempts four version/trash
 trees, and examines 1,024 tree entries at a maximum nesting depth of 32. Process
