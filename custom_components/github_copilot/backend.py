@@ -1049,7 +1049,10 @@ class ConversationBackend:
             self._on_runtime_failure(True)
 
     def mark_runtime_stopped(self) -> None:
-        """Release only admission retained after a failed native termination."""
+        """Clear admission guards and session protection.
+
+        Call only after native termination is confirmed.
+        """
         self._stop_unconfirmed = False
         self._protected_session_ids.clear()
         if self._quarantined_image_lock is not None:
