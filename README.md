@@ -31,9 +31,13 @@ This integration supplies the conversation agent, not a complete voice pipeline.
 
 ## Installation
 
-Use the button above to add [ChrisRomp/github-copilot-home-assistant](https://github.com/ChrisRomp/github-copilot-home-assistant)
-as a custom repository with category **Integration**, then install the integration.
-The project is not in the default catalog.
+Search for **GitHub Copilot** in **Settings > Marketplace** (Home Assistant
+2026.11 or newer) or HACS (2026.10), then select the integration and download or
+install it. It is included in the default catalog; no custom repository is needed.
+
+The button above opens the repository directly in Marketplace or HACS.
+Review and confirm the installation there, then **restart Home Assistant**
+before continuing to setup.
 
 | Home Assistant | Where to install | Restart after first install |
 | --- | --- | --- |

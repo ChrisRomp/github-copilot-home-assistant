@@ -24,20 +24,25 @@ details.
 
 ## 1. Install the integration
 
-The integration is not in the default catalog. Use the button below to open
-its repository in HACS or Marketplace and add it when prompted.
+**GitHub Copilot** is included in the default catalog; no custom repository is
+needed.
+
+1. Open **Settings > Marketplace** on Home Assistant 2026.11 or newer, or HACS
+   on 2026.10.
+2. Search for **GitHub Copilot** and open its listing.
+3. Select **Install** in Marketplace, or **Download** in HACS, and confirm.
+
+Alternatively, use this button to open the repository directly, then confirm
+the installation:
 
 [![Open in Home Assistant Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ChrisRomp&repository=github-copilot-home-assistant&category=integration)
 
-To add the repository manually instead:
+The button works with both HACS and Marketplace. Home Assistant's
+[Marketplace migration guide](https://next.home-assistant.io/integrations/marketplace/#coming-from-hacs)
+confirms that existing HACS buttons open the repository in Marketplace.
 
-1. Open HACS or **Settings > Marketplace**.
-2. Add `https://github.com/ChrisRomp/github-copilot-home-assistant` as a custom
-   repository with category **Integration**.
-
-After adding the repository, find **GitHub Copilot** and download or install it.
-**Restart Home Assistant before continuing.** A restart is required whether you
-install through HACS or Marketplace.
+**Restart Home Assistant before continuing**, whether you installed through HACS
+or Marketplace.
 
 For manual installation instead, see the
 [README](../README.md#installation).
