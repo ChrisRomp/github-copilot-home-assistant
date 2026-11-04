@@ -77,6 +77,8 @@ operations whose caller budget has expired.
 Discovery only recognizes canonical SDK UUID directories. An owned `scandir`
 iterator carries progress between bounded passes, including past protected or
 failed candidates; it closes at the end of traversal or runtime shutdown.
+A saved iterator that is already exhausted restarts once within the same pass,
+without spending the scan or deletion budgets twice or skipping a daily retry.
 A pending batch of at most 25 IDs preserves unattempted candidates across a
 deadline, so a slow failure cannot repeatedly hide the rest of that batch.
 If a pass is interrupted during a candidate's filesystem recheck, the candidate

@@ -179,6 +179,98 @@ async def test_cleanup_has_a_deletion_count_limit(storage, monkeypatch, caplog, 
     assert "limit_reached=True" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("sessions", "unrecognized"),
+    [(25, 0), (1, 199)],
+    ids=["deletion-limit", "scan-limit"],
+)
+async def test_exact_limit_retries_failed_sessions_on_every_pass(
+    storage, monkeypatch, sessions, unrecognized
+):
+    paths = [storage.session(number) for number in range(1, sessions + 1)]
+    root = storage.base / "session-state"
+    for number in range(unrecognized):
+        (root / f"unrecognized-{number}").mkdir()
+    scanned = []
+    closed = []
+    scandir = cleanup.os.scandir
+
+    class Scan:
+        def __init__(self, path):
+            self.entries = scandir(path)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self.entries)
+            scanned.append(entry.name)
+            return entry
+
+        def close(self):
+            self.entries.close()
+            closed.append(self)
+
+    opened = Mock(side_effect=Scan)
+    monkeypatch.setattr(cleanup.os, "scandir", opened)
+    client = SimpleNamespace(
+        delete_session=AsyncMock(side_effect=RuntimeError("Deletion failed"))
+    )
+    for attempt in range(3):
+        scanned.clear()
+        client.delete_session.reset_mock()
+        await storage.run(client, phase="startup" if attempt == 0 else "periodic")
+        assert client.delete_session.await_count == sessions
+        assert len(scanned) == sessions + unrecognized
+        assert len(scanned) <= cleanup.SCAN_LIMIT
+        assert client.delete_session.await_count <= cleanup.DELETE_LIMIT
+        assert {call.args[0] for call in client.delete_session.await_args_list} == {
+            path.name for path in paths
+        }
+        assert opened.call_count == attempt + 1
+        assert len(closed) == attempt
+
+
+async def test_exhausted_iterator_restarts_only_once_when_directory_becomes_empty(
+    storage, monkeypatch
+):
+    paths = [storage.session(number) for number in range(1, cleanup.DELETE_LIMIT + 1)]
+    opened = Mock(wraps=cleanup.os.scandir)
+    monkeypatch.setattr(cleanup.os, "scandir", opened)
+    inventory = cleanup._SessionInventory(storage.base)
+    try:
+        sessions, skipped, limited = inventory.scan()
+        assert set(sessions) == {path.name for path in paths}
+        assert skipped == 0 and limited
+        for path in paths:
+            path.rmdir()
+        assert inventory.scan() == ([], 0, False)
+        assert opened.call_count == 2
+        assert inventory._entries is None
+        assert inventory.scan() == ([], 0, False)
+        assert opened.call_count == 3
+    finally:
+        inventory.close()
+
+
+async def test_nonempty_resumed_scan_finishes_without_restarting(storage, monkeypatch):
+    paths = [storage.session(number) for number in range(1, cleanup.DELETE_LIMIT + 2)]
+    opened = Mock(wraps=cleanup.os.scandir)
+    monkeypatch.setattr(cleanup.os, "scandir", opened)
+    inventory = cleanup._SessionInventory(storage.base)
+    try:
+        first, _, limited = inventory.scan()
+        assert len(first) == cleanup.DELETE_LIMIT and limited
+        last, skipped, limited = inventory.scan()
+        assert len(last) == 1
+        assert set(first + last) == {path.name for path in paths}
+        assert skipped == 0 and not limited
+        assert opened.call_count == 1
+        assert inventory._entries is None
+    finally:
+        inventory.close()
+
+
 @pytest.mark.parametrize("limit", [3, 200])
 async def test_inventory_does_not_scan_unbounded_directory_entries(
     storage, monkeypatch, limit

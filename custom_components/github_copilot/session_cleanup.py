@@ -62,6 +62,7 @@ class _SessionInventory:
             if not stat.S_ISDIR(info.st_mode):
                 raise OSError("Session storage is not a directory")
             identity = (info.st_dev, info.st_ino)
+            resumed = self._entries is not None and identity == self._identity
             if identity != self._identity:
                 self.close()
                 self._entries = os.scandir(root)
@@ -85,6 +86,9 @@ class _SessionInventory:
             if examined == SCAN_LIMIT:
                 return sessions, skipped, True
             self.close()
+            if resumed and examined == 0:
+                # The fresh scan cannot restart again or exceed this pass's limits.
+                return self.scan()
             return sessions, skipped, False
         except FileNotFoundError:
             self.close()
