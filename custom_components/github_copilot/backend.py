@@ -201,6 +201,7 @@ class ConversationBackend:
         self._model_catalog_loaded = False
         self._task_active = False
         self._sessions: dict[str, _SessionRecord] = {}
+        self._protected_session_ids: set[str] = set()
         self._turn_slots = asyncio.Semaphore(MAX_CONCURRENT_TURNS)
         self._turn_tasks: set[asyncio.Task[Any]] = set()
         self._session_lock = asyncio.Lock()
@@ -1050,9 +1051,14 @@ class ConversationBackend:
     def mark_runtime_stopped(self) -> None:
         """Release only admission retained after a failed native termination."""
         self._stop_unconfirmed = False
+        self._protected_session_ids.clear()
         if self._quarantined_image_lock is not None:
             self._quarantined_image_lock.release()
             self._quarantined_image_lock = None
+
+    def is_session_protected(self, session_id: str) -> bool:
+        """Include creation and disposal, not just cached conversation records."""
+        return session_id in self._protected_session_ids
 
     def _clear_quota_issue(self) -> None:
         self._quota_exceeded = False
@@ -1085,14 +1091,18 @@ class ConversationBackend:
 
         async def cleanup() -> None:
             try:
-                await self._async_cleanup_rpc(
-                    session.disconnect(), "disconnect a Copilot session"
-                )
+                try:
+                    await self._async_cleanup_rpc(
+                        session.disconnect(), "disconnect a Copilot session"
+                    )
+                finally:
+                    await self._async_cleanup_rpc(
+                        self.client.delete_session(session.session_id),
+                        "delete persisted Copilot session data",
+                    )
             finally:
-                await self._async_cleanup_rpc(
-                    self.client.delete_session(session.session_id),
-                    "delete persisted Copilot session data",
-                )
+                if not self._stop_unconfirmed:
+                    self._protected_session_ids.discard(session.session_id)
 
         await async_wait_cleanup(asyncio.create_task(cleanup()))
 
@@ -1296,8 +1306,11 @@ class ConversationBackend:
                 "native image operation are permitted."
             )
 
+        session_id = str(uuid.uuid4())
+        self._protected_session_ids.add(session_id)
         creation = asyncio.create_task(
             self.client.create_session(
+                session_id=session_id,
                 model=model_id,
                 system_message={
                     "mode": "customize",
@@ -1352,7 +1365,7 @@ class ConversationBackend:
                 try:
                     async with asyncio.timeout(SDK_CLEANUP_TIMEOUT_SECONDS):
                         created = await asyncio.shield(creation)
-                except TimeoutError:
+                except (TimeoutError, asyncio.CancelledError):
                     _LOGGER.error(
                         "Cancelled Copilot session creation did not finish; "
                         "stopping the runtime. Unreturned session files may remain."
@@ -1363,6 +1376,7 @@ class ConversationBackend:
                         creation.cancel()
                         await asyncio.gather(creation, return_exceptions=True)
                 except Exception as err:
+                    self._protected_session_ids.discard(session_id)
                     _LOGGER.warning(
                         "Unable to finish cancelled Copilot session creation (%s)",
                         type(err).__name__,
@@ -1374,6 +1388,9 @@ class ConversationBackend:
                         await self._async_dispose_session(created)
 
             await async_wait_cleanup(asyncio.create_task(finish_creation()))
+            raise
+        except Exception:
+            self._protected_session_ids.discard(session_id)
             raise
         if task_request is not None:
             task_request.session = session

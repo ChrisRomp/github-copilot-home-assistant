@@ -27,6 +27,7 @@ from .const import (
     CONF_AI_TASK_MODEL_BILLING,
     CONF_MODEL,
     CONF_MODEL_BILLING,
+    DATA_SESSION_CLEANUP_LOCK,
     DOMAIN,
     MODEL_CACHE_SECONDS,
     MODELS_UPDATED_SIGNAL,
@@ -34,11 +35,12 @@ from .const import (
     SDK_CLEANUP_TIMEOUT_SECONDS,
     SDK_FORCE_STOP_TIMEOUT_SECONDS,
     SDK_TOKEN_MIN_LIFETIME_SECONDS,
+    SESSION_CLEANUP_INTERVAL_SECONDS,
     VERIFIED_IMAGE_RUNTIME,
 )
 from .models import model_billing
 from .provisioning import async_runtime_path
-from .session_cleanup import async_cleanup_startup_sessions
+from .session_cleanup import SessionCleanup
 
 if TYPE_CHECKING:
     from copilot.client import GitHubTokenProviderArgs, GitHubTokenProviderResult
@@ -69,6 +71,8 @@ class CopilotRuntime:
         self._force_stop_task: asyncio.Task[None] | None = None
         self._force_stop_client: Any | None = None
         self._stopping = False
+        self._session_cleanup: SessionCleanup | None = None
+        self._maintenance_task: asyncio.Task[None] | None = None
 
     async def async_start(self) -> None:
         """Provision and start the pinned native runtime."""
@@ -96,7 +100,12 @@ class CopilotRuntime:
             log_level="error",
         )
         await self.client.start()
-        await async_cleanup_startup_sessions(self.client, self.base_directory)
+        self._session_cleanup = SessionCleanup(
+            self.client,
+            self.base_directory,
+            self.hass.data.setdefault(DATA_SESSION_CLEANUP_LOCK, asyncio.Lock()),
+        )
+        await self._session_cleanup.async_run("startup", lambda session_id: False)
         from .backend import ConversationBackend
 
         client = self.client
@@ -110,6 +119,8 @@ class CopilotRuntime:
             ):
                 return
             self.is_started = False
+            if self._session_cleanup is not None:
+                self._session_cleanup.stop()
             self.image_models = None
             async_dispatcher_send(
                 self.hass, f"{MODELS_UPDATED_SIGNAL}_{self.entry.entry_id}"
@@ -130,9 +141,44 @@ class CopilotRuntime:
         )
         self.backend = backend
         self.is_started = True
+        self._maintenance_task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_maintain_sessions(client, backend, self._session_cleanup),
+            f"{DOMAIN} session cleanup",
+        )
+
+    async def _async_maintain_sessions(
+        self, client: Any, backend: Any, cleanup: SessionCleanup
+    ) -> None:
+        while True:
+            await asyncio.sleep(SESSION_CLEANUP_INTERVAL_SECONDS)
+            if (
+                self._stopping
+                or not self.is_started
+                or self.hass.is_stopping
+                or self.client is not client
+                or self.backend is not backend
+            ):
+                return
+            await cleanup.async_run("periodic", backend.is_session_protected)
+
+    async def _async_quiesce_maintenance(self) -> None:
+        if self._session_cleanup is not None:
+            self._session_cleanup.stop()
+        if self._maintenance_task is not None:
+            self._maintenance_task.cancel()
+            await asyncio.gather(self._maintenance_task, return_exceptions=True)
+            self._maintenance_task = None
+
+    async def _async_close_session_cleanup(self) -> None:
+        if self._session_cleanup is not None:
+            await self._session_cleanup.async_close()
+            self._session_cleanup = None
 
     async def _async_force_stop_client(self, client: Any) -> None:
         """Share native termination between turn recovery and runtime shutdown."""
+        if self._session_cleanup is not None and self.client is client:
+            self._session_cleanup.stop()
         if (
             self._force_stop_client is not client
             or self._force_stop_task is None
@@ -165,6 +211,13 @@ class CopilotRuntime:
         """Stop the SDK runtime and release its process resources."""
         async with self._stop_lock:
             self._stopping = True
+            interrupted: asyncio.CancelledError | None = None
+            try:
+                await async_wait_cleanup(
+                    asyncio.create_task(self._async_quiesce_maintenance())
+                )
+            except asyncio.CancelledError as err:
+                interrupted = err
             backend, self.backend = self.backend, None
             client, self.client = self.client, None
             self.is_started = False
@@ -188,6 +241,7 @@ class CopilotRuntime:
                                 backend.mark_runtime_stopped()
                             self.client = None
                             self.backend = None
+                            await self._async_close_session_cleanup()
 
                         await async_wait_cleanup(
                             asyncio.create_task(force_stop_and_finalize())
@@ -202,6 +256,11 @@ class CopilotRuntime:
                     else:
                         if backend is not None:
                             backend.mark_runtime_stopped()
+                        await self._async_close_session_cleanup()
+                else:
+                    await self._async_close_session_cleanup()
+            if interrupted is not None:
+                raise interrupted
 
     async def async_github_token_provider(
         self, request: GitHubTokenProviderArgs

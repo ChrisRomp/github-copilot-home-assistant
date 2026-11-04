@@ -456,8 +456,163 @@ async def test_cancelled_session_creation_is_bounded(setup, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1)
     setup.client.force_stop.assert_awaited_once()
+    assert not setup.backend._protected_session_ids
     setup.session.send_and_wait.assert_not_awaited()
     await assert_clean(setup)
+
+
+@pytest.mark.parametrize("kind", ["conversation", "data", "image"])
+@pytest.mark.parametrize("delete_fails", [False, True])
+async def test_protection_covers_creation_and_cancelled_disposal(
+    setup, kind, delete_fails
+):
+    entered, finish = asyncio.Event(), asyncio.Event()
+    disconnecting, disconnected = asyncio.Event(), asyncio.Event()
+    deleting, deleted = asyncio.Event(), asyncio.Event()
+
+    async def create(**kwargs):
+        setup.session.session_id = kwargs["session_id"]
+        entered.set()
+        await finish.wait()
+        return setup.session
+
+    async def disconnect():
+        disconnecting.set()
+        await disconnected.wait()
+
+    async def delete(session_id):
+        deleting.set()
+        await deleted.wait()
+        if delete_fails:
+            raise RuntimeError("PRIVATE_DELETE_FAILURE")
+
+    request = (
+        setup.module.ImageTaskRequest(text="Draw", context=SimpleNamespace())
+        if kind == "image"
+        else task_request(setup)
+        if kind == "data"
+        else None
+    )
+    setup.client.create_session.side_effect = create
+    setup.session.disconnect.side_effect = disconnect
+    setup.client.delete_session.side_effect = delete
+    creation = asyncio.create_task(
+        setup.backend._async_create_sdk_session(
+            ORIGINAL,
+            [],
+            {"instructions": ""},
+            task_mode=request is not None,
+            image_request=request if kind == "image" else None,
+            task_request=request,
+        )
+    )
+    disposal = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        session_id = setup.session.session_id
+        assert setup.backend.is_session_protected(session_id)
+        assert not setup.backend._sessions
+        finish.set()
+        session = await creation
+        assert setup.backend.is_session_protected(session_id)
+        if request is not None:
+            assert request.session is session
+        disposal = asyncio.create_task(setup.backend._async_dispose_session(session))
+        await asyncio.wait_for(disconnecting.wait(), 1)
+        assert setup.backend.is_session_protected(session_id)
+        disposal.cancel()
+        await asyncio.sleep(0)
+        disconnected.set()
+        await asyncio.wait_for(deleting.wait(), 1)
+        assert setup.backend.is_session_protected(session_id)
+        disposal.cancel()
+        deleted.set()
+        with pytest.raises(asyncio.CancelledError):
+            await disposal
+        assert not setup.backend.is_session_protected(session_id)
+        assert not setup.backend._protected_session_ids
+    finally:
+        finish.set()
+        disconnected.set()
+        deleted.set()
+        await asyncio.gather(creation, return_exceptions=True)
+        if disposal is not None:
+            await asyncio.gather(disposal, return_exceptions=True)
+        await setup.backend.async_stop()
+
+
+async def test_failed_creation_releases_its_reservation(setup):
+    setup.client.create_session.side_effect = RuntimeError("Creation failed")
+    with pytest.raises(RuntimeError, match="Creation failed"):
+        await setup.backend._async_create_sdk_session(
+            ORIGINAL, [], {"instructions": ""}
+        )
+    assert not setup.backend._protected_session_ids
+
+
+async def test_sdk_cancelled_creation_confirms_stop_before_releasing_reservation(setup):
+    setup.client.create_session.side_effect = asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await setup.backend._async_create_sdk_session(
+            ORIGINAL, [], {"instructions": ""}
+        )
+    setup.client.force_stop.assert_awaited_once()
+    assert not setup.backend._protected_session_ids
+
+
+async def test_unconfirmed_creation_stop_retains_protection_until_retry(
+    setup, monkeypatch
+):
+    monkeypatch.setattr(setup.module, "SDK_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    entered = asyncio.Event()
+
+    async def create(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    setup.client.create_session.side_effect = create
+    setup.client.force_stop.side_effect = OSError("Unconfirmed termination")
+    creation = asyncio.create_task(
+        setup.backend._async_create_sdk_session(ORIGINAL, [], {"instructions": ""})
+    )
+    await asyncio.wait_for(entered.wait(), 1)
+    session_id = setup.client.create_session.call_args.kwargs["session_id"]
+    creation.cancel()
+    with pytest.raises(OSError, match="Unconfirmed termination"):
+        await asyncio.wait_for(creation, 1)
+    assert setup.backend.is_session_protected(session_id)
+    setup.client.force_stop.side_effect = None
+    await setup.backend.async_stop()
+    assert not setup.backend.is_session_protected(session_id)
+
+
+async def test_task_disposal_does_not_unprotect_cached_conversation(setup):
+    created = []
+
+    async def create(**kwargs):
+        session = create_autospec(CopilotSession, instance=True)
+        session.session_id = kwargs["session_id"]
+        session.send_and_wait.return_value = SimpleNamespace(
+            data=AssistantMessageData(content="Hello", message_id="message")
+        )
+        session.on.return_value = Mock()
+        session.rpc = SimpleNamespace(options=SimpleNamespace(update=AsyncMock()))
+        created.append(session)
+        return session
+
+    setup.client.create_session.side_effect = create
+    await turn(setup)
+    conversation = created[0]
+    assert setup.backend.is_session_protected(conversation.session_id)
+    assert (
+        await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+        == "Hello"
+    )
+    assert len(created) == 2
+    assert setup.backend.is_session_protected(conversation.session_id)
+    assert not setup.backend.is_session_protected(created[1].session_id)
+    await setup.backend.async_stop()
+    assert not setup.backend._protected_session_ids
 
 
 async def test_task_uses_final_json_not_progress_text(setup, monkeypatch):

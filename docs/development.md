@@ -66,21 +66,54 @@ this shared versioned cache.
 
 Per-entry SDK sessions are stored under
 `<config>/.storage/github_copilot/<entry-id>/session-state/<session-id>/`.
-Before creating the backend, startup scans a bounded number of directory entries
-for canonical SDK UUID directories and uses `delete_session()` to remove inactive
-sessions. Native `list_sessions()` omits sessions without recorded turns, so it
-cannot discover all crash leftovers. No session contents are read for discovery.
+`SessionCleanup` runs before backend creation and is reused by one config-entry
+background task after startup. The first periodic pass waits 24 hours; subsequent
+passes wait 24 hours after the preceding attempt. There is no catch-up loop or
+extra age-based retention period. Both paths use the same bounds: 200 directory
+entries, 25 deletion attempts, and a 10-second orchestration budget. A shared
+HA-scoped lock serializes maintenance across entries, including outstanding
+operations whose caller budget has expired.
+
+Discovery only recognizes canonical SDK UUID directories. An owned `scandir`
+iterator carries progress between bounded passes, including past protected or
+failed candidates; it closes at the end of traversal or runtime shutdown.
+A pending batch of at most 25 IDs preserves unattempted candidates across a
+deadline, so a slow failure cannot repeatedly hide the rest of that batch.
+A changed directory identity resets the cursor. Scan state is not persisted
+across restarts, and a changing directory may need another traversal.
+Native `list_sessions()` omits sessions without recorded turns, so it cannot
+discover all crash leftovers. No session contents are read for discovery.
 Symlinked storage roots and session directories are rejected or skipped, and each
 candidate is checked again before deletion.
 
-Deletion relies on the native runtime's cross-process session ownership locks.
-The cleanup gate is pinned to the tested runtime version; reverify it when
-upgrading the SDK. The native contract test covers an active second process,
-disconnected/incomplete sessions, forced-stop leftovers, entry isolation, and
-nested links to unrelated files. There is no recursive filesystem-deletion
-fallback if SDK deletion fails. Startup cleanup is bounded to 200 entries,
-25 deletion attempts, and 10 seconds; failures are reported without session
-summaries, IDs, paths, or raw native errors.
+The backend reserves a caller-generated UUID before native session creation and
+protects it through cancellation-safe disposal, independently of the conversation
+cache. This includes data/image tasks and sessions being created or disconnected.
+Ordinary failed disposal releases protection for a later retry; unconfirmed
+native termination retains guards until confirmed-stop bookkeeping runs.
+Maintenance checks live protection again after filesystem awaits, immediately
+before SDK deletion.
+
+The native runtime's cross-process ownership locks additionally protect other
+live runtimes. The cleanup gate is pinned to the tested runtime version; reverify
+it when upgrading the SDK. Native contracts cover same-client protection,
+explicit UUID creation, an active second process, disconnected/incomplete
+sessions, forced-stop leftovers, entry isolation, and nested links to unrelated
+files. There is no recursive filesystem-deletion fallback if SDK deletion fails.
+
+A pass that exceeds its budget retains its outstanding operation and issues no
+further deletions. Later attempts defer until it finishes. Inventory runs off the
+event loop, and cancellation drains the bounded filesystem worker before closing
+its iterator. Shutdown first quiesces maintenance, then drains the backend and
+stops the native client, then closes maintenance resources. A filesystem syscall
+cannot be forcibly interrupted, nor can a timed-out SDK deletion be undone.
+Housekeeping failures do not independently force-stop a healthy runtime.
+
+Maintenance never calls model discovery or credential providers. It logs
+sanitized removed/protected/skipped/failed counts and budget/deferred warnings,
+without session summaries, IDs, paths, or raw native errors. Protected local
+sessions alone do not produce warnings. Credentials, shared binaries, HA media,
+traces, and backups remain outside this cleanup scope.
 
 Session cleanup and backup implications are described in the
 [user guide](usage.md#conversation-data-and-privacy).

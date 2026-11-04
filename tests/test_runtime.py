@@ -266,7 +266,14 @@ def sdk_runtime(ha_boundary, monkeypatch):
         "homeassistant_stop",
         raising=False,
     )
-    entry = SimpleNamespace(entry_id="entry", data={}, options={})
+    entry = SimpleNamespace(
+        entry_id="entry",
+        data={},
+        options={},
+        async_create_background_task=Mock(
+            side_effect=lambda hass, coro, name: asyncio.create_task(coro, name=name)
+        ),
+    )
     runtime = module.CopilotRuntime(hass, entry)
     runtime.base_directory = Mock()
     runtime.credentials.async_ensure_account_id = AsyncMock(return_value="123")
@@ -289,9 +296,16 @@ def sdk_runtime(ha_boundary, monkeypatch):
     monkeypatch.setattr(
         module, "async_runtime_path", AsyncMock(return_value="/unused-runtime")
     )
-    startup_cleanup = AsyncMock()
-    monkeypatch.setattr(module, "async_cleanup_startup_sessions", startup_cleanup)
-    backend = SimpleNamespace(async_stop=AsyncMock(), mark_runtime_stopped=Mock())
+    cleanup = SimpleNamespace(
+        async_run=AsyncMock(), stop=Mock(), async_close=AsyncMock()
+    )
+    cleanup_factory = Mock(return_value=cleanup)
+    monkeypatch.setattr(module, "SessionCleanup", cleanup_factory)
+    backend = SimpleNamespace(
+        async_stop=AsyncMock(),
+        mark_runtime_stopped=Mock(),
+        is_session_protected=Mock(return_value=False),
+    )
     backend_factory = Mock(return_value=backend)
     monkeypatch.setitem(
         sys.modules,
@@ -308,7 +322,9 @@ def sdk_runtime(ha_boundary, monkeypatch):
         factory=factory,
         backend=backend,
         backend_factory=backend_factory,
-        startup_cleanup=startup_cleanup,
+        startup_cleanup=cleanup.async_run,
+        cleanup=cleanup,
+        cleanup_factory=cleanup_factory,
         directory=directory,
     )
 
@@ -373,10 +389,13 @@ async def test_fallback_probe_recovers_image_catalog_without_bypassing_gate(
 
 
 async def test_runtime_cleans_abandoned_sessions_before_admitting_requests(sdk_runtime):
-    async def cleanup(client, directory):
+    async def cleanup(phase, protected):
         sdk_runtime.client.start.assert_awaited_once()
-        assert client is sdk_runtime.client
-        assert directory is sdk_runtime.runtime.base_directory
+        assert phase == "startup"
+        assert not protected("anything")
+        args = sdk_runtime.cleanup_factory.call_args.args
+        assert args[0] is sdk_runtime.client
+        assert args[1] is sdk_runtime.runtime.base_directory
         assert not sdk_runtime.runtime.is_started
         sdk_runtime.backend_factory.assert_not_called()
 
@@ -909,3 +928,164 @@ async def test_runtime_stop_force_stops_client_if_graceful_stop_is_cancelled(
     assert runtime.client is None
     await runtime.async_stop()
     sdk_runtime.client.stop.assert_awaited_once()
+
+
+async def test_daily_maintenance_waits_after_startup_and_after_each_pass(
+    sdk_runtime, monkeypatch
+):
+    intervals, ticks = asyncio.Queue(), asyncio.Queue()
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def sleep(seconds):
+        intervals.put_nowait(seconds)
+        await ticks.get()
+
+    async def run(phase, protected):
+        if phase == "periodic":
+            assert protected is sdk_runtime.backend.is_session_protected
+            entered.set()
+            await finish.wait()
+
+    monkeypatch.setattr(sdk_runtime.module.asyncio, "sleep", sleep)
+    sdk_runtime.cleanup.async_run.side_effect = run
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    task = runtime._maintenance_task
+    try:
+        assert await asyncio.wait_for(intervals.get(), 1) == 24 * 60 * 60
+        assert sdk_runtime.cleanup.async_run.await_count == 1
+        ticks.put_nowait(None)
+        await asyncio.wait_for(entered.wait(), 1)
+        assert intervals.empty()
+        assert sdk_runtime.cleanup.async_run.await_count == 2
+        finish.set()
+        assert await asyncio.wait_for(intervals.get(), 1) == 24 * 60 * 60
+        assert sdk_runtime.cleanup.async_run.await_count == 2
+        await runtime.async_stop()
+        assert task.done()
+        sdk_runtime.cleanup.stop.assert_called()
+        sdk_runtime.cleanup.async_close.assert_awaited_once()
+        await runtime.async_stop()
+        sdk_runtime.cleanup.async_close.assert_awaited_once()
+    finally:
+        finish.set()
+        await runtime.async_stop()
+
+
+@pytest.mark.parametrize("reason", ["failed", "stopping", "replacement", "ha_stop"])
+async def test_daily_worker_does_not_run_on_stopped_or_replaced_runtime(
+    sdk_runtime, monkeypatch, reason
+):
+    sleeping, tick = asyncio.Event(), asyncio.Event()
+
+    async def sleep(seconds):
+        sleeping.set()
+        await tick.wait()
+
+    monkeypatch.setattr(sdk_runtime.module.asyncio, "sleep", sleep)
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    task = runtime._maintenance_task
+    await asyncio.wait_for(sleeping.wait(), 1)
+    if reason == "failed":
+        runtime.is_started = False
+    elif reason == "stopping":
+        runtime._stopping = True
+    elif reason == "replacement":
+        runtime.client = object()
+    else:
+        runtime.hass.is_stopping = True
+    tick.set()
+    await asyncio.wait_for(task, 1)
+    assert sdk_runtime.cleanup.async_run.await_count == 1
+    runtime.client = sdk_runtime.client
+    await runtime.async_stop()
+
+
+async def test_stop_cancels_daily_pass_before_backend_and_closes_after_native_stop(
+    sdk_runtime, monkeypatch
+):
+    sleeping, tick = asyncio.Event(), asyncio.Event()
+    entered, interrupted = asyncio.Event(), asyncio.Event()
+    order = []
+
+    async def sleep(seconds):
+        sleeping.set()
+        await tick.wait()
+
+    async def run(phase, protected):
+        if phase == "periodic":
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                order.append("maintenance")
+                interrupted.set()
+
+    async def stop_backend():
+        assert interrupted.is_set()
+        order.append("backend")
+
+    async def stop_client():
+        order.append("native")
+
+    async def close():
+        order.append("cursor")
+
+    monkeypatch.setattr(sdk_runtime.module.asyncio, "sleep", sleep)
+    sdk_runtime.cleanup.async_run.side_effect = run
+    sdk_runtime.cleanup.async_close.side_effect = close
+    sdk_runtime.backend.async_stop.side_effect = stop_backend
+    sdk_runtime.client.stop.side_effect = stop_client
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    await asyncio.wait_for(sleeping.wait(), 1)
+    tick.set()
+    await asyncio.wait_for(entered.wait(), 1)
+    await runtime.async_stop()
+    assert order == ["maintenance", "backend", "native", "cursor"]
+
+
+async def test_cancelled_stop_still_tears_down_after_maintenance_quiesces(
+    sdk_runtime, monkeypatch
+):
+    entered, finish = asyncio.Event(), asyncio.Event()
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    original = runtime._async_quiesce_maintenance
+
+    async def quiesce():
+        entered.set()
+        await finish.wait()
+        await original()
+
+    monkeypatch.setattr(runtime, "_async_quiesce_maintenance", quiesce)
+    stopping = asyncio.create_task(runtime.async_stop())
+    await asyncio.wait_for(entered.wait(), 1)
+    stopping.cancel()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    sdk_runtime.backend.async_stop.assert_awaited_once()
+    sdk_runtime.client.stop.assert_awaited_once()
+    sdk_runtime.cleanup.async_close.assert_awaited_once()
+    assert runtime.client is None
+
+
+async def test_restart_owns_new_worker_and_reuses_shared_maintenance_lock(sdk_runtime):
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    first = runtime._maintenance_task
+    first_lock = sdk_runtime.cleanup_factory.call_args.args[2]
+    await runtime.async_stop()
+    assert first.done()
+    await runtime.async_start()
+    second = runtime._maintenance_task
+    assert second is not first
+    assert sdk_runtime.cleanup_factory.call_args.args[2] is first_lock
+    assert [call.args[0] for call in sdk_runtime.cleanup.async_run.await_args_list] == [
+        "startup",
+        "startup",
+    ]
+    await runtime.async_stop()
+    assert second.done()
