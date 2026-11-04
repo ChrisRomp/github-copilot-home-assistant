@@ -9,7 +9,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .const import DOMAIN
+from .const import DATA_PROVISION_LOCK, DOMAIN
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -75,12 +75,17 @@ class RuntimeDownloadError(RuntimeError):
     """A transient failure downloading the pinned runtime."""
 
 
+def runtime_cache_root(hass: HomeAssistant) -> Path:
+    """Return the shared, persistent cache, separate from entry-owned state."""
+    return Path(hass.config.path(".storage", DOMAIN, "runtime"))
+
+
 async def async_runtime_path(hass: HomeAssistant) -> str:
     """Return a verified runtime in HA's persistent, version-specific cache."""
     from copilot._cli_version import CLI_VERSION
 
-    cache = Path(hass.config.path(".storage", DOMAIN, "runtime", CLI_VERSION))
-    lock = hass.data.setdefault(f"{DOMAIN}_provision_lock", asyncio.Lock())
+    cache = runtime_cache_root(hass) / CLI_VERSION
+    lock = hass.data.setdefault(DATA_PROVISION_LOCK, asyncio.Lock())
     async with lock:
         # Preserve operator transport settings, including lowercase proxy variables.
         safe_env = {

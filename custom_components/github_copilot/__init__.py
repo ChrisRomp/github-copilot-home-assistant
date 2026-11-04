@@ -35,6 +35,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     from .provisioning import RuntimeDownloadError
     from .runtime import CopilotRuntime
+    from .runtime_cache import async_schedule_runtime_prune
 
     previous = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if previous is not None:
@@ -78,6 +79,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ) from err
         raise
 
+    async_schedule_runtime_prune(hass)
     return True
 
 
