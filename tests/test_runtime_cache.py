@@ -77,12 +77,21 @@ def procfs(tmp_path, monkeypatch):
     executable.write_text("executable")
 
     def process(
-        pid, *, exe=executable, cwd=tmp_path, args=None, maps="", start=100, state="S"
+        pid,
+        *,
+        exe=executable,
+        cwd=tmp_path,
+        args=None,
+        maps="",
+        start=100,
+        state="S",
+        threads=1,
     ):
         directory = root / str(pid)
         directory.mkdir(exist_ok=True)
         fields = [state] + ["0"] * 19
         fields[1] = "1"  # Reparented processes must not be excluded.
+        fields[17] = str(threads)
         fields[19] = str(start)
         (directory / "stat").write_text(f"{pid} (runtime) {' '.join(fields)}\n")
         (directory / "ns").mkdir(exist_ok=True)
@@ -213,6 +222,15 @@ async def test_incomplete_process_visibility_never_authorizes_mutation(
     assert not list(filesystem.root.glob(".pruning-*"))
     assert "deferred=1" in caplog.text
     assert "PRIVATE" not in caplog.text
+
+
+def test_zombie_leader_with_live_threads_is_not_unused(filesystem, procfs):
+    old = filesystem.version("1.0.102", "copilot-runtime")
+    procfs.process(12345, exe=old / "copilot-runtime", state="Z", threads=1)
+    assert not cache._in_use(filesystem.root, {old.name}, budget())
+    procfs.process(12346, exe=old / "copilot-runtime", state="Z", threads=3)
+    with pytest.raises(cache._Deferred, match="process_visibility"):
+        cache._in_use(filesystem.root, {old.name}, budget())
 
 
 def test_pid_reuse_is_unknown_not_unused(filesystem, procfs, monkeypatch):

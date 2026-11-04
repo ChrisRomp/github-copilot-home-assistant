@@ -107,9 +107,9 @@ def _unescape(value: str) -> str:
     return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value)
 
 
-def _process_stat(data: bytes) -> tuple[bytes, int, int]:
+def _process_stat(data: bytes) -> tuple[bytes, int, int, int]:
     fields = data.rsplit(b") ", 1)[1].split()
-    return fields[0], int(fields[6]), int(fields[19])
+    return fields[0], int(fields[6]), int(fields[19]), int(fields[17])
 
 
 def _process_ids(budget: _Budget) -> set[str]:
@@ -164,8 +164,13 @@ def _referenced_version(value: str, root: Path) -> str | None:
 def _process_versions(pid: str, root: Path, budget: _Budget) -> set[str]:
     directory = _PROC / pid
     before = _process_stat(budget.read(directory / "stat"))
-    if before[0] in (b"Z", b"X") or before[1] & 0x00200000:
-        # Zombies have no address space; PF_KTHREAD identifies kernel threads.
+    if before[1] & 0x00200000:
+        # PF_KTHREAD identifies kernel threads, which own no userspace files.
+        return set()
+    if before[0] in (b"Z", b"X"):
+        if before[3] > 1:
+            # A leader that exited first stays a zombie while its threads run.
+            raise _Deferred("process_visibility")
         return set()
     for namespace in ("pid", "mnt"):
         if _identity((directory / "ns" / namespace).stat()) != _identity(
