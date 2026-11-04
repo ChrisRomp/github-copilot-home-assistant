@@ -74,6 +74,14 @@ def ha_boundary(monkeypatch):
     def delete_issue(hass, domain, issue_id):
         issues.pop((domain, issue_id), None)
 
+    def at_started(hass, callback):
+        if hass.is_running:
+            callback(hass)
+            return Mock()
+        return hass.bus.async_listen_once(
+            "homeassistant_started", lambda event: callback(hass)
+        )
+
     attributes = {
         "homeassistant.components": {},
         "homeassistant.components.conversation": {
@@ -95,12 +103,15 @@ def ha_boundary(monkeypatch):
             "OptionsFlow": _Flow,
         },
         "homeassistant.const": {
+            "EVENT_HOMEASSISTANT_STOP": "homeassistant_stop",
+            "EVENT_HOMEASSISTANT_STARTED": "homeassistant_started",
             "CONF_LLM_HASS_API": "llm_hass_api",
             "CONF_PROMPT": "prompt",
             "MATCH_ALL": "*",
             "Platform": SimpleNamespace(CONVERSATION="conversation", AI_TASK="ai_task"),
         },
         "homeassistant.helpers": {},
+        "homeassistant.helpers.start": {"async_at_started": at_started},
         "homeassistant.helpers.chat_session": {
             "current_session": ContextVar("current_session", default=None),
         },

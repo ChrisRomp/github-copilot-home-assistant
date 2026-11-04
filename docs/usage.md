@@ -307,12 +307,54 @@ a chat is active or residual files remain may include conversation data.
 Cleanup does not rewrite existing backups. A Home Assistant restart starts fresh
 conversations, not restored SDK sessions. Credentials and settings remain in HA's
 config-entry storage; treat that storage and Home Assistant backups as sensitive.
+Shared native binaries have a separate
+[runtime cache policy](#runtime-cache-and-manual-recovery); session cleanup does
+not remove them.
 
 Device control only uses the Home Assistant Assist API selected for the request.
 Other SDK permission requests are rejected. Prompt-injection defenses cannot
 eliminate all risk, and the integration adds no extra action-confirmation step.
 For the implementation details, see
 [instructions and tool permissions](development.md#instructions-and-tool-permissions).
+
+## Runtime cache and manual recovery
+
+The SDK-pinned native runtime is downloaded and checksum-verified into
+`<config>/.storage/github_copilot/runtime/<runtime-version>/`. This cache survives
+restarts and container replacement.
+
+On supported Linux hosts, one bounded cleanup pass runs after successful
+integration setup and HA startup. It keeps the current pinned version and may
+remove obsolete versions, including abandoned downloads. Versions still used by
+another runtime process, including an orphan from an earlier HA instance, are
+retained. If process ownership cannot be checked safely, nothing uncertain is
+removed. Other platforms retain the cache for manual cleanup.
+
+There is no reserved rollback version: after cleanup, downgrading the integration
+may require downloading the older runtime again. Keep access to GitHub or your
+configured runtime download source available. Failed upgrades do not trigger
+cleanup. Large caches, interrupted deletion, and safety deferrals may leave
+versions or `.pruning-*` directories until a later restart. Cleanup affects future
+backup contents, not backups already taken.
+
+For manual recovery:
+
+1. Stop Home Assistant. Disabling integration entries is not enough: configuration
+   dialogs can also start temporary runtime processes.
+2. Confirm that native runtime and installer processes using this cache have
+   stopped too. If orphaned processes cannot be ruled out, restart the owning
+   container or host and keep HA stopped before proceeding.
+3. Remove only the intended obsolete version or cleanup-owned
+   `.pruning-<version>-<32-hex>` directory. To force a full re-download, remove the
+   exact `<config>/.storage/github_copilot/runtime/` directory. Do not remove
+   `.storage/github_copilot/`, entry-owned session directories, credentials, or
+   generated media.
+4. Start Home Assistant and allow it to download the pinned runtime again if
+   necessary.
+
+Do not share this private cache between HA instances or containers, or launch
+unmanaged processes from it while cleanup is running. Implementation safeguards
+and limits are described in [runtime cache retention](development.md#runtime-cache-retention).
 
 ## Updates and existing installations
 

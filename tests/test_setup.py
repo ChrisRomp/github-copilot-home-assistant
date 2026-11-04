@@ -15,13 +15,16 @@ from custom_components.github_copilot import (
     async_setup_entry,
     async_unload_entry,
 )
-from custom_components.github_copilot.const import DATA_CREDENTIAL_LOCKS, DOMAIN
+from custom_components.github_copilot import runtime as runtime_module
+from custom_components.github_copilot.const import (
+    DATA_CREDENTIAL_LOCKS,
+    DATA_RUNTIME_PRUNE,
+    DOMAIN,
+)
 
 
 @pytest.fixture
-async def setup_entry(ha_boundary, monkeypatch):
-    from custom_components.github_copilot import runtime as runtime_module
-
+async def setup_entry(ha_boundary, monkeypatch, tmp_path):
     monkeypatch.setattr(
         sys.modules["homeassistant.const"],
         "EVENT_HOMEASSISTANT_STOP",
@@ -50,6 +53,12 @@ async def setup_entry(ha_boundary, monkeypatch):
     )
     hass = SimpleNamespace(
         data={},
+        is_running=True,
+        is_stopping=False,
+        config=SimpleNamespace(path=lambda *parts: str(tmp_path.joinpath(*parts))),
+        async_create_background_task=Mock(
+            side_effect=lambda coro, name: create_background_task(None, coro, name)
+        ),
         config_entries=SimpleNamespace(
             async_forward_entry_setups=AsyncMock(),
             async_unload_platforms=AsyncMock(return_value=True),
@@ -68,8 +77,13 @@ async def test_successful_setup_registers_shutdown_and_unload_cleanup(setup_entr
     setup.hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(
         setup.entry, ["conversation", "ai_task"]
     )
-    setup.hass.bus.async_listen_once.assert_called_once()
-    assert setup.hass.bus.async_listen_once.call_args.args[0] == "homeassistant_stop"
+    assert setup.hass.bus.async_listen_once.call_count == 2
+    assert all(
+        call.args[0] == "homeassistant_stop"
+        for call in setup.hass.bus.async_listen_once.call_args_list
+    )
+    setup.hass.async_create_background_task.assert_called_once()
+    assert DATA_RUNTIME_PRUNE in setup.hass.data
     setup.entry.async_create_background_task.assert_called_once()
     setup.runtime.async_stop.assert_not_awaited()
 
@@ -87,7 +101,7 @@ async def test_successful_setup_registers_shutdown_and_unload_cleanup(setup_entr
 async def test_shutdown_listener_awaits_runtime_cleanup(setup_entry):
     setup = setup_entry
     await async_setup_entry(setup.hass, setup.entry)
-    listener = setup.hass.bus.async_listen_once.call_args.args[1]
+    listener = setup.hass.bus.async_listen_once.call_args_list[0].args[1]
     stopping = asyncio.Event()
     stopped = asyncio.Event()
 
@@ -102,6 +116,17 @@ async def test_shutdown_listener_awaits_runtime_cleanup(setup_entry):
     stopped.set()
     await task
     setup.runtime.async_stop.assert_awaited_once()
+
+
+async def test_entries_and_reload_share_one_cache_cleanup(setup_entry):
+    setup = setup_entry
+    await async_setup_entry(setup.hass, setup.entry)
+    assert await async_unload_entry(setup.hass, setup.entry)
+    await async_setup_entry(setup.hass, setup.entry)
+    second = SimpleNamespace(**{**vars(setup.entry), "entry_id": "second"})
+    await async_setup_entry(setup.hass, second)
+    setup.hass.async_create_background_task.assert_called_once()
+    assert DATA_RUNTIME_PRUNE in setup.hass.data
 
 
 async def test_failed_unload_keeps_runtime_and_shutdown_listener(setup_entry):
@@ -224,6 +249,8 @@ async def test_setup_preserves_unexpected_errors_and_cancellation(
     setup.runtime.async_stop.assert_awaited_once()
     assert DOMAIN not in setup.hass.data
     setup.entry.async_create_background_task.assert_not_called()
+    setup.hass.async_create_background_task.assert_not_called()
+    assert DATA_RUNTIME_PRUNE not in setup.hass.data
 
 
 @pytest.mark.parametrize("error_type", [OSError, TimeoutError, ConnectionError])

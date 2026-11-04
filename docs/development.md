@@ -64,6 +64,63 @@ checksum, storage, and unsupported-platform failures are reported during setup.
 Removing an integration entry removes only that entry's runtime state, not
 this shared versioned cache.
 
+### Runtime cache retention
+
+After an entry starts successfully and finishes setup, `runtime_cache.py`
+schedules one HA-owned cleanup pass after HA has started. Other entries and
+reloads share that pass; entry removal and session/media cleanup never trigger
+it. The current SDK-pinned version, including any staging files inside it, is
+always retained. Other recognized versions are eligible only if unused; no extra
+rollback version is reserved. A subsequent downgrade may need to download its
+runtime again.
+
+Automatic pruning currently requires Linux, `renameat2`, and no-follow,
+descriptor-relative filesystem operations. A bounded `/proc` inventory checks
+executable/working-directory paths, command-line references, mapped files, and
+process identities, including orphaned processes from an earlier HA instance. Unresolved SDK
+launchers/installers, denied or incomplete metadata, PID reuse, restricted procfs,
+or incompatible process namespaces defer cleanup rather than imply non-use.
+Process environments, memory, credentials, and session contents are not read.
+Other platforms keep their caches.
+
+One HA Core must own the cache, with its runtimes and installers visible in the
+same PID and mount namespaces. Sharing the cache between containers/HA Cores or
+independently launching processes from it is unsupported. Process inspection is
+not a cross-process launch lock: it protects observable existing consumers, not
+arbitrary external launches after inspection. The integration itself only
+provisions/launches the current pin. A matching native process is never considered
+safe to delete merely because Linux allows unlinking its executable.
+
+The shared provisioning lock covers inventory and claims. Cleanup accepts only
+version-shaped directories and its exact `.pruning-<version>-<32-hex>` recovery
+format. It rejects symlinked storage components and top-level candidates.
+After a fresh process check, an atomic no-replace rename claims an obsolete
+version. Outside the lock, another process check precedes incremental,
+descriptor-relative deletion. Nested links are unlinked, never followed;
+directory identities are checked around opens and claims. Partial trash remains
+eligible for a future startup, including trash whose encoded version becomes
+the current pin after a rollback. The post-claim process check matches both the
+trash name and its original version so unchanged command-line paths still
+protect a claimed runtime. Nested mounts, including same-filesystem bind mounts,
+are not traversed.
+
+Each pass examines at most 64 cache-root entries, attempts four version/trash
+trees, and examines 1,024 tree entries at a maximum nesting depth of 32. Process
+checks share limits of 4,096 PID records and 32 MiB of metadata, with a 4 MiB
+per-read cap. The common 10-second orchestration budget includes waiting for the
+provisioning lock. Budget exhaustion or shutdown stops new operations; an
+in-flight filesystem syscall cannot be forcibly interrupted. Cancellation drains
+workers before releasing the provisioning lock or directory descriptors.
+
+Logs contain sanitized removed/failed/skipped/protected/deferred counts, budget
+status, and fixed reason categories, not process arguments, PIDs, paths, or raw
+errors. Benign unknown files and protected versions alone do not generate
+warnings. Bounds and repeated safety deferrals can leave work for later restarts;
+cleanup does not promise to reach every directory behind a persistent scan limit.
+See [manual recovery](usage.md#runtime-cache-and-manual-recovery).
+
+### Per-entry session retention
+
 Per-entry SDK sessions are stored under
 `<config>/.storage/github_copilot/<entry-id>/session-state/<session-id>/`.
 `SessionCleanup` runs before backend creation and is reused by one config-entry
