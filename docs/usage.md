@@ -231,9 +231,24 @@ response_variable: illustration
 
 The response includes `url`, `media_source_id`, `conversation_id`, dimensions,
 and the image model when reported. Home Assistant publishes the PNG through
-its AI Task media source. Expiration of a signed image URL does not itself delete
-stored media; HA media and backup retention still apply. Generated images and
-active SDK session data may be included in backups.
+its AI Task media source, storing it in `ai_task/image` under the first configured
+media directory. HA does not automatically delete these images, so repeated
+generation increases disk usage. Neither signed URL expiry nor SDK session
+cleanup deletes stored images.
+
+On HA 2026.11 or later, use the administrator-only
+[`ai_task.clear_images`](https://www.home-assistant.io/actions/ai_task.clear_images/)
+action to remove generated images. Set `days: 30`, for example, to delete images
+older than 30 days; **omitting `days` deletes all images in the folder**. Run it
+manually or schedule it in your own automation. This integration does not schedule
+media cleanup, and the action is unavailable on our minimum supported HA version,
+2026.10.0.
+
+Cleanup covers the shared AI Task image folder across all providers, not just
+GitHub Copilot, and does not protect images referenced by dashboards or
+automations. Copy images you want to keep outside that folder before cleanup.
+Generated images and active SDK session data may be included in backups;
+deleting the originals does not remove copies from existing backups.
 
 Image-generation usage is charged according to the native image model, not
 the selected chat model's multiplier. Generation is never automatically retried,
