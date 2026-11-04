@@ -311,8 +311,10 @@ automations that should only generate text or analyze images. Your preferred
 AI Task provider is not changed automatically.
 
 When upgrading Home Assistant from HACS to Marketplace, Home Assistant carries
-over the custom repository. Keep the existing GitHub Copilot configuration;
-there is no need to remove and re-add the integration.
+over the installed integration. If you previously added this project as a custom
+repository, Marketplace recognizes it as a catalog repository automatically.
+Keep the existing GitHub Copilot configuration; there is no need to remove and
+re-add the integration.
 
 The conversation entity is named **GitHub Copilot**. New installations normally
 use `conversation.github_copilot` (HA adds a suffix if that ID is already taken).
@@ -354,9 +356,8 @@ Core container replacement; see [runtime storage](development.md#runtime-storage
 ### Missing icon
 
 The integration bundles its icon in `brand/` for Home Assistant to show after
-installation. Legacy HACS and the pre-install Marketplace listing may still
-show a placeholder for this unlisted repository. This does not affect setup
-or operation.
+installation. If HACS or the pre-install Marketplace listing shows a placeholder,
+this does not affect setup or operation.
 
 ### Diagnostics and bug reports
 
