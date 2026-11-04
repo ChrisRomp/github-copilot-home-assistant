@@ -517,3 +517,53 @@ async def test_deadline_keeps_unattempted_candidates_for_the_next_pass(
         path.name for path in paths
     }
     assert not owned._pending
+
+
+@pytest.mark.parametrize("interrupt", ["cancel", "timeout"])
+async def test_interrupted_directory_check_requeues_candidate_after_pending_work(
+    storage, monkeypatch, interrupt
+):
+    paths = [storage.session(number) for number in range(1, 4)]
+    client = SimpleNamespace(delete_session=AsyncMock())
+    owned = storage.cleaner(client)
+    entered = asyncio.Event()
+    finish = threading.Event()
+    loop = asyncio.get_running_loop()
+    original = cleanup._is_session_directory
+    checked = []
+
+    def check(base, session_id):
+        checked.append(session_id)
+        if len(checked) == 1:
+            loop.call_soon_threadsafe(entered.set)
+            assert finish.wait(3)
+        return original(base, session_id)
+
+    monkeypatch.setattr(cleanup, "_is_session_directory", check)
+    if interrupt == "timeout":
+        monkeypatch.setattr(cleanup, "CLEANUP_TIMEOUT_SECONDS", 0.02)
+    caller = asyncio.create_task(storage.run(client))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        remaining = list(owned._pending)
+        assert len(remaining) == 2
+        if interrupt == "cancel":
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        else:
+            await asyncio.wait_for(caller, 1)
+        finish.set()
+        await asyncio.wait_for(owned._task, 1)
+        assert list(owned._pending) == [*remaining, checked[0]]
+        client.delete_session.assert_not_awaited()
+
+        await storage.run(client, phase="periodic")
+        attempted = [call.args[0] for call in client.delete_session.await_args_list]
+        assert attempted == [*remaining, checked[0]]
+        assert set(attempted) == {path.name for path in paths}
+        assert len(checked) == 4
+        assert not owned._pending
+    finally:
+        finish.set()
+        await asyncio.gather(caller, return_exceptions=True)

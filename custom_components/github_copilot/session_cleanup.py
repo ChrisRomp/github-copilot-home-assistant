@@ -241,6 +241,7 @@ class SessionCleanup:
                     )
                 )
                 if self._finished(deadline, outcome):
+                    self._pending.append(session_id)
                     break
                 if not is_directory:
                     outcome.skipped += 1

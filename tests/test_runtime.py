@@ -1089,3 +1089,44 @@ async def test_restart_owns_new_worker_and_reuses_shared_maintenance_lock(sdk_ru
     ]
     await runtime.async_stop()
     assert second.done()
+
+
+async def test_daily_maintenance_retries_unexpected_failure_at_next_interval(
+    sdk_runtime, monkeypatch, caplog
+):
+    intervals, ticks = asyncio.Queue(), asyncio.Queue()
+    recovered = asyncio.Event()
+    failed = False
+
+    async def sleep(seconds):
+        intervals.put_nowait(seconds)
+        await ticks.get()
+
+    async def run(phase, protected):
+        nonlocal failed
+        if phase == "periodic":
+            if not failed:
+                failed = True
+                raise ValueError("PRIVATE_CLEANUP_FAILURE")
+            recovered.set()
+
+    monkeypatch.setattr(sdk_runtime.module.asyncio, "sleep", sleep)
+    sdk_runtime.cleanup.async_run.side_effect = run
+    runtime = sdk_runtime.runtime
+    await runtime.async_start()
+    worker = runtime._maintenance_task
+    try:
+        assert await asyncio.wait_for(intervals.get(), 1) == 24 * 60 * 60
+        ticks.put_nowait(None)
+        assert await asyncio.wait_for(intervals.get(), 1) == 24 * 60 * 60
+        assert sdk_runtime.cleanup.async_run.await_count == 2
+        assert not worker.done()
+        assert "ValueError" in caplog.text
+        assert "PRIVATE_" not in caplog.text
+        ticks.put_nowait(None)
+        await asyncio.wait_for(recovered.wait(), 1)
+        assert await asyncio.wait_for(intervals.get(), 1) == 24 * 60 * 60
+        assert sdk_runtime.cleanup.async_run.await_count == 3
+    finally:
+        await runtime.async_stop()
+    assert worker.cancelled()

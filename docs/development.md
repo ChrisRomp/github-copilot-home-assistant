@@ -79,6 +79,8 @@ iterator carries progress between bounded passes, including past protected or
 failed candidates; it closes at the end of traversal or runtime shutdown.
 A pending batch of at most 25 IDs preserves unattempted candidates across a
 deadline, so a slow failure cannot repeatedly hide the rest of that batch.
+If a pass is interrupted during a candidate's filesystem recheck, the candidate
+returns to the tail of the pending batch rather than being dropped.
 A changed directory identity resets the cursor. Scan state is not persisted
 across restarts, and a changing directory may need another traversal.
 Native `list_sessions()` omits sessions without recorded turns, so it cannot
@@ -108,6 +110,8 @@ its iterator. Shutdown first quiesces maintenance, then drains the backend and
 stops the native client, then closes maintenance resources. A filesystem syscall
 cannot be forcibly interrupted, nor can a timed-out SDK deletion be undone.
 Housekeeping failures do not independently force-stop a healthy runtime.
+Unexpected pass failures are logged without raw errors and do not stop the daily
+worker; it waits for the next daily interval before trying again.
 
 Maintenance never calls model discovery or credential providers. It logs
 sanitized removed/protected/skipped/failed counts and budget/deferred warnings,

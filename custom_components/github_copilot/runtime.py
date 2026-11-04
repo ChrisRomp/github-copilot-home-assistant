@@ -160,7 +160,14 @@ class CopilotRuntime:
                 or self.backend is not backend
             ):
                 return
-            await cleanup.async_run("periodic", backend.is_session_protected)
+            try:
+                await cleanup.async_run("periodic", backend.is_session_protected)
+            except Exception as err:
+                _LOGGER.warning(
+                    "Copilot periodic session cleanup failed (%s); "
+                    "retrying after the next daily interval",
+                    type(err).__name__,
+                )
 
     async def _async_quiesce_maintenance(self) -> None:
         if self._session_cleanup is not None:
