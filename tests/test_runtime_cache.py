@@ -381,6 +381,29 @@ async def test_root_swap_cannot_redirect_claim(unused, tmp_path, monkeypatch):
     assert sentinel.is_dir()
 
 
+async def test_root_swap_during_delete_scan_is_retained(
+    unused, tmp_path, monkeypatch, caplog
+):
+    unused.version("1.0.102")
+    relocated = tmp_path / "relocated"
+    calls = 0
+
+    def swap(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            unused.root.rename(relocated)
+            unused.root.mkdir()
+        return False
+
+    monkeypatch.setattr(cache, "_in_use", swap)
+    caplog.set_level(logging.INFO)
+    await cache.async_prune_runtime_cache(unused.hass)
+    assert calls == 2
+    assert list(relocated.glob(".pruning-1.0.102-*/prebuilds"))
+    assert "reason=cache_changed" in caplog.text
+
+
 async def test_candidate_swap_before_claim_is_retained(unused, monkeypatch):
     old = unused.version("1.0.102")
     moved = unused.root / "operator-moved"

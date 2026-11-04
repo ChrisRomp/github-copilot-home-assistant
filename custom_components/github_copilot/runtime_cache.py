@@ -495,7 +495,6 @@ class _PrunePass:
         name, identity = candidate
         try:
             self.budget.check()
-            root_fd = self._verify_root()
             trash = _TRASH.fullmatch(name)
             versions = {name}
             if trash is not None:
@@ -503,6 +502,7 @@ class _PrunePass:
             if _in_use(self.root, versions, self.budget):
                 self.outcome.protected += 1
                 return
+            root_fd = self._verify_root()
             self._remove_tree(root_fd, name, identity, 0)
             self.outcome.removed += 1
         except _Deferred as error:

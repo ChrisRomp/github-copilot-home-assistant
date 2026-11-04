@@ -97,7 +97,8 @@ format. It rejects symlinked storage components and top-level candidates.
 After a fresh process check, an atomic no-replace rename claims an obsolete
 version. Outside the lock, another process check precedes incremental,
 descriptor-relative deletion. Nested links are unlinked, never followed;
-directory identities are checked around opens and claims. Partial trash remains
+directory identities are checked around opens and claims, and the cache root is
+revalidated after each process check before claiming or deleting. Partial trash remains
 eligible for a future startup, including trash whose encoded version becomes
 the current pin after a rollback. The post-claim process check matches both the
 trash name and its original version so unchanged command-line paths still
