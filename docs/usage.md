@@ -324,10 +324,12 @@ Assist pipelines, scripts, or automations that reference it.
 
 ### GitHub sign-in errors
 
-If data-task inference reports a confirmed authentication failure, such as a
-revoked token, the integration starts Home Assistant's reauthentication flow
-even when model discovery was cached. Reauthenticate the integration; the failed
-task is not automatically replayed.
+If task-session creation, data inference, or native image generation reports a
+confirmed authentication failure, such as a revoked token, the integration
+starts Home Assistant's reauthentication flow even when model discovery was
+cached. Reauthenticate the integration; the failed task is not automatically
+replayed. Policy denials and temporary rate limits alone do not trigger
+reauthentication.
 
 ### Quota errors
 

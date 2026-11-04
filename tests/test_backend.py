@@ -918,11 +918,12 @@ async def test_task_event_only_quota_creates_repair_without_replay(
     await assert_clean(setup)
 
 
-@pytest.mark.parametrize("source", ["exception", "event"])
+@pytest.mark.parametrize("source", ["create", "exception", "event"])
+@pytest.mark.parametrize("auth_method", [AUTH_METHOD_PAT, AUTH_METHOD_OAUTH])
 async def test_cached_task_auth_failure_starts_reauth_without_replay(
-    setup, monkeypatch, source
+    setup, monkeypatch, source, auth_method
 ):
-    setup.entry.data[CONF_AUTH_METHOD] = AUTH_METHOD_PAT
+    setup.entry.data[CONF_AUTH_METHOD] = auth_method
     reauth = AsyncMock()
     monkeypatch.setattr(setup.module, "async_start_reauth_flow", reauth)
     await setup.backend.async_resolve_model(task_mode=True)
@@ -943,30 +944,63 @@ async def test_cached_task_auth_failure_starts_reauth_without_replay(
         raise JsonRpcError(-32603, "HTTP 401 Unauthorized PRIVATE_PROVIDER_ERROR")
 
     setup.session.send_and_wait.side_effect = send
+    if source == "create":
+        setup.client.create_session.side_effect = JsonRpcError(
+            -32603, "HTTP 401 Unauthorized PRIVATE_PROVIDER_ERROR"
+        )
     with pytest.raises(setup.error, match="Reauthenticate") as error:
         await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
     assert "PRIVATE_" not in str(error.value)
     reauth.assert_awaited_once_with(setup.backend.hass, setup.entry)
     setup.lister.assert_awaited_once_with(force_refresh=False)
     assert not setup.backend._rejected_models
-    setup.session.send_and_wait.assert_awaited_once()
+    assert setup.session.send_and_wait.await_count == (0 if source == "create" else 1)
     setup.client.create_session.assert_awaited_once()
-    setup.client.delete_session.assert_awaited_once()
+    assert setup.client.delete_session.await_count == (0 if source == "create" else 1)
     await assert_clean(setup)
 
 
 @pytest.mark.parametrize(
     "message", ["HTTP 403 Forbidden", "HTTP 429 Too many requests"]
 )
+@pytest.mark.parametrize("stage", ["create", "execute"])
 async def test_task_policy_and_rate_errors_do_not_start_reauth(
-    setup, monkeypatch, message
+    setup, monkeypatch, message, stage
 ):
     reauth = AsyncMock()
     monkeypatch.setattr(setup.module, "async_start_reauth_flow", reauth)
-    setup.session.send_and_wait.side_effect = RuntimeError(message)
+    if stage == "create":
+        setup.client.create_session.side_effect = RuntimeError(message)
+    else:
+        setup.session.send_and_wait.side_effect = RuntimeError(message)
     with pytest.raises(setup.error):
         await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
     reauth.assert_not_awaited()
+    assert setup.session.send_and_wait.await_count == (0 if stage == "create" else 1)
+    await assert_clean(setup)
+
+
+async def test_task_creation_reports_replacement_without_replaying_request(setup):
+    setup.client.create_session.side_effect = RuntimeError(
+        f"Model '{ORIGINAL}' is no longer available"
+    )
+    with pytest.raises(setup.error, match="next task") as error:
+        await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+    assert ORIGINAL in str(error.value)
+    assert FALLBACK in str(error.value)
+    assert "not retried" in str(error.value)
+    assert "connection" not in str(error.value)
+    assert setup.backend.active_task_model == FALLBACK
+    assert (DOMAIN, "task_model_fallback_entry") in setup.issues
+    setup.client.create_session.assert_awaited_once()
+    setup.session.send_and_wait.assert_not_awaited()
+
+    setup.client.create_session.side_effect = None
+    assert (
+        await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+        == "Hello"
+    )
+    assert setup.client.create_session.await_args.kwargs["model"] == FALLBACK
     setup.session.send_and_wait.assert_awaited_once()
     await assert_clean(setup)
 
@@ -1174,7 +1208,7 @@ async def test_invalid_generated_image_does_not_clear_quota_repair(setup, monkey
     await assert_clean(setup)
 
 
-@pytest.mark.parametrize("source", ["discovery", "create", "execute"])
+@pytest.mark.parametrize("source", ["discovery", "create", "execute", "event"])
 async def test_image_quota_failures_create_repair_without_replay(
     setup, monkeypatch, source
 ):
@@ -1197,6 +1231,21 @@ async def test_image_quota_failures_create_repair_without_replay(
         setup.lister.side_effect = wrapped
     elif source == "create":
         setup.client.create_session.side_effect = error
+    elif source == "event":
+
+        async def execute(*args, **kwargs):
+            setup.session.on.call_args.args[0](
+                SimpleNamespace(
+                    data=SessionErrorData(
+                        error_type="provider_error",
+                        error_code="insufficient_quota",
+                        message="PRIVATE_PROVIDER_ERROR",
+                    )
+                )
+            )
+            return {"resultType": "failure"}
+
+        setup.session.rpc.tools.execute.side_effect = execute
     with pytest.raises(setup.error, match="quota exceeded") as raised:
         await setup.backend.async_generate_image(
             "image",
@@ -1210,6 +1259,97 @@ async def test_image_quota_failures_create_repair_without_replay(
     assert setup.client.create_session.await_count <= 1
     assert setup.session.rpc.tools.execute.await_count <= 1
     setup.session.send_and_wait.assert_not_awaited()
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("source", ["create", "execute", "event", "event-result"])
+@pytest.mark.parametrize("auth_method", [AUTH_METHOD_PAT, AUTH_METHOD_OAUTH])
+async def test_image_auth_failures_start_reauth_without_replay(
+    setup, monkeypatch, source, auth_method
+):
+    import sys
+
+    monkeypatch.setattr(
+        sys.modules["homeassistant.components.conversation"],
+        "AssistantContent",
+        SimpleNamespace,
+        raising=False,
+    )
+    setup.entry.data[CONF_AUTH_METHOD] = auth_method
+    setup.backend._image_model_getter = lambda: SimpleNamespace(id="image-model")
+    reauth = AsyncMock()
+    monkeypatch.setattr(setup.module, "async_start_reauth_flow", reauth)
+    error = JsonRpcError(-32603, "HTTP 401 Unauthorized PRIVATE_PROVIDER_ERROR")
+
+    async def execute(*args, **kwargs):
+        if source.startswith("event"):
+            setup.session.on.call_args.args[0](
+                SimpleNamespace(
+                    data=SessionErrorData(
+                        error_type="provider_error",
+                        error_code="invalid_token",
+                        message="PRIVATE_PROVIDER_ERROR",
+                    )
+                )
+            )
+            if source == "event-result":
+                return {"resultType": "failure"}
+            raise RuntimeError("PRIVATE_PROVIDER_ERROR")
+        raise error
+
+    setup.session.rpc.tools = SimpleNamespace(execute=AsyncMock(side_effect=execute))
+    if source == "create":
+        setup.client.create_session.side_effect = error
+    with pytest.raises(setup.error, match="Reauthenticate") as raised:
+        await setup.backend.async_generate_image(
+            "image",
+            setup.module.ImageTaskRequest(text="Draw", context=SimpleNamespace()),
+            ChatLog(),
+        )
+    assert "PRIVATE_" not in str(raised.value)
+    reauth.assert_awaited_once_with(setup.backend.hass, setup.entry)
+    setup.lister.assert_awaited_once_with(force_refresh=False)
+    setup.client.create_session.assert_awaited_once()
+    assert setup.session.rpc.tools.execute.await_count == (
+        0 if source == "create" else 1
+    )
+    assert setup.client.delete_session.await_count == (0 if source == "create" else 1)
+    assert not setup.backend._rejected_models
+    setup.session.send_and_wait.assert_not_awaited()
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("stage", ["create", "execute"])
+@pytest.mark.parametrize(
+    "message", ["HTTP 403 Forbidden", "HTTP 429 Too many requests"]
+)
+async def test_image_policy_and_rate_errors_do_not_start_reauth(
+    setup, monkeypatch, stage, message
+):
+    import sys
+
+    monkeypatch.setattr(
+        sys.modules["homeassistant.components.conversation"],
+        "AssistantContent",
+        SimpleNamespace,
+        raising=False,
+    )
+    setup.backend._image_model_getter = lambda: SimpleNamespace(id="image-model")
+    reauth = AsyncMock()
+    monkeypatch.setattr(setup.module, "async_start_reauth_flow", reauth)
+    error = RuntimeError(message)
+    setup.session.rpc.tools = SimpleNamespace(execute=AsyncMock(side_effect=error))
+    if stage == "create":
+        setup.client.create_session.side_effect = error
+    with pytest.raises(setup.error):
+        await setup.backend.async_generate_image(
+            "image",
+            setup.module.ImageTaskRequest(text="Draw", context=SimpleNamespace()),
+            ChatLog(),
+        )
+    reauth.assert_not_awaited()
+    assert setup.client.create_session.await_count == 1
+    assert setup.session.rpc.tools.execute.await_count <= 1
     await assert_clean(setup)
 
 

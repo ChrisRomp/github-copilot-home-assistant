@@ -712,13 +712,10 @@ class ConversationBackend:
                         raise
                     except Exception as err:
                         self._raise_if_quota_exceeded(err, session_error)
-                        if is_task and is_authentication_error(err, session_error):
-                            await async_start_reauth_flow(self.hass, self.entry)
-                            raise HomeAssistantError(
-                                "GitHub sign-in was rejected. Reauthenticate in "
-                                "Home Assistant. This task was not retried; "
-                                "completed actions have not been undone."
-                            ) from err
+                        if is_task:
+                            await self._async_raise_if_authentication_error(
+                                err, session_error
+                            )
                         if (
                             is_task
                             and user_input.output_schema is not None
@@ -838,6 +835,7 @@ class ConversationBackend:
                 task_request=request,
             )
         except Exception as err:
+            await self._async_raise_if_authentication_error(err)
             if image_request is not None:
                 raise HomeAssistantError(
                     "Could not start the native image task. Check Copilot access "
@@ -845,12 +843,17 @@ class ConversationBackend:
                 ) from err
             assert request.model_id is not None
             if is_model_unavailable_error(err):
-                await self._async_recover_model(
+                replacement = await self._async_recover_model(
                     request.model_id,
                     err,
                     task_mode=True,
                     require_vision=bool(request.attachments),
                 )
+                raise HomeAssistantError(
+                    f"The GitHub Copilot model '{request.model_id}' is no longer "
+                    f"available. Model '{replacement}' will be used for your next "
+                    "task. This task was not retried."
+                ) from err
             self._raise_sdk_error(request.model_id, err)
         # The admitting task owns disposal, outside the inference deadline.
         yield _SessionRecord(
@@ -891,13 +894,15 @@ class ConversationBackend:
             )
         collector = ImageResultCollector()
         async with self._async_request_session("", None, "", request) as record:
+            session_error: SessionErrorData | None = None
 
             def on_event(event: Any) -> None:
-                if (
-                    request.active
-                    and not getattr(event, "agent_id", None)
-                    and isinstance(event.data, SessionBinaryAssetData)
-                ):
+                nonlocal session_error
+                if not request.active or getattr(event, "agent_id", None):
+                    return
+                if isinstance(event.data, SessionErrorData):
+                    session_error = event.data
+                elif isinstance(event.data, SessionBinaryAssetData):
                     collector.add_asset(event.data.to_dict())
 
             unsubscribe = record.session.on(on_event)
@@ -939,9 +944,11 @@ class ConversationBackend:
                     raise
             except (TimeoutError, asyncio.CancelledError):
                 raise
-            except HomeAssistantError:
-                raise
             except Exception as err:
+                self._raise_if_quota_exceeded(err, session_error)
+                await self._async_raise_if_authentication_error(err, session_error)
+                if isinstance(err, HomeAssistantError):
+                    raise
                 _LOGGER.warning(
                     "Native Copilot image task failed (%s)", type(err).__name__
                 )
@@ -1209,6 +1216,18 @@ class ConversationBackend:
         raise HomeAssistantError(
             f"GitHub Copilot could not complete the request using model '{model_id}'. "
             "Check your Copilot access and connection, then try again."
+        ) from error
+
+    async def _async_raise_if_authentication_error(
+        self, error: Exception, event: SessionErrorData | None = None
+    ) -> None:
+        """Report confirmed task authentication failures without replaying work."""
+        if not is_authentication_error(error, event):
+            return
+        await async_start_reauth_flow(self.hass, self.entry)
+        raise HomeAssistantError(
+            "GitHub sign-in was rejected. Reauthenticate in Home Assistant. "
+            "This task was not retried; completed actions have not been undone."
         ) from error
 
     def _raise_if_quota_exceeded(
