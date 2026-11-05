@@ -41,8 +41,7 @@ The button works with both HACS and Marketplace. Home Assistant's
 [Marketplace migration guide](https://next.home-assistant.io/integrations/marketplace/#coming-from-hacs)
 confirms that existing HACS buttons open the repository in Marketplace.
 
-**Restart Home Assistant before continuing**, whether you installed through HACS
-or Marketplace.
+**Restart Home Assistant before continuing**, if you installed through HACS or if instructed to.
 
 For manual installation instead, see the
 [README](../README.md#installation).
