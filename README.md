@@ -41,7 +41,7 @@ before continuing to setup.
 
 | Home Assistant | Where to install | Restart after first install |
 | --- | --- | --- |
-| 2026.11 or newer | **Settings > Marketplace** | Yes |
+| 2026.11 or newer | **Settings > Marketplace** | If instructed |
 | 2026.10 | HACS, installed separately | Yes |
 
 For manual installation, copy `custom_components/github_copilot/` into
