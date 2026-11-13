@@ -598,6 +598,7 @@ class ConversationBackend:
 
             unsubscribe: Callable[[], None] | None = None
             send_task: asyncio.Task[Any] | None = None
+            send_started = False
             streamed_content = ""
             streamed_notice = False
             completed = False
@@ -764,34 +765,39 @@ class ConversationBackend:
                     yield {"content": f"\n\n{admin_notice}"}
                     streamed_notice = True
 
+            async def send_request():
+                nonlocal send_started
+                if admin_api_active:
+                    await async_require_admin(self.hass, context.context)
+                send_started = True
+                return await record.session.send_and_wait(
+                    user_input.text,
+                    timeout=(
+                        self.entry.options.get(
+                            CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT
+                        )
+                        if is_task
+                        else REQUEST_TIMEOUT_SECONDS
+                    ),
+                    **(
+                        {
+                            "attachments": user_input.sdk_attachments,
+                            "response_schema": (
+                                user_input.output_schema.provider
+                                if user_input.output_schema is not None
+                                else None
+                            ),
+                        }
+                        if is_task
+                        else {}
+                    ),
+                )
+
             try:
                 await record.session.set_tools(sdk_tools)
                 record.current_handler = on_tool
                 unsubscribe = record.session.on(on_event)
-                send_task = asyncio.create_task(
-                    record.session.send_and_wait(
-                        user_input.text,
-                        timeout=(
-                            self.entry.options.get(
-                                CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT
-                            )
-                            if is_task
-                            else REQUEST_TIMEOUT_SECONDS
-                        ),
-                        **(
-                            {
-                                "attachments": user_input.sdk_attachments,
-                                "response_schema": (
-                                    user_input.output_schema.provider
-                                    if user_input.output_schema is not None
-                                    else None
-                                ),
-                            }
-                            if is_task
-                            else {}
-                        ),
-                    )
-                )
+                send_task = asyncio.create_task(send_request())
                 # The task admission owner already applies its execution deadline.
                 async with asyncio.timeout(
                     None if is_task else REQUEST_TIMEOUT_SECONDS
@@ -805,6 +811,8 @@ class ConversationBackend:
                     except TimeoutError:
                         raise
                     except Exception as err:
+                        if not send_started:
+                            raise
                         self._raise_if_quota_exceeded(err, session_error)
                         if is_task:
                             await self._async_raise_if_authentication_error(
@@ -910,7 +918,11 @@ class ConversationBackend:
                             )
                         )
                 if not completed and send_task is not None:
-                    await self._async_abort_request(record.session, send_task)
+                    if send_started:
+                        await self._async_abort_request(record.session, send_task)
+                    else:
+                        send_task.cancel()
+                        await asyncio.gather(send_task, return_exceptions=True)
 
     @asynccontextmanager
     async def _async_request_session(

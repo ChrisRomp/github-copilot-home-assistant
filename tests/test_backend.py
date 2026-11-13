@@ -1116,6 +1116,120 @@ async def test_cached_task_auth_failure_starts_reauth_without_replay(
     await assert_clean(setup)
 
 
+@pytest.mark.parametrize(
+    "wait_point", ["token", "session_lock", "set_tools", "send_task"]
+)
+async def test_revoked_admin_cannot_reuse_history_after_async_setup(
+    setup, monkeypatch, wait_point
+):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    user = SimpleNamespace(is_admin=True)
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=user)
+    )
+    setup.chat.llm_api = SimpleNamespace(
+        api_prompt="Administrator context",
+        tools=[],
+        custom_serializer=None,
+        async_call_tool=AsyncMock(),
+    )
+    await turn(setup)
+    assert setup.session.send_and_wait.await_count == 1
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    record = next(iter(setup.backend._sessions.values()))
+    lock_held = False
+    if wait_point == "token":
+
+        async def token_getter():
+            entered.set()
+            await release.wait()
+            return "test-access-token"
+
+        setup.token_getter.side_effect = token_getter
+    elif wait_point == "session_lock":
+        await record.lock.acquire()
+        lock_held = True
+        get_session = setup.backend._async_get_session
+
+        async def notifying_get_session(*args, **kwargs):
+            result = await get_session(*args, **kwargs)
+            entered.set()
+            return result
+
+        monkeypatch.setattr(setup.backend, "_async_get_session", notifying_get_session)
+    elif wait_point == "set_tools":
+
+        async def set_tools(*args, **kwargs):
+            entered.set()
+            await release.wait()
+
+        setup.session.set_tools.side_effect = set_tools
+    else:
+
+        def on_event(_callback):
+            asyncio.get_running_loop().call_soon(setattr, user, "is_admin", False)
+            return setup.unsubscribe
+
+        setup.session.on.side_effect = on_event
+
+    caller = asyncio.create_task(turn(setup))
+    try:
+        if wait_point != "send_task":
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            user.is_admin = False
+            if lock_held:
+                record.lock.release()
+                lock_held = False
+            release.set()
+        with pytest.raises(setup.error, match="administrator"):
+            await caller
+        assert setup.session.send_and_wait.await_count == 1
+        setup.session.abort.assert_not_awaited()
+    finally:
+        if lock_held:
+            record.lock.release()
+        release.set()
+        if not caller.done():
+            caller.cancel()
+            await asyncio.gather(caller, return_exceptions=True)
+    await assert_clean(setup)
+
+
+async def test_data_task_rechecks_admin_after_tool_setup(setup, monkeypatch):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    user = SimpleNamespace(is_admin=True)
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=user)
+    )
+    api = SimpleNamespace(
+        api_prompt="Administrator context",
+        tools=[],
+        custom_serializer=None,
+        async_call_tool=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        setup.module.llm, "async_get_api", AsyncMock(return_value=api), raising=False
+    )
+
+    async def revoke_admin(*args, **kwargs):
+        user.is_admin = False
+
+    setup.session.set_tools.side_effect = revoke_admin
+    with pytest.raises(setup.error, match="administrator"):
+        await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+
+    setup.session.send_and_wait.assert_not_awaited()
+    await assert_clean(setup)
+
+
 async def test_admin_api_context_is_hidden_after_permission_is_revoked(
     setup, monkeypatch
 ):
@@ -2760,8 +2874,9 @@ async def test_administrator_side_effect_tools_are_blocked(
         setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
     )
     setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    user = SimpleNamespace(is_admin=True)
     setup.backend.hass.auth = SimpleNamespace(
-        async_get_user=AsyncMock(return_value=SimpleNamespace(is_admin=is_admin))
+        async_get_user=AsyncMock(return_value=user)
     )
     setup.chat.llm_api = action_api(
         tool_name=ha_tool_name, return_value={"success": True}
@@ -2769,6 +2884,7 @@ async def test_administrator_side_effect_tools_are_blocked(
     received = []
 
     async def send(*args, **kwargs):
+        user.is_admin = is_admin
         tool = setup.session.set_tools.await_args.args[0][0]
         received.append(
             await tool.handler(
@@ -2819,8 +2935,13 @@ async def test_admin_and_nonadmin_turns_do_not_share_sdk_history(setup, monkeypa
         setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
     )
     setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    user = SimpleNamespace(is_admin=True)
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=user)
+    )
     setup.chat.llm_api = action_api(return_value={"success": True})
     await setup.backend.async_handle_message("agent", setup.user, setup.chat)
+    user.is_admin = False
     await setup.backend.async_handle_message(
         "agent", setup.user, setup.chat, admin_notice="Administrator tools unavailable."
     )
