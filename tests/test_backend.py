@@ -1230,6 +1230,100 @@ async def test_data_task_rechecks_admin_after_tool_setup(setup, monkeypatch):
     await assert_clean(setup)
 
 
+@pytest.mark.parametrize("task_mode", [False, True])
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_prepared_admin_api_rejected_after_option_disabled(
+    setup, monkeypatch, task_mode, is_admin
+):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options.update(
+        enable_device_control=True, enable_home_assistant_api=False
+    )
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=SimpleNamespace(is_admin=is_admin))
+    )
+    api = action_api(tool_name="homeassistant__call_action", return_value={"ok": True})
+    api.api = SimpleNamespace(requires_admin=True)
+
+    with pytest.raises(setup.error, match="administrator tools.*disabled"):
+        if task_mode:
+            await setup.backend.async_generate_data(
+                "task", task_request(setup, api=api), ChatLog()
+            )
+        else:
+            setup.chat.llm_api = api
+            await turn(setup)
+
+    setup.session.send_and_wait.assert_not_awaited()
+    api.async_call_tool.assert_not_awaited()
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("stage", ["set_tools", "tool_call", "context_call"])
+async def test_disabling_admin_tools_during_turn_blocks_prepared_api(
+    setup, monkeypatch, stage
+):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options.update(
+        enable_device_control=True, enable_home_assistant_api=True
+    )
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=SimpleNamespace(is_admin=True))
+    )
+    api = action_api(tool_name="homeassistant__call_action", return_value={"ok": True})
+    api.api = SimpleNamespace(requires_admin=True)
+    setup.chat.llm_api = api
+
+    if stage == "set_tools":
+
+        async def disable_on_setup(*args, **kwargs):
+            setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = False
+
+        setup.session.set_tools.side_effect = disable_on_setup
+        with pytest.raises(setup.error, match="administrator tools.*disabled"):
+            await turn(setup)
+        setup.session.send_and_wait.assert_not_awaited()
+    else:
+        received = []
+
+        async def send(*args, **kwargs):
+            setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = False
+            tools = setup.session.set_tools.await_args.args[0]
+            tool = next(
+                tool
+                for tool in tools
+                if tool.name
+                == (
+                    CONTEXT_TOOL_NAME
+                    if stage == "context_call"
+                    else "ha__homeassistant__call_action"
+                )
+            )
+            received.append(
+                await tool.handler(
+                    ToolInvocation(
+                        tool_name=tool.name,
+                        tool_call_id="write",
+                        arguments={"section": "assist_api"}
+                        if stage == "context_call"
+                        else {},
+                    )
+                )
+            )
+            return None
+
+        setup.session.send_and_wait.side_effect = send
+        await turn(setup)
+        assert received[0].result_type == "failure"
+        assert "disabled" in received[0].text_result_for_llm
+    api.async_call_tool.assert_not_awaited()
+    await assert_clean(setup)
+
+
 async def test_admin_api_context_is_hidden_after_permission_is_revoked(
     setup, monkeypatch
 ):

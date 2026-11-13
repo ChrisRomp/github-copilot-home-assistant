@@ -375,6 +375,7 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
 ):
     from homeassistant.components import conversation
     from homeassistant.core import Context, HomeAssistant, callback
+    from homeassistant.exceptions import HomeAssistantError
     from homeassistant.helpers import llm
 
     if not hasattr(llm, "LLM_API_HOME_ASSISTANT"):
@@ -582,6 +583,26 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
         assert write_calls == (["admin", "assist"] if device_control else ["admin"])
         assert client.create_session.await_count == 2
         assert (chat.llm_api is not None) is device_control
+
+        user.is_admin = True
+        prepared_api = await llm.async_get_api(
+            hass,
+            [llm.LLM_API_ASSIST, llm.LLM_API_HOME_ASSISTANT],
+            user_input.as_llm_context(DOMAIN),
+        )
+        assert prepared_api.api.requires_admin
+        entry.options["enable_device_control"] = True
+        entry.options["enable_home_assistant_api"] = False
+        user.is_admin = False
+        before_send = session.send_and_wait.await_count
+        with pytest.raises(HomeAssistantError, match="administrator tools.*disabled"):
+            await backend.async_handle_message(
+                entity.entity_id,
+                user_input,
+                conversation.ChatLog(hass, "stale-api", llm_api=prepared_api),
+            )
+        assert session.send_and_wait.await_count == before_send
+        assert len(calls) == 1
     finally:
         await backend.async_stop()
         await hass.async_stop()

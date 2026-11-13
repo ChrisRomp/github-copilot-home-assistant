@@ -113,6 +113,10 @@ if TYPE_CHECKING:
     from .images import GeneratedImage
 
 _LOGGER = logging.getLogger(__name__)
+_ADMIN_TOOLS_DISABLED = (
+    "Home Assistant administrator tools were disabled or became unavailable "
+    "while preparing this request. Retry the request."
+)
 _CONTEXT_PARAMETERS = vol.Schema(
     {vol.Required("section"): vol.In(["assist_api", "request"])}
 )
@@ -508,9 +512,14 @@ class ConversationBackend:
             raise HomeAssistantError(
                 "Home Assistant tools are disabled for this agent."
             )
-        if admin_notice and getattr(getattr(api, "api", None), "requires_admin", False):
+        api_requires_admin = bool(
+            getattr(getattr(api, "api", None), "requires_admin", False)
+        )
+        if admin_notice and api_requires_admin:
             raise HomeAssistantError(admin_notice)
-        admin_api_active = (
+        if api_requires_admin and HOME_ASSISTANT_API not in (api_ids or []):
+            raise HomeAssistantError(_ADMIN_TOOLS_DISABLED)
+        admin_api_active = api_requires_admin or (
             bool(api_ids and HOME_ASSISTANT_API in api_ids) and admin_notice is None
         )
         try:
@@ -526,6 +535,12 @@ class ConversationBackend:
             ) from err
 
         context = user_input.context if is_task else user_input.as_llm_context(DOMAIN)
+
+        async def require_active_admin() -> None:
+            await async_require_admin(self.hass, context.context)
+            if HOME_ASSISTANT_API not in (selected_llm_apis(self.entry.options) or []):
+                raise HomeAssistantError(_ADMIN_TOOLS_DISABLED)
+
         session_key = self._session_key(
             chat_log.conversation_id, context, admin_api_active
         )
@@ -679,13 +694,13 @@ class ConversationBackend:
                                 admin_api_active
                                 and arguments.get("section") == "assist_api"
                             ):
-                                await async_require_admin(self.hass, context.context)
+                                await require_active_admin()
                             tool_result = self._context_tool_result(
                                 arguments, user_input, chat_log
                             )
                         else:
                             if admin_api_active:
-                                await async_require_admin(self.hass, context.context)
+                                await require_active_admin()
                             tool_result = await ha_api.async_call_tool(ha_tool_input)
                     except (HomeAssistantError, vol.Invalid) as err:
                         tool_result = {"error": type(err).__name__}
@@ -749,7 +764,7 @@ class ConversationBackend:
             async def send_request():
                 nonlocal send_started
                 if admin_api_active:
-                    await async_require_admin(self.hass, context.context)
+                    await require_active_admin()
                 send_started = True
                 return await record.session.send_and_wait(
                     user_input.text,
