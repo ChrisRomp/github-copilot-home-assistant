@@ -42,7 +42,7 @@
           "prompt": "Trusted conversation instructions, used literally without template expansion. AI Tasks use their own action instructions.",
           "ai_task_model": "Initially uses the conversation model, then remains independently configurable.",
           "ai_task_timeout": "Applies to AI Tasks only. Assist keeps its 60-second timeout.",
-          "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools. Completed actions are never automatically replayed.",
+          "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
         }
       }
@@ -86,7 +86,7 @@
           "prompt": "Trusted conversation instructions, used literally without template expansion. AI Tasks use their own action instructions.",
           "ai_task_model": "Initially uses the conversation model, then remains independently configurable.",
           "ai_task_timeout": "Applies to AI Tasks only. Assist keeps its 60-second timeout.",
-          "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools. Completed actions are never automatically replayed.",
+          "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
         }
       }
