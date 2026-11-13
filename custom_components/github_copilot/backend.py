@@ -439,11 +439,7 @@ class ConversationBackend:
                         self.hass, api_ids, request.context
                     )
         if request.admin_notice:
-            log = (
-                _LOGGER.debug
-                if self._admin_tools_warning_logged
-                else _LOGGER.warning
-            )
+            log = _LOGGER.debug if self._admin_tools_warning_logged else _LOGGER.warning
             log(
                 "Home Assistant administrator tools are unavailable for this AI "
                 "Task; continuing with the remaining tools. %s",
