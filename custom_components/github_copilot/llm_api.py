@@ -40,6 +40,19 @@ def selected_llm_apis(options: Mapping[str, Any]) -> list[str] | None:
     return apis or None
 
 
+def api_includes(api_instance: Any, api_id: str) -> bool:
+    """Check whether an API instance includes one of its constituent APIs."""
+    api = getattr(api_instance, "api", None)
+    if api is None:
+        return False
+    merged_apis = getattr(api, "llm_apis", None)
+    if merged_apis is not None:
+        return any(
+            getattr(merged_api, "id", None) == api_id for merged_api in merged_apis
+        )
+    return getattr(api, "id", None) == api_id
+
+
 async def async_is_admin(hass: HomeAssistant, context: Context | None) -> bool:
     """Check the current request's user, not the integration owner's account."""
     user_id = context.user_id if context is not None else None

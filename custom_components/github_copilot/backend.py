@@ -80,7 +80,9 @@ from .const import (
 )
 from .llm_api import (
     ADMIN_REQUIRED,
+    ASSIST_API,
     HOME_ASSISTANT_API,
+    api_includes,
     async_available_llm_apis,
     async_require_admin,
     selected_llm_apis,
@@ -515,10 +517,14 @@ class ConversationBackend:
         api_requires_admin = bool(
             getattr(getattr(api, "api", None), "requires_admin", False)
         )
+        # HA's merged API does not retain per-tool API ownership.
+        api_contains_assist = api_includes(api, ASSIST_API)
         if admin_notice and api_requires_admin:
             raise HomeAssistantError(admin_notice)
         if api_requires_admin and HOME_ASSISTANT_API not in (api_ids or []):
             raise HomeAssistantError(_ADMIN_TOOLS_DISABLED)
+        if api_contains_assist and ASSIST_API not in (api_ids or []):
+            raise HomeAssistantError("Device control is disabled for this agent.")
         admin_api_active = api_requires_admin or (
             bool(api_ids and HOME_ASSISTANT_API in api_ids) and admin_notice is None
         )
@@ -540,6 +546,10 @@ class ConversationBackend:
             await async_require_admin(self.hass, context.context)
             if HOME_ASSISTANT_API not in (selected_llm_apis(self.entry.options) or []):
                 raise HomeAssistantError(_ADMIN_TOOLS_DISABLED)
+
+        async def require_active_assist() -> None:
+            if ASSIST_API not in (selected_llm_apis(self.entry.options) or []):
+                raise HomeAssistantError("Device control is disabled for this agent.")
 
         session_key = self._session_key(
             chat_log.conversation_id, context, admin_api_active
@@ -695,10 +705,17 @@ class ConversationBackend:
                                 and arguments.get("section") == "assist_api"
                             ):
                                 await require_active_admin()
+                            if (
+                                api_contains_assist
+                                and arguments.get("section") == "assist_api"
+                            ):
+                                await require_active_assist()
                             tool_result = self._context_tool_result(
                                 arguments, user_input, chat_log
                             )
                         else:
+                            if api_contains_assist:
+                                await require_active_assist()
                             if admin_api_active:
                                 await require_active_admin()
                             tool_result = await ha_api.async_call_tool(ha_tool_input)
@@ -763,6 +780,8 @@ class ConversationBackend:
 
             async def send_request():
                 nonlocal send_started
+                if api_contains_assist:
+                    await require_active_assist()
                 if admin_api_active:
                     await require_active_admin()
                 send_started = True

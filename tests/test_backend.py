@@ -25,6 +25,7 @@ from custom_components.github_copilot.const import (
     AUTH_METHOD_OAUTH,
     AUTH_METHOD_PAT,
     CONF_AUTH_METHOD,
+    CONF_ENABLE_DEVICE_CONTROL,
     CONF_ENABLE_HOME_ASSISTANT_API,
     CONF_MODEL,
     CONF_PROMPT,
@@ -2760,6 +2761,101 @@ def action_api(*, tool_name="action", **kwargs):
     )
 
 
+@pytest.mark.parametrize("task_mode", [False, True])
+async def test_prepared_assist_api_rejected_after_control_disabled(
+    setup, monkeypatch, task_mode
+):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options.update(
+        enable_device_control=False, enable_home_assistant_api=True
+    )
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=SimpleNamespace(is_admin=False))
+    )
+    api = action_api(tool_name="example__assist_write", return_value={"ok": True})
+    api.api = SimpleNamespace(id="assist", requires_admin=False)
+
+    with pytest.raises(setup.error, match="Device control is disabled"):
+        if task_mode:
+            await setup.backend.async_generate_data(
+                "task", task_request(setup, api=api), ChatLog()
+            )
+        else:
+            setup.chat.llm_api = api
+            await setup.backend.async_handle_message(
+                "agent",
+                setup.user,
+                setup.chat,
+                admin_notice="Administrator tools are unavailable.",
+            )
+
+    setup.session.send_and_wait.assert_not_awaited()
+    api.async_call_tool.assert_not_awaited()
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("stage", ["tool_setup", "tool_call"])
+async def test_disabling_device_control_during_turn_blocks_assist_api(
+    setup, monkeypatch, stage
+):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options.update(
+        enable_device_control=True, enable_home_assistant_api=True
+    )
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=SimpleNamespace(is_admin=False))
+    )
+    api = action_api(tool_name="example__assist_write", return_value={"ok": True})
+    api.api = SimpleNamespace(id="assist", requires_admin=False)
+    setup.chat.llm_api = api
+    received = []
+
+    if stage == "tool_setup":
+
+        async def disable_on_setup(*args, **kwargs):
+            setup.entry.options[CONF_ENABLE_DEVICE_CONTROL] = False
+
+        setup.session.set_tools.side_effect = disable_on_setup
+        with pytest.raises(setup.error, match="Device control is disabled"):
+            await setup.backend.async_handle_message(
+                "agent",
+                setup.user,
+                setup.chat,
+                admin_notice="Administrator tools are unavailable.",
+            )
+        setup.session.send_and_wait.assert_not_awaited()
+    else:
+
+        async def send(*args, **kwargs):
+            setup.entry.options[CONF_ENABLE_DEVICE_CONTROL] = False
+            tool = setup.session.set_tools.await_args.args[0][0]
+            received.append(
+                await tool.handler(
+                    ToolInvocation(
+                        tool_name=tool.name, tool_call_id="write", arguments={}
+                    )
+                )
+            )
+            return None
+
+        setup.session.send_and_wait.side_effect = send
+        await setup.backend.async_handle_message(
+            "agent",
+            setup.user,
+            setup.chat,
+            admin_notice="Administrator tools are unavailable.",
+        )
+        assert received[0].result_type == "failure"
+        assert "Device control is disabled" in received[0].text_result_for_llm
+
+    api.async_call_tool.assert_not_awaited()
+    await assert_clean(setup)
+
+
 @pytest.mark.parametrize(
     ("supported", "is_admin", "device_control", "expected_apis", "notice"),
     [
@@ -2881,6 +2977,29 @@ async def test_data_task_falls_back_when_admin_is_revoked_during_api_lookup(
         ["assist"],
     ]
     assert "administrator" in request.admin_notice
+    await assert_clean(setup)
+
+
+async def test_data_task_reports_admin_api_denial_for_current_admin(
+    setup, ha_boundary, monkeypatch
+):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options.update(
+        enable_device_control=True, enable_home_assistant_api=True
+    )
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=SimpleNamespace(is_admin=True))
+    )
+    get_api = AsyncMock(side_effect=ha_boundary.Unauthorized())
+    monkeypatch.setattr(setup.module.llm, "async_get_api", get_api, raising=False)
+
+    with pytest.raises(setup.error, match="denied access to administrator tools"):
+        await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+
+    get_api.assert_awaited_once()
+    setup.session.send_and_wait.assert_not_awaited()
     await assert_clean(setup)
 
 

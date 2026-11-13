@@ -264,3 +264,53 @@ async def test_revoked_admin_during_api_preparation_falls_back_to_assist(
         "administrator"
         in backend.async_handle_message.await_args.kwargs["admin_notice"]
     )
+
+
+async def test_admin_api_denial_for_current_admin_is_reported(ha_boundary, monkeypatch):
+    monkeypatch.setattr(
+        ha_boundary.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    module = ha_boundary.load("conversation")
+
+    class ConverseError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        module.conversation, "ConverseError", ConverseError, raising=False
+    )
+    user = SimpleNamespace(is_admin=True)
+    backend = SimpleNamespace(async_handle_message=AsyncMock())
+    entity = module.GitHubCopilotConversationEntity(
+        SimpleNamespace(
+            entry_id="entry",
+            options={
+                CONF_ENABLE_DEVICE_CONTROL: True,
+                CONF_ENABLE_HOME_ASSISTANT_API: True,
+            },
+        )
+    )
+    entity.hass = SimpleNamespace(
+        auth=SimpleNamespace(async_get_user=AsyncMock(return_value=user)),
+        data={DOMAIN: {"entry": SimpleNamespace(backend=backend)}},
+    )
+    entity.entity_id = "conversation.github_copilot"
+    user_input = SimpleNamespace(
+        as_llm_context=Mock(
+            return_value=SimpleNamespace(context=SimpleNamespace(user_id="admin"))
+        ),
+        extra_system_prompt=None,
+    )
+
+    async def deny(*_args):
+        raise ConverseError("denied") from ha_boundary.Unauthorized()
+
+    chat = SimpleNamespace(async_provide_llm_data=AsyncMock(side_effect=deny))
+
+    with pytest.raises(
+        ha_boundary.HomeAssistantError,
+        match="denied access to administrator tools",
+    ):
+        await entity._async_handle_message(user_input, chat)
+
+    assert chat.async_provide_llm_data.await_count == 1
+    backend.async_handle_message.assert_not_awaited()

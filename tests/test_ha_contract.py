@@ -395,7 +395,11 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
     from custom_components.github_copilot.conversation import (
         GitHubCopilotConversationEntity,
     )
-    from custom_components.github_copilot.llm_api import ADMIN_REQUIRED
+    from custom_components.github_copilot.llm_api import (
+        ADMIN_REQUIRED,
+        ASSIST_API,
+        api_includes,
+    )
 
     hass = HomeAssistant(str(tmp_path))
     user = SimpleNamespace(is_admin=True, name="Test administrator")
@@ -591,6 +595,8 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
             user_input.as_llm_context(DOMAIN),
         )
         assert prepared_api.api.requires_admin
+        assert api_includes(prepared_api, ASSIST_API)
+        assert api_includes(prepared_api, llm.LLM_API_HOME_ASSISTANT)
         entry.options["enable_device_control"] = True
         entry.options["enable_home_assistant_api"] = False
         user.is_admin = False
@@ -603,6 +609,23 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
             )
         assert session.send_and_wait.await_count == before_send
         assert len(calls) == 1
+
+        entry.options["enable_home_assistant_api"] = True
+        assist_api = await llm.async_get_api(
+            hass, llm.LLM_API_ASSIST, user_input.as_llm_context(DOMAIN)
+        )
+        entry.options["enable_device_control"] = False
+        before_send = session.send_and_wait.await_count
+        before_writes = list(write_calls)
+        with pytest.raises(HomeAssistantError, match="Device control is disabled"):
+            await backend.async_handle_message(
+                entity.entity_id,
+                user_input,
+                conversation.ChatLog(hass, "stale-assist-api", llm_api=assist_api),
+                admin_notice=ADMIN_REQUIRED,
+            )
+        assert session.send_and_wait.await_count == before_send
+        assert write_calls == before_writes
     finally:
         await backend.async_stop()
         await hass.async_stop()
