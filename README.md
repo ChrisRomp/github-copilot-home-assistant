@@ -67,8 +67,9 @@ For a step-by-step walkthrough with screenshots, see the
 Device control is off by default and applies to both conversations and AI Tasks.
 It is limited to entities you expose to Assist. The separate administrator-tools
 option is also off by default and requires an authenticated Home Assistant
-administrator for each request. It can read logs and configuration and perform
-administrative actions beyond Assist-exposed entities. Change these settings under
+administrator for each request. It provides access to logs, history and
+configuration beyond Assist-exposed entities. Action calls, integration
+reloads and media playback are blocked. Change these settings under
 **Settings > Devices & services > GitHub Copilot > Configure**.
 
 An AI Task entity is created alongside the conversation entity without another

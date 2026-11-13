@@ -1116,6 +1116,58 @@ async def test_cached_task_auth_failure_starts_reauth_without_replay(
     await assert_clean(setup)
 
 
+async def test_admin_api_context_is_hidden_after_permission_is_revoked(
+    setup, monkeypatch
+):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    user = SimpleNamespace(is_admin=True)
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=user)
+    )
+    setup.chat.llm_api = SimpleNamespace(
+        api_prompt="Administrator-only configuration content",
+        tools=[],
+        custom_serializer=None,
+        async_call_tool=AsyncMock(),
+        api=SimpleNamespace(requires_admin=True),
+    )
+    received = []
+
+    async def send(*args, **kwargs):
+        tool = next(
+            tool
+            for tool in setup.session.set_tools.await_args.args[0]
+            if tool.name == CONTEXT_TOOL_NAME
+        )
+        user.is_admin = False
+        for section in ("assist_api", "request"):
+            received.append(
+                await tool.handler(
+                    ToolInvocation(
+                        tool_name=tool.name,
+                        tool_call_id=f"context-{section}",
+                        arguments={"section": section},
+                    )
+                )
+            )
+        return None
+
+    setup.session.send_and_wait.side_effect = send
+    await turn(setup)
+
+    assert received[0].result_type == "failure"
+    assert "Administrator-only configuration content" not in (
+        received[0].text_result_for_llm
+    )
+    assert received[1].result_type == "success"
+    assert "current_time" in received[1].text_result_for_llm
+    setup.chat.llm_api.async_call_tool.assert_not_awaited()
+    await assert_clean(setup)
+
+
 @pytest.mark.parametrize(
     "message", ["HTTP 403 Forbidden", "HTTP 429 Too many requests"]
 )
@@ -2489,10 +2541,10 @@ async def test_serialization_failure_after_action_is_reported_without_replay(set
     await assert_clean(setup)
 
 
-def action_api(**kwargs):
+def action_api(*, tool_name="action", **kwargs):
     return SimpleNamespace(
         tools=[
-            SimpleNamespace(name="action", description="", parameters=vol.Schema({}))
+            SimpleNamespace(name=tool_name, description="", parameters=vol.Schema({}))
         ],
         custom_serializer=None,
         api_prompt="",
@@ -2692,9 +2744,17 @@ async def test_admin_notice_follows_final_reply_after_intermediate_tool(setup):
     await assert_clean(setup)
 
 
+@pytest.mark.parametrize(
+    "ha_tool_name",
+    [
+        "homeassistant__call_action",
+        "config__reload_config_entry",
+        "media_player__play_media",
+    ],
+)
 @pytest.mark.parametrize("is_admin", [False, True])
-async def test_administrator_action_rechecks_current_permission(
-    setup, monkeypatch, is_admin
+async def test_administrator_side_effect_tools_are_blocked(
+    setup, monkeypatch, ha_tool_name, is_admin
 ):
     monkeypatch.setattr(
         setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
@@ -2703,7 +2763,9 @@ async def test_administrator_action_rechecks_current_permission(
     setup.backend.hass.auth = SimpleNamespace(
         async_get_user=AsyncMock(return_value=SimpleNamespace(is_admin=is_admin))
     )
-    setup.chat.llm_api = action_api(return_value={"success": True})
+    setup.chat.llm_api = action_api(
+        tool_name=ha_tool_name, return_value={"success": True}
+    )
     received = []
 
     async def send(*args, **kwargs):
@@ -2717,12 +2779,38 @@ async def test_administrator_action_rechecks_current_permission(
 
     setup.session.send_and_wait.side_effect = send
     await turn(setup)
-    assert received[0].result_type == ("success" if is_admin else "failure")
+    assert received[0].result_type == "failure"
+    setup.chat.llm_api.async_call_tool.assert_not_awaited()
     if is_admin:
-        setup.chat.llm_api.async_call_tool.assert_awaited_once()
+        assert "autonomous execution" in received[0].text_result_for_llm
     else:
-        setup.chat.llm_api.async_call_tool.assert_not_awaited()
         assert "administrator" in received[0].text_result_for_llm
+    await assert_clean(setup)
+
+
+async def test_administrator_read_tools_remain_available(setup, monkeypatch):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=SimpleNamespace(is_admin=True))
+    )
+    setup.chat.llm_api = action_api(
+        tool_name="system_log__get_logs", return_value={"logs": []}
+    )
+
+    async def send(*args, **kwargs):
+        tool = setup.session.set_tools.await_args.args[0][0]
+        result = await tool.handler(
+            ToolInvocation(tool_name=tool.name, tool_call_id="read", arguments={})
+        )
+        assert result.result_type == "success"
+        return None
+
+    setup.session.send_and_wait.side_effect = send
+    await turn(setup)
+    setup.chat.llm_api.async_call_tool.assert_awaited_once()
     await assert_clean(setup)
 
 

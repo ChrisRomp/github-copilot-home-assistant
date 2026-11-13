@@ -535,10 +535,10 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
     try:
         result = await entity._async_handle_message(user_input, chat)
         assert result.response.speech["plain"]["speech"] == "Done."
-        assert [item.result_type for item in tool_results] == ["success", "success"]
+        assert [item.result_type for item in tool_results] == ["success", "failure"]
         assert "Recorded test warning" in tool_results[0].text_result_for_llm
-        assert len(calls) == 1
-        assert calls[0].context.user_id == "admin"
+        assert "autonomous execution" in tool_results[1].text_result_for_llm
+        assert not calls
 
         user.is_admin = False
         deltas.clear()
@@ -549,7 +549,7 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
         assert result.continue_conversation is question
         assert "".join(delta.get("content") or "" for delta in deltas) == expected
         assert chat.content[-1].content == expected
-        assert len(calls) == 1
+        assert not calls
         assert client.create_session.await_count == 2
         assert (chat.llm_api is not None) is device_control
     finally:
