@@ -43,7 +43,7 @@
           "ai_task_model": "Initially uses the conversation model, then remains independently configurable.",
           "ai_task_timeout": "Applies to AI Tasks only. Assist keeps its 60-second timeout.",
           "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools.",
-          "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration. Action calls, integration reloads, and media playback are blocked. Access is not limited to Assist-exposed entities."
+          "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
         }
       }
     },
@@ -87,7 +87,7 @@
           "ai_task_model": "Initially uses the conversation model, then remains independently configurable.",
           "ai_task_timeout": "Applies to AI Tasks only. Assist keeps its 60-second timeout.",
           "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools.",
-          "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration. Action calls, integration reloads, and media playback are blocked. Access is not limited to Assist-exposed entities."
+          "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
         }
       }
     },

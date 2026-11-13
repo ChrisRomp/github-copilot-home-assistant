@@ -17,9 +17,8 @@ Home Assistant templates are not expanded.
 
 On Home Assistant 2026.11 or newer, **Allow Home Assistant administrator tools**
 is a separate opt-in for conversations and data tasks. It enables HA's
-administrator API, including tools for logs, history and configuration. Tools
-that call actions, reload integrations or control media playback are blocked
-from autonomous execution.
+administrator API, including tools for logs, history, configuration and
+administrative actions such as calling actions or reloading integrations.
 This API is not limited to Assist-exposed entities, even if device control is
 disabled. Results, including potentially sensitive log entries, are sent to
 GitHub Copilot.

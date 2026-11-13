@@ -115,7 +115,7 @@ screenshot shows device control and administrator tools enabled, but both are
 | **AI Task model** | Optionally choose a different model for automations. Initially defaults to the conversation model, but later changes to the conversation model do not change it. |
 | **AI Task timeout (seconds)** | Defaults to 180 seconds. This does not change Assist's 60-second timeout. |
 | **Allow control of Assist-exposed devices** | Allows conversations and AI Tasks to use Assist-exposed tools. It is **off by default**. |
-| **Allow Home Assistant administrator tools** | On HA 2026.11 or newer, allows administrator-authenticated conversations and data tasks to read logs, history and configuration. Action calls, integration reloads and media playback are blocked. Access is not restricted to Assist-exposed entities. It is **off by default**. |
+| **Allow Home Assistant administrator tools** | On HA 2026.11 or newer, allows administrator-authenticated conversations and data tasks to access logs, history and configuration, and perform administrative actions. Access is not restricted to Assist-exposed entities. It is **off by default**. |
 | **Additional instructions** | Instructions for conversations only, such as "Keep replies brief and use Celsius." AI Tasks use the instructions supplied by each action. |
 
 For camera or image analysis, choose an AI Task model with vision support.

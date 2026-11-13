@@ -2864,16 +2864,19 @@ async def test_admin_notice_follows_final_reply_after_intermediate_tool(setup):
         "homeassistant__call_action",
         "config__reload_config_entry",
         "media_player__play_media",
+        "custom_integration__write",
     ],
 )
 @pytest.mark.parametrize("is_admin", [False, True])
-async def test_administrator_side_effect_tools_are_blocked(
-    setup, monkeypatch, ha_tool_name, is_admin
+@pytest.mark.parametrize("device_control", [False, True])
+async def test_administrator_tool_execution_requires_current_admin(
+    setup, monkeypatch, ha_tool_name, is_admin, device_control
 ):
     monkeypatch.setattr(
         setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
     )
     setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    setup.entry.options["enable_device_control"] = device_control
     user = SimpleNamespace(is_admin=True)
     setup.backend.hass.auth = SimpleNamespace(
         async_get_user=AsyncMock(return_value=user)
@@ -2895,12 +2898,55 @@ async def test_administrator_side_effect_tools_are_blocked(
 
     setup.session.send_and_wait.side_effect = send
     await turn(setup)
-    assert received[0].result_type == "failure"
-    setup.chat.llm_api.async_call_tool.assert_not_awaited()
     if is_admin:
-        assert "autonomous execution" in received[0].text_result_for_llm
+        assert received[0].result_type == "success"
+        setup.chat.llm_api.async_call_tool.assert_awaited_once()
     else:
+        assert received[0].result_type == "failure"
+        setup.chat.llm_api.async_call_tool.assert_not_awaited()
         assert "administrator" in received[0].text_result_for_llm
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_data_task_administrator_write_requires_current_admin(
+    setup, monkeypatch, is_admin
+):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    user = SimpleNamespace(is_admin=True)
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=user)
+    )
+    api = action_api(tool_name="custom_integration__write", return_value={"ok": True})
+    monkeypatch.setattr(
+        setup.module.llm, "async_get_api", AsyncMock(return_value=api), raising=False
+    )
+    received = []
+
+    async def send(*args, **kwargs):
+        user.is_admin = is_admin
+        tool = setup.session.set_tools.await_args.args[0][0]
+        received.append(
+            await tool.handler(
+                ToolInvocation(tool_name=tool.name, tool_call_id="write", arguments={})
+            )
+        )
+        return SimpleNamespace(
+            data=AssistantMessageData(content="Done.", message_id="reply")
+        )
+
+    setup.session.send_and_wait.side_effect = send
+    await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+    if is_admin:
+        assert received[0].result_type == "success"
+        api.async_call_tool.assert_awaited_once()
+    else:
+        assert received[0].result_type == "failure"
+        assert "administrator" in received[0].text_result_for_llm
+        api.async_call_tool.assert_not_awaited()
     await assert_clean(setup)
 
 

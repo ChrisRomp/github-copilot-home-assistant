@@ -113,14 +113,6 @@ if TYPE_CHECKING:
     from .images import GeneratedImage
 
 _LOGGER = logging.getLogger(__name__)
-# Keep administrator reads available while denying known side-effecting tools.
-_ADMIN_SIDE_EFFECT_TOOLS = frozenset(
-    {
-        "config__reload_config_entry",
-        "homeassistant__call_action",
-        "media_player__play_media",
-    }
-)
 _CONTEXT_PARAMETERS = vol.Schema(
     {vol.Required("section"): vol.In(["assist_api", "request"])}
 )
@@ -694,18 +686,7 @@ class ConversationBackend:
                         else:
                             if admin_api_active:
                                 await async_require_admin(self.hass, context.context)
-                            if admin_api_active and ha_name in _ADMIN_SIDE_EFFECT_TOOLS:
-                                tool_result = {
-                                    "error": "administrator_side_effect_blocked",
-                                    "error_text": (
-                                        "This administrator-side-effecting tool is "
-                                        "blocked for autonomous execution."
-                                    ),
-                                }
-                            else:
-                                tool_result = await ha_api.async_call_tool(
-                                    ha_tool_input
-                                )
+                            tool_result = await ha_api.async_call_tool(ha_tool_input)
                     except (HomeAssistantError, vol.Invalid) as err:
                         tool_result = {"error": type(err).__name__}
                         if str(err):

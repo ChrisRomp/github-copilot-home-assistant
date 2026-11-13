@@ -399,6 +399,26 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
     hass = HomeAssistant(str(tmp_path))
     user = SimpleNamespace(is_admin=True, name="Test administrator")
     hass.auth = SimpleNamespace(async_get_user=AsyncMock(return_value=user))
+    write_calls = []
+
+    class ExampleWriteTool(llm.Tool):
+        integration = "example"
+
+        def __init__(self, kind):
+            self.name = f"example__{kind}_write"
+            self.kind = kind
+
+        async def async_call(self, hass, tool_input, llm_context):
+            write_calls.append(self.kind)
+            return llm.ToolResult(data={"success": True})
+
+    def example_tools(hass, context, api_id):
+        kind = {
+            llm.LLM_API_HOME_ASSISTANT: "admin",
+            llm.LLM_API_ASSIST: "assist",
+        }[api_id]
+        return llm_integration.LLMTools(tools=[ExampleWriteTool(kind)])
+
     hass.data["system_log"] = SimpleNamespace(
         records=SimpleNamespace(
             to_list=Mock(
@@ -421,6 +441,7 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
         async_get_platforms=AsyncMock(
             return_value={
                 "config": config_tools,
+                "example": SimpleNamespace(async_get_tools=example_tools),
                 "history": history_tools,
                 "homeassistant": homeassistant_tools,
                 "llm": common_tools,
@@ -500,11 +521,17 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
                 "ha__homeassistant__render_template",
                 "ha__system_log__get_entries",
                 "ha__system_log__get_logs",
+                "ha__example__admin_write",
             } <= tools.keys()
-            for name, arguments in (
+            assert ("ha__example__assist_write" in tools) is device_control
+            calls_to_make = [
                 ("ha__system_log__get_entries", {"logger": "example"}),
                 ("ha__homeassistant__call_action", {"action": "example.admin_action"}),
-            ):
+                ("ha__example__admin_write", {}),
+            ]
+            if device_control:
+                calls_to_make.append(("ha__example__assist_write", {}))
+            for name, arguments in calls_to_make:
                 tool_results.append(
                     await tools[name].handler(
                         ToolInvocation(
@@ -535,10 +562,12 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
     try:
         result = await entity._async_handle_message(user_input, chat)
         assert result.response.speech["plain"]["speech"] == "Done."
-        assert [item.result_type for item in tool_results] == ["success", "failure"]
+        assert [item.result_type for item in tool_results] == ["success"] * (
+            4 if device_control else 3
+        )
         assert "Recorded test warning" in tool_results[0].text_result_for_llm
-        assert "autonomous execution" in tool_results[1].text_result_for_llm
-        assert not calls
+        assert len(calls) == 1
+        assert write_calls == (["admin", "assist"] if device_control else ["admin"])
 
         user.is_admin = False
         deltas.clear()
@@ -549,7 +578,8 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
         assert result.continue_conversation is question
         assert "".join(delta.get("content") or "" for delta in deltas) == expected
         assert chat.content[-1].content == expected
-        assert not calls
+        assert len(calls) == 1
+        assert write_calls == (["admin", "assist"] if device_control else ["admin"])
         assert client.create_session.await_count == 2
         assert (chat.llm_api is not None) is device_control
     finally:
