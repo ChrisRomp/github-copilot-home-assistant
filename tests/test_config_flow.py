@@ -166,6 +166,46 @@ async def test_initial_options_require_an_available_model_and_default_control_of
     assert prompt_field.description == {"suggested_value": ""}
 
 
+@pytest.mark.parametrize("device_control", [False, True])
+@pytest.mark.parametrize("administrator_tools", [False, True])
+async def test_initial_api_options_are_independent(
+    flow_setup, ha_boundary, monkeypatch, device_control, administrator_tools
+):
+    monkeypatch.setattr(
+        ha_boundary.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    form = await flow_setup.flow.async_step_pat({"token": "github_pat_test"})
+    assert (
+        form["data_schema"]({"model": "gpt-6-luna"})["enable_home_assistant_api"]
+        is False
+    )
+    submitted = form["data_schema"](
+        {
+            "model": "gpt-6-luna",
+            "enable_device_control": device_control,
+            "enable_home_assistant_api": administrator_tools,
+        }
+    )
+    result = await flow_setup.flow.async_step_model(submitted)
+
+    expected_apis = []
+    if device_control:
+        expected_apis.append("assist")
+    if administrator_tools:
+        expected_apis.append("homeassistant")
+    assert result["options"]["llm_hass_api"] == (expected_apis or None)
+    assert result["options"]["enable_device_control"] is device_control
+    assert result["options"]["enable_home_assistant_api"] is administrator_tools
+
+
+async def test_initial_form_hides_unavailable_administrator_tools(flow_setup):
+    form = await flow_setup.flow.async_step_pat({"token": "github_pat_test"})
+    assert "enable_home_assistant_api" not in form["data_schema"].schema
+    assert "enable_home_assistant_api" not in form["data_schema"](
+        {"model": "gpt-6-luna"}
+    )
+
+
 @pytest.mark.parametrize("filename", ["strings.json", "translations/en.json"])
 def test_initial_options_have_matching_translations(filename):
     component = Path(__file__).parents[1] / "custom_components/github_copilot"

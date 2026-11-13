@@ -18,7 +18,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import const
 from .backend import DataTaskRequest, ImageTaskRequest
-from .const import CONF_ENABLE_DEVICE_CONTROL, DOMAIN, MODELS_UPDATED_SIGNAL, NAME
+from .const import (
+    CONF_ENABLE_DEVICE_CONTROL,
+    CONF_ENABLE_HOME_ASSISTANT_API,
+    DOMAIN,
+    MODELS_UPDATED_SIGNAL,
+    NAME,
+)
 from .images import verified_image_runtime
 from .runtime import CopilotRuntime
 
@@ -108,7 +114,10 @@ class GitHubCopilotAITaskEntity(ai_task.AITaskEntity):
     def _consume_context(self, chat_log: conversation.ChatLog) -> Context | None:
         captured = _request_context.get()
         session = current_session.get()
-        if self.entry.options.get(CONF_ENABLE_DEVICE_CONTROL) and (
+        if (
+            self.entry.options.get(CONF_ENABLE_DEVICE_CONTROL)
+            or self.entry.options.get(CONF_ENABLE_HOME_ASSISTANT_API)
+        ) and (
             session is None
             or session.conversation_id != chat_log.conversation_id
             or captured is not None
@@ -117,8 +126,8 @@ class GitHubCopilotAITaskEntity(ai_task.AITaskEntity):
             and captured.task is not asyncio.current_task()
         ):
             raise HomeAssistantError(
-                "AI Tasks with device control must use Home Assistant's task service "
-                "or public task helper so caller context can be preserved."
+                "AI Tasks with Home Assistant tools must use Home Assistant's task "
+                "service or public task helper so caller context can be preserved."
             )
         _request_context.set(None)
         if (
@@ -139,7 +148,7 @@ class GitHubCopilotAITaskEntity(ai_task.AITaskEntity):
         if task.llm_api is not None:
             raise HomeAssistantError(
                 "Caller-supplied LLM APIs are not supported. Use the integration's "
-                "device-control option to allow Assist-exposed tools."
+                "settings to enable Home Assistant tools."
             )
         runtime: CopilotRuntime = self.hass.data[DOMAIN][self.entry.entry_id]
         if runtime.backend is None:

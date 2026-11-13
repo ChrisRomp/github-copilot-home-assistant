@@ -1,6 +1,7 @@
 """AI Task contracts against the minimum supported Home Assistant."""
 
 import asyncio
+import inspect
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -16,6 +17,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 async def ai_setup(tmp_path, monkeypatch):
     from homeassistant.components import ai_task
+    from homeassistant.components.ai_task.const import DATA_PREFERENCES
     from homeassistant.core import HomeAssistant
 
     from custom_components.github_copilot import const
@@ -25,6 +27,17 @@ async def ai_setup(tmp_path, monkeypatch):
     monkeypatch.setattr(const, "IMAGE_HOST_BUDGET_VERIFIED", False)
 
     hass = HomeAssistant(str(tmp_path))
+    hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(
+            return_value=SimpleNamespace(
+                is_admin=True,
+                permissions=SimpleNamespace(check_entity=Mock(return_value=True)),
+            )
+        )
+    )
+    hass.data[DATA_PREFERENCES] = SimpleNamespace(
+        gen_data_entity_id=None, gen_image_entity_id=None
+    )
     backend = SimpleNamespace(async_generate_data=AsyncMock(return_value="Task result"))
     entry = SimpleNamespace(
         entry_id="test", options={"model": "chat", "enable_device_control": True}
@@ -164,7 +177,12 @@ async def test_inherited_context_cannot_authorize_direct_child_call(ai_setup):
     from homeassistant.exceptions import HomeAssistantError
     from homeassistant.helpers.chat_session import async_get_chat_session
 
-    with async_get_chat_session(ai_setup.hass) as session:
+    kwargs = (
+        {"context": None}
+        if "context" in inspect.signature(async_get_chat_session).parameters
+        else {}
+    )
+    with async_get_chat_session(ai_setup.hass, **kwargs) as session:
         ai_setup.entity.async_set_context(Context(user_id="parent"))
 
         async def child():
@@ -181,12 +199,35 @@ async def test_inherited_context_cannot_authorize_direct_child_call(ai_setup):
     ai_setup.backend.async_generate_data.assert_not_awaited()
 
 
+async def test_admin_tools_also_require_task_context_provenance(ai_setup):
+    from homeassistant.components.conversation import ChatLog
+    from homeassistant.exceptions import HomeAssistantError
+    from homeassistant.helpers.chat_session import current_session
+
+    ai_setup.entry.options.update(
+        enable_device_control=False, enable_home_assistant_api=True
+    )
+    token = current_session.set(None)
+    try:
+        with pytest.raises(HomeAssistantError, match="public task helper"):
+            await ai_setup.entity._async_generate_data(
+                ai_setup.ai_task.GenDataTask(name="test", instructions="test"),
+                ChatLog(ai_setup.hass, "unsupported-direct-call"),
+            )
+        ai_setup.backend.async_generate_data.assert_not_awaited()
+    finally:
+        current_session.reset(token)
+
+
 async def test_unverified_images_are_not_advertised_or_dispatched(ai_setup):
     from homeassistant.exceptions import HomeAssistantError
 
     features = ai_setup.entity.supported_features
     assert features == ai_setup.ai_task.AITaskEntityFeature.GENERATE_DATA
-    with pytest.raises(HomeAssistantError, match="does not support attachments"):
+    with pytest.raises(
+        HomeAssistantError,
+        match="does not support attachments|attachments_not_supported",
+    ):
         await ai_setup.ai_task.async_generate_data(
             ai_setup.hass,
             entity_id=ai_setup.entity.entity_id,
@@ -194,7 +235,10 @@ async def test_unverified_images_are_not_advertised_or_dispatched(ai_setup):
             instructions="Describe",
             attachments=[{"media_content_id": "media-source://camera/camera.test"}],
         )
-    with pytest.raises(HomeAssistantError, match="does not support generating images"):
+    with pytest.raises(
+        HomeAssistantError,
+        match="does not support generating images|generate_image_not_supported",
+    ):
         await ai_setup.ai_task.async_generate_image(
             ai_setup.hass,
             entity_id=ai_setup.entity.entity_id,

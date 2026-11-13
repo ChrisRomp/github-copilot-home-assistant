@@ -9,6 +9,7 @@ from homeassistant.const import CONF_LLM_HASS_API, CONF_PROMPT
 
 from custom_components.github_copilot.const import (
     CONF_ENABLE_DEVICE_CONTROL,
+    CONF_ENABLE_HOME_ASSISTANT_API,
     CONF_MODEL,
     CONF_MODEL_BILLING,
     DOMAIN,
@@ -170,6 +171,54 @@ async def test_optional_prompt_can_be_cleared(
     assert result["data"][CONF_LLM_HASS_API] == (
         ["assist"] if device_control_enabled else None
     )
+
+
+@pytest.mark.parametrize("device_control", [False, True])
+@pytest.mark.parametrize("administrator_tools", [False, True])
+async def test_option_changes_preserve_independent_api_selection(
+    options_setup, ha_boundary, monkeypatch, device_control, administrator_tools
+):
+    monkeypatch.setattr(
+        ha_boundary.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup = options_setup
+    form = await setup.flow.async_step_init()
+    assert form["data_schema"]({})[CONF_ENABLE_HOME_ASSISTANT_API] is False
+    result = await setup.flow.async_step_init(
+        form["data_schema"](
+            {
+                CONF_ENABLE_DEVICE_CONTROL: device_control,
+                CONF_ENABLE_HOME_ASSISTANT_API: administrator_tools,
+            }
+        )
+    )
+
+    expected_apis = []
+    if device_control:
+        expected_apis.append("assist")
+    if administrator_tools:
+        expected_apis.append("homeassistant")
+    assert result["data"][CONF_LLM_HASS_API] == (expected_apis or None)
+    assert result["data"][CONF_ENABLE_HOME_ASSISTANT_API] is administrator_tools
+
+
+async def test_downgrade_allows_disabling_unavailable_administrator_tools(
+    options_setup,
+):
+    setup = options_setup
+    setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    form = await setup.flow.async_step_init()
+    assert form["data_schema"]({})[CONF_ENABLE_HOME_ASSISTANT_API] is True
+    rejected = await setup.flow.async_step_init(form["data_schema"]({}))
+    assert rejected["errors"] == {
+        CONF_ENABLE_HOME_ASSISTANT_API: "home_assistant_api_unavailable"
+    }
+    setup.flow.hass.config_entries.async_update_entry.assert_not_called()
+    result = await setup.flow.async_step_init(
+        rejected["data_schema"]({CONF_ENABLE_HOME_ASSISTANT_API: False})
+    )
+    assert result["data"][CONF_LLM_HASS_API] == ["assist"]
+    assert result["data"][CONF_ENABLE_HOME_ASSISTANT_API] is False
 
 
 @pytest.mark.parametrize(

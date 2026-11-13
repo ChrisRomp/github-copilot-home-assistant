@@ -8,10 +8,20 @@ from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, Unauthorized
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ENABLE_DEVICE_CONTROL, DOMAIN, NAME
+from .const import (
+    CONF_ENABLE_DEVICE_CONTROL,
+    CONF_ENABLE_HOME_ASSISTANT_API,
+    DOMAIN,
+    NAME,
+)
+from .llm_api import (
+    ADMIN_REQUIRED,
+    HOME_ASSISTANT_API,
+    async_available_llm_apis,
+)
 from .runtime import CopilotRuntime
 
 
@@ -34,7 +44,9 @@ class GitHubCopilotConversationEntity(conversation.ConversationEntity):
     def __init__(self, entry: ConfigEntry) -> None:
         self.entry = entry
         self._attr_unique_id = entry.entry_id
-        if entry.options.get(CONF_ENABLE_DEVICE_CONTROL):
+        if entry.options.get(CONF_ENABLE_DEVICE_CONTROL) or entry.options.get(
+            CONF_ENABLE_HOME_ASSISTANT_API
+        ):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
@@ -50,21 +62,55 @@ class GitHubCopilotConversationEntity(conversation.ConversationEntity):
         chat_log: conversation.ChatLog,
     ) -> conversation.ConversationResult:
         """Run one Copilot turn and append streamed messages to the HA log."""
-        try:
+        llm_context = user_input.as_llm_context(DOMAIN)
+        api_ids, admin_notice = await async_available_llm_apis(
+            self.hass, self.entry.options, llm_context.context
+        )
+
+        async def provide_llm_data() -> None:
             await chat_log.async_provide_llm_data(
-                user_input.as_llm_context(DOMAIN),
-                ["assist"]
-                if self.entry.options.get(CONF_ENABLE_DEVICE_CONTROL)
-                else None,
+                llm_context,
+                api_ids,
                 # The backend supplies the owner's literal instructions separately.
                 None,
                 user_input.extra_system_prompt,
             )
+
+        try:
+            await provide_llm_data()
         except conversation.ConverseError as err:
-            return err.as_conversation_result()
+            if (
+                api_ids
+                and HOME_ASSISTANT_API in api_ids
+                and isinstance(err.__cause__, Unauthorized)
+            ):
+                api_ids, admin_notice = await async_available_llm_apis(
+                    self.hass, self.entry.options, llm_context.context
+                )
+                if admin_notice != ADMIN_REQUIRED:
+                    raise HomeAssistantError(
+                        "Home Assistant denied access to administrator tools."
+                    ) from err
+                try:
+                    await provide_llm_data()
+                except conversation.ConverseError as fallback_err:
+                    return fallback_err.as_conversation_result()
+            else:
+                return err.as_conversation_result()
 
         runtime: CopilotRuntime = self.hass.data[DOMAIN][self.entry.entry_id]
         if runtime.backend is None:
             raise HomeAssistantError("GitHub Copilot is not ready.")
-        await runtime.backend.async_handle_message(self.entity_id, user_input, chat_log)
-        return conversation.async_get_result_from_chat_log(user_input, chat_log)
+        await runtime.backend.async_handle_message(
+            self.entity_id, user_input, chat_log, admin_notice=admin_notice
+        )
+        result = conversation.async_get_result_from_chat_log(user_input, chat_log)
+        if admin_notice:
+            speech = result.response.speech.get("plain", {}).get("speech", "")
+            suffix = f"\n\n{admin_notice}"
+            if speech.endswith(suffix):
+                # Preserve HA's follow-up detection based on the model's answer.
+                result.continue_conversation = (
+                    speech[: -len(suffix)].rstrip().endswith(("?", ";", "？"))
+                )
+        return result

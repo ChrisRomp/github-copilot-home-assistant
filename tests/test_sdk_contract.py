@@ -480,7 +480,7 @@ async def test_native_structured_tasks_use_disposable_sessions(
                 "task",
                 module.DataTaskRequest(
                     text=marker,
-                    context=SimpleNamespace(),
+                    context=SimpleNamespace(context=None),
                     structure=vol.Schema(
                         {
                             vol.Required("status"): str,

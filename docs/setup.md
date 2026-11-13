@@ -106,7 +106,9 @@ how the conversation agent and AI Task entity behave.
 ![The configuration dialog with separate Conversation model and AI Task model selectors, a 180-second AI Task timeout, the device-control toggle, and Additional instructions.](images/setup/configure-integration.png)
 
 The selected models are examples; availability depends on your account. The
-screenshot shows device control enabled, but it is **off by default**.
+screenshot shows device control enabled, but it is **off by default**. It
+predates the separate administrator-tools option available on Home Assistant
+2026.11 and newer.
 
 | Setting | What to choose |
 | --- | --- |
@@ -114,6 +116,7 @@ screenshot shows device control enabled, but it is **off by default**.
 | **AI Task model** | Optionally choose a different model for automations. Initially defaults to the conversation model, but later changes to the conversation model do not change it. |
 | **AI Task timeout (seconds)** | Defaults to 180 seconds. This does not change Assist's 60-second timeout. |
 | **Allow control of Assist-exposed devices** | Allows conversations and AI Tasks to use Assist-exposed tools. It is **off by default**. |
+| **Allow Home Assistant administrator tools** | On HA 2026.11 or newer, allows administrator-authenticated conversations and data tasks to access logs, history and configuration, and perform actions such as calling services or reloading integrations. Access is not restricted to Assist-exposed entities. It is **off by default**. |
 | **Additional instructions** | Instructions for conversations only, such as "Keep replies brief and use Celsius." AI Tasks use the instructions supplied by each action. |
 
 For camera or image analysis, choose an AI Task model with vision support.
@@ -123,7 +126,9 @@ of these chat-model selections.
 
 Additional instructions are literal text, not Home Assistant templates. If you
 enable device control, review which entities you have exposed to Assist.
-The integration does not add an extra confirmation step before actions.
+Administrator tools can access more than those entities and send their results,
+including potentially sensitive logs, to GitHub. The integration does not add an
+extra confirmation step before actions.
 
 Select **Submit** to save. When Home Assistant shows **Success**, select
 **Finish**.

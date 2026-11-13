@@ -1,5 +1,6 @@
 """Optional contracts against real HA, not the lightweight boundary doubles."""
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta
@@ -9,7 +10,7 @@ from unittest.mock import AsyncMock, Mock, create_autospec
 import pytest
 import voluptuous as vol
 from copilot.session import CopilotSession
-from copilot.session_events import AssistantMessageData
+from copilot.session_events import AssistantMessageData, AssistantMessageDeltaData
 from copilot.tools import ToolInvocation
 
 pytestmark = pytest.mark.skipif(
@@ -220,6 +221,10 @@ async def test_real_live_context_filters_exposed_entities_without_promoting_data
     hass = HomeAssistant(str(tmp_path))
     backend = None
     try:
+        from homeassistant.helpers import llm
+
+        if hasattr(llm, "LLM_API_HOME_ASSISTANT"):
+            hass.config_entries = SimpleNamespace(async_wait_initialized=AsyncMock())
         dr.async_setup(hass)
         await dr.async_load(hass, load_empty=True)
         await er.async_load(hass, load_empty=True)
@@ -359,4 +364,194 @@ async def test_real_live_context_filters_exposed_entities_without_promoting_data
     finally:
         if backend is not None:
             await backend.async_stop()
+        await hass.async_stop()
+
+
+@pytest.mark.parametrize("device_control", [False, True])
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("question", [False, True])
+async def test_real_administrator_tools_read_logs_and_call_actions(
+    tmp_path, monkeypatch, device_control, streamed, question
+):
+    from homeassistant.components import conversation
+    from homeassistant.core import Context, HomeAssistant, callback
+    from homeassistant.helpers import llm
+
+    if not hasattr(llm, "LLM_API_HOME_ASSISTANT"):
+        pytest.skip("The administrator API was introduced in Home Assistant 2026.11")
+
+    from homeassistant.components import llm as llm_integration
+    from homeassistant.components.config import llm as config_tools
+    from homeassistant.components.history import llm as history_tools
+    from homeassistant.components.homeassistant import llm as homeassistant_tools
+    from homeassistant.components.llm import AssistAPI, HomeAssistantAPI
+    from homeassistant.components.llm import llm as common_tools
+    from homeassistant.components.system_log import llm as system_log_tools
+    from homeassistant.const import KEY_DATA_LOGGING
+
+    from custom_components.github_copilot.backend import ConversationBackend
+    from custom_components.github_copilot.const import DOMAIN
+    from custom_components.github_copilot.conversation import (
+        GitHubCopilotConversationEntity,
+    )
+    from custom_components.github_copilot.llm_api import ADMIN_REQUIRED
+
+    hass = HomeAssistant(str(tmp_path))
+    user = SimpleNamespace(is_admin=True, name="Test administrator")
+    hass.auth = SimpleNamespace(async_get_user=AsyncMock(return_value=user))
+    hass.data["system_log"] = SimpleNamespace(
+        records=SimpleNamespace(
+            to_list=Mock(
+                return_value=[
+                    {
+                        "name": "example.integration",
+                        "message": ["Recorded test warning"],
+                        "level": "WARNING",
+                        "source": ("example.py", 10),
+                        "count": 1,
+                        "timestamp": 1730000000,
+                        "first_occurred": 1730000000,
+                    }
+                ]
+            )
+        )
+    )
+    hass.data[KEY_DATA_LOGGING] = {}
+    hass.data[llm_integration.DATA_PLATFORMS] = SimpleNamespace(
+        async_get_platforms=AsyncMock(
+            return_value={
+                "config": config_tools,
+                "history": history_tools,
+                "homeassistant": homeassistant_tools,
+                "llm": common_tools,
+                "system_log": system_log_tools,
+            }
+        )
+    )
+    calls = []
+
+    @callback
+    def handle_action(call):
+        calls.append(call)
+
+    hass.services.async_register("example", "admin_action", handle_action)
+
+    monkeypatch.setattr(
+        homeassistant_tools, "async_get_exposed_entities", Mock(return_value={})
+    )
+    monkeypatch.setattr(
+        conversation.ChatLog,
+        "_async_expand_prompt_template",
+        AsyncMock(return_value=""),
+    )
+    llm.async_register_api(hass, AssistAPI(hass))
+    llm.async_register_api(hass, HomeAssistantAPI(hass))
+    session = create_autospec(CopilotSession, instance=True)
+    session.session_id = "sdk-session"
+    session.on.return_value = Mock()
+    session.rpc = SimpleNamespace(options=SimpleNamespace(update=AsyncMock()))
+    client = SimpleNamespace(
+        create_session=AsyncMock(return_value=session), delete_session=AsyncMock()
+    )
+    entry = SimpleNamespace(
+        entry_id="entry",
+        data={"auth_method": "pat"},
+        options={
+            "model": "gpt-6-luna",
+            "enable_device_control": device_control,
+            "enable_home_assistant_api": True,
+        },
+    )
+    backend = ConversationBackend(
+        hass,
+        entry,
+        client,
+        AsyncMock(),
+        AsyncMock(return_value=[SimpleNamespace(id="gpt-6-luna")]),
+        access_token_getter=AsyncMock(return_value="test-only"),
+    )
+    entity = GitHubCopilotConversationEntity(entry)
+    entity.hass = hass
+    entity.entity_id = "conversation.github_copilot"
+    hass.data[DOMAIN] = {"entry": SimpleNamespace(backend=backend)}
+    chat = conversation.ChatLog(hass, "conversation")
+    deltas = []
+    chat.delta_listener = lambda _chat, delta: deltas.append(delta)
+    user_input = conversation.ConversationInput(
+        text="Read the log and perform the requested action.",
+        context=Context(user_id="admin"),
+        conversation_id="conversation",
+        device_id=None,
+        satellite_id=None,
+        language="en",
+        agent_id=entity.entity_id,
+    )
+    chat.async_add_user_content(conversation.UserContent(content=user_input.text))
+    tool_results = []
+
+    async def send(*args, **kwargs):
+        tools = {tool.name: tool for tool in session.set_tools.await_args.args[0]}
+        reply = "Done."
+        if user.is_admin:
+            assert {
+                "ha__config__reload_config_entry",
+                "ha__history__get_history",
+                "ha__homeassistant__call_action",
+                "ha__homeassistant__render_template",
+                "ha__system_log__get_entries",
+                "ha__system_log__get_logs",
+            } <= tools.keys()
+            for name, arguments in (
+                ("ha__system_log__get_entries", {"logger": "example"}),
+                ("ha__homeassistant__call_action", {"action": "example.admin_action"}),
+            ):
+                tool_results.append(
+                    await tools[name].handler(
+                        ToolInvocation(
+                            tool_name=name, tool_call_id=name, arguments=arguments
+                        )
+                    )
+                )
+        else:
+            assert "ha__system_log__get_entries" not in tools
+            assert "ha__homeassistant__call_action" not in tools
+            if question:
+                reply = "Which room?"
+            if streamed:
+                session.on.call_args.args[0](
+                    SimpleNamespace(
+                        agent_id=None,
+                        data=AssistantMessageDeltaData(
+                            delta_content=reply, message_id="reply"
+                        ),
+                    )
+                )
+                await asyncio.sleep(0)
+        return SimpleNamespace(
+            data=AssistantMessageData(content=reply, message_id="reply")
+        )
+
+    session.send_and_wait.side_effect = send
+    try:
+        result = await entity._async_handle_message(user_input, chat)
+        assert result.response.speech["plain"]["speech"] == "Done."
+        assert [item.result_type for item in tool_results] == ["success", "success"]
+        assert "Recorded test warning" in tool_results[0].text_result_for_llm
+        assert len(calls) == 1
+        assert calls[0].context.user_id == "admin"
+
+        user.is_admin = False
+        deltas.clear()
+        chat.async_add_user_content(conversation.UserContent(content="Hello again."))
+        result = await entity._async_handle_message(user_input, chat)
+        expected = f"{'Which room?' if question else 'Done.'}\n\n{ADMIN_REQUIRED}"
+        assert result.response.speech["plain"]["speech"] == expected
+        assert result.continue_conversation is question
+        assert "".join(delta.get("content") or "" for delta in deltas) == expected
+        assert chat.content[-1].content == expected
+        assert len(calls) == 1
+        assert client.create_session.await_count == 2
+        assert (chat.llm_api is not None) is device_control
+    finally:
+        await backend.async_stop()
         await hass.async_stop()

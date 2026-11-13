@@ -58,14 +58,18 @@ For a step-by-step walkthrough with screenshots, see the
    with the **Copilot Requests** account permission. Classic PATs are not supported.
 3. Choose a **Conversation model** and, optionally, a different **AI Task model**.
    The task timeout defaults to 180 seconds. You can also enable
-   **Allow control of Assist-exposed devices** and provide conversation-only
-   **Additional instructions** on this setup screen.
+   **Allow control of Assist-exposed devices**, optionally enable administrator
+   tools on Home Assistant 2026.11 or newer, and provide conversation-only
+   **Additional instructions**.
 4. Under **Settings > Voice assistants**, add or edit an assistant and select
    **GitHub Copilot** as its conversation agent.
 
 Device control is off by default and applies to both conversations and AI Tasks.
-Only entities you expose to Assist are available. You can change these settings
-later under **Settings > Devices & services > GitHub Copilot > Configure**.
+It is limited to entities you expose to Assist. The separate administrator-tools
+option is also off by default and requires an authenticated Home Assistant
+administrator for each request. It can read logs and configuration and perform
+administrative actions beyond Assist-exposed entities. Change these settings under
+**Settings > Devices & services > GitHub Copilot > Configure**.
 
 An AI Task entity is created alongside the conversation entity without another
 sign-in. Use it in scripts and automations, or choose it as your preferred provider
@@ -78,7 +82,8 @@ with links to Home Assistant's authoritative documentation.
 Model inference runs through GitHub's cloud service. Prompts, relevant device
 information, and tool results are sent to GitHub Copilot. Credentials and
 temporary conversation files can be included in Home Assistant backups; treat
-those backups as sensitive.
+those backups as sensitive. Logs and configuration may contain sensitive data;
+review the administrator-tools option before enabling it.
 
 Chats expire after five minutes of inactivity, and a Home Assistant restart
 starts fresh conversations. AI Tasks use disposable sessions. Image requests are

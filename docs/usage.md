@@ -5,14 +5,34 @@ the [setup guide](setup.md).
 
 ## Settings
 
-During initial setup, choose a model and optionally enable device control or
-set **Additional instructions** on the same screen. To change these settings
-later, open **Settings > Devices & services > GitHub Copilot > Configure**.
+During initial setup, choose a model and optionally enable device control,
+administrator tools, or **Additional instructions** on the same screen. To
+change these settings later, open **Settings > Devices & services > GitHub
+Copilot > Configure**.
 
 Device control is disabled by default and is limited to entities exposed to
 Home Assistant Assist. The integration does not give the Copilot runtime a
 general Home Assistant REST token. Additional instructions are literal text;
 Home Assistant templates are not expanded.
+
+On Home Assistant 2026.11 or newer, **Allow Home Assistant administrator tools**
+is a separate opt-in for conversations and data tasks. It enables HA's
+administrator API, including tools for logs, history, configuration and
+administrative actions such as calling services and reloading integrations.
+This API is not limited to Assist-exposed entities, even if device control is
+disabled. Results, including potentially sensitive log entries, are sent to
+GitHub Copilot. The integration does not add action confirmation.
+
+Administrator tools require the context of a Home Assistant administrator.
+Non-admin or unauthenticated callers can still chat and use enabled Assist
+tools, but the reply explains that administrator tools are unavailable.
+Automations and voice requests may not carry an administrator identity; data
+tasks continue with their remaining tools and log the restriction without
+changing their requested output structure.
+
+The option is hidden on older HA versions. If HA is downgraded after enabling
+it, the agent continues without administrator tools and reports the restriction;
+disable the option or upgrade HA to remove the warning.
 
 ## AI Tasks
 
@@ -183,10 +203,9 @@ response_variable: driveway
 ```
 
 Use your camera's actual entity ID. Explicitly attached images are sent to
-GitHub even when device control is disabled; that setting controls tools, not
-data you supply. Image contents can contain prompt-injection instructions.
-Keep device control off for read-only use, and expose only devices you intend
-AI-assisted tasks to access.
+GitHub even when tool access is disabled; those settings control tools, not data
+you supply. Image contents can contain prompt-injection instructions. Keep both
+tool options off for tasks that should not access or modify Home Assistant.
 
 Image processing, including SDK resizing, runs on the HA host. Processing is
 serialized across integration entries. Regular-file, MIME, dimension, and payload
@@ -326,7 +345,8 @@ Shared native binaries have a separate
 [runtime cache policy](#runtime-cache-and-manual-recovery); session cleanup does
 not remove them.
 
-Device control only uses the Home Assistant Assist API selected for the request.
+Home Assistant tools come only from the APIs enabled for the request. The
+administrator API has broader access than the Assist device-control API.
 Other SDK permission requests are rejected. Prompt-injection defenses cannot
 eliminate all risk, and the integration adds no extra action-confirmation step.
 For the implementation details, see
