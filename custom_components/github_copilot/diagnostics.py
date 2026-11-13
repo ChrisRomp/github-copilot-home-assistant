@@ -48,5 +48,8 @@ async def async_get_config_entry_diagnostics(
         "native_image_model": getattr(image_model, "id", None),
         "native_image_model_availability": getattr(availability, "value", availability),
         "device_control_enabled": entry.options.get("enable_device_control", False),
+        "home_assistant_api_enabled": entry.options.get(
+            "enable_home_assistant_api", False
+        ),
         "runtime_started": runtime is not None and runtime.is_started,
     }

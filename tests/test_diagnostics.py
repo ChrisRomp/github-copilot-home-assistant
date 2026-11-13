@@ -58,6 +58,7 @@ async def test_diagnostics_platform_returns_only_safe_status(state):
         "native_image_model": None,
         "native_image_model_availability": None,
         "device_control_enabled": True,
+        "home_assistant_api_enabled": False,
         "runtime_started": state == "started",
     }
     assert "private-" not in json.dumps(result)
@@ -86,5 +87,6 @@ async def test_diagnostics_handles_missing_optional_entry_values():
         "native_image_model": None,
         "native_image_model_availability": None,
         "device_control_enabled": False,
+        "home_assistant_api_enabled": False,
         "runtime_started": False,
     }

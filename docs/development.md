@@ -5,8 +5,9 @@ For user-facing setup and behavior, see the [README](../README.md) and
 
 ## Environment and checks
 
-Development uses Python 3.14 and pins Home Assistant 2026.10.0 to exercise the
-minimum supported version. Run these commands from the repository root:
+Development uses Python 3.14. The validation workflow tests Home Assistant
+2026.10.0, the minimum supported version, and 2026.11.0. Run these commands from
+the repository root:
 
 ```sh
 python -m pip install -e '.[dev]'
@@ -214,11 +215,12 @@ conversation/task instructions, SDK safety text, and owner instructions in the
 actual outbound messages, not just the `create_session` arguments.
 
 This separation reduces prompt-injection risk; formatting and model instructions
-alone cannot eliminate it. Context never grants permissions. Only Assist-exposed
-tools are allowed, device access remains opt-in, and other SDK permission
-requests are explicitly rejected. The integration does not give the Copilot
-runtime a general Home Assistant REST token or impose a new action-confirmation
-policy.
+alone cannot eliminate it. Context never grants permissions. Device control and
+the broader administrator API are separate opt-ins; the latter requires an
+authenticated administrator and is not limited to Assist-exposed entities.
+Other SDK permission requests are explicitly rejected. The integration does not
+give the Copilot runtime a general Home Assistant REST token or impose a new
+action-confirmation policy.
 
 If an action result cannot be serialized, the integration reports that the
 action may already have completed and does not replay it.
@@ -229,8 +231,9 @@ action may already have completed and does not replay it.
 The context hook captures the entity, HA chat session, asyncio task, and caller
 context together. The provider hook consumes that record only for the matching
 request, so interleaving, inherited task contexts, and failed preparation do not
-reuse another caller. The backend provisions only Assist tools, with
-`assistant="conversation"` to reuse existing exposure rules.
+reuse another caller. The backend provisions only the selected HA APIs, with
+`assistant="conversation"` for Assist exposure rules. Administrator access
+uses the captured caller context and is checked before each tool call.
 Rejected child callers retain their inherited record so retrying the same
 invalid call cannot bypass provenance checks.
 

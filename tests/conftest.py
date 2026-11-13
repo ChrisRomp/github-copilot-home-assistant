@@ -23,6 +23,10 @@ class _HomeAssistantError(Exception):
     pass
 
 
+class _Unauthorized(_HomeAssistantError):
+    pass
+
+
 class _IssueSeverity(Enum):
     WARNING = "warning"
     ERROR = "error"
@@ -95,6 +99,7 @@ def ha_boundary(monkeypatch):
         },
         "homeassistant.exceptions": {
             "HomeAssistantError": _HomeAssistantError,
+            "Unauthorized": _Unauthorized,
             "ConfigEntryNotReady": type("ConfigEntryNotReady", (Exception,), {}),
         },
         "homeassistant.config_entries": {
@@ -157,6 +162,18 @@ def ha_boundary(monkeypatch):
         spec.loader.exec_module(module)
         return module
 
+    api_path = Path(__file__).parents[1] / "custom_components/github_copilot/llm_api.py"
+    api_name = "custom_components.github_copilot.llm_api"
+    api_spec = importlib.util.spec_from_file_location(api_name, api_path)
+    assert api_spec is not None and api_spec.loader is not None
+    api_module = importlib.util.module_from_spec(api_spec)
+    monkeypatch.setitem(sys.modules, api_name, api_module)
+    api_spec.loader.exec_module(api_module)
+
     return SimpleNamespace(
-        load=load, issues=issues, HomeAssistantError=_HomeAssistantError
+        load=load,
+        issues=issues,
+        llm=sys.modules["homeassistant.helpers.llm"],
+        HomeAssistantError=_HomeAssistantError,
+        Unauthorized=_Unauthorized,
     )

@@ -44,6 +44,7 @@ from .const import (
     CONF_AI_TASK_TIMEOUT,
     CONF_AUTH_METHOD,
     CONF_ENABLE_DEVICE_CONTROL,
+    CONF_ENABLE_HOME_ASSISTANT_API,
     CONF_MODEL,
     CONF_MODEL_BILLING,
     CONF_REFRESH_TOKEN,
@@ -54,6 +55,7 @@ from .const import (
     OAUTH_CLIENT_ID,
     OAUTH_DEVICE_VERIFICATION_URL,
 )
+from .llm_api import home_assistant_api_supported, selected_llm_apis
 from .models import (
     find_fallback_model,
     model_billing,
@@ -198,6 +200,17 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._removed:
             return self.async_abort(reason="oauth_failed")
         if user_input is not None:
+            if (
+                user_input.get(CONF_ENABLE_HOME_ASSISTANT_API)
+                and not home_assistant_api_supported()
+            ):
+                return self.async_show_form(
+                    step_id="model",
+                    data_schema=_options_schema(self._model_options(), user_input),
+                    errors={
+                        CONF_ENABLE_HOME_ASSISTANT_API: "home_assistant_api_unavailable"
+                    },
+                )
             self._credentials[CONF_MODEL_BILLING] = model_billing(
                 user_input[CONF_MODEL], self._models
             )
@@ -213,9 +226,13 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT
                 ),
                 CONF_ENABLE_DEVICE_CONTROL: device_control_enabled,
-                CONF_LLM_HASS_API: ["assist"] if device_control_enabled else None,
                 CONF_PROMPT: user_input.get(CONF_PROMPT, ""),
             }
+            if CONF_ENABLE_HOME_ASSISTANT_API in user_input:
+                options[CONF_ENABLE_HOME_ASSISTANT_API] = user_input[
+                    CONF_ENABLE_HOME_ASSISTANT_API
+                ]
+            options[CONF_LLM_HASS_API] = selected_llm_apis(options)
             return self.async_create_entry(
                 title=NAME,
                 data=self._credentials,
@@ -320,7 +337,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class GitHubCopilotOptionsFlow(OptionsFlow):
-    """Manage prompt, model, and exposed-device access."""
+    """Manage models, instructions, and Home Assistant tool access."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._entry = config_entry
@@ -332,6 +349,17 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
         """Show editable integration options."""
         if user_input is not None:
             options = dict(user_input)
+            if (
+                options.get(CONF_ENABLE_HOME_ASSISTANT_API)
+                and not home_assistant_api_supported()
+            ):
+                return self.async_show_form(
+                    step_id="init",
+                    data_schema=_options_schema(self._model_options(), options),
+                    errors={
+                        CONF_ENABLE_HOME_ASSISTANT_API: "home_assistant_api_unavailable"
+                    },
+                )
             options.setdefault(
                 CONF_AI_TASK_MODEL,
                 self._entry.options.get(CONF_AI_TASK_MODEL, options[CONF_MODEL]),
@@ -339,7 +367,7 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             options.setdefault(CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT)
             device_control_enabled = options[CONF_ENABLE_DEVICE_CONTROL]
             options[CONF_ENABLE_DEVICE_CONTROL] = device_control_enabled
-            options[CONF_LLM_HASS_API] = ["assist"] if device_control_enabled else None
+            options[CONF_LLM_HASS_API] = selected_llm_apis(options)
             selected_model = options[CONF_MODEL]
             billing = model_billing(selected_model, self._models)
             saved_billing = self._entry.data.get(CONF_MODEL_BILLING, {})
@@ -456,41 +484,47 @@ def _options_schema(
     model_options: list[SelectOptionDict], options: Mapping[str, Any]
 ) -> vol.Schema:
     """Build the conversation settings form for setup and later changes."""
-    return vol.Schema(
-        {
-            vol.Required(
-                CONF_MODEL, default=options.get(CONF_MODEL, vol.UNDEFINED)
-            ): SelectSelector(
-                SelectSelectorConfig(options=model_options, custom_value=False)
+    fields = {
+        vol.Required(
+            CONF_MODEL, default=options.get(CONF_MODEL, vol.UNDEFINED)
+        ): SelectSelector(
+            SelectSelectorConfig(options=model_options, custom_value=False)
+        ),
+        vol.Optional(
+            CONF_AI_TASK_MODEL,
+            **(
+                {"default": options[CONF_AI_TASK_MODEL]}
+                if CONF_AI_TASK_MODEL in options
+                else {}
             ),
-            vol.Optional(
-                CONF_AI_TASK_MODEL,
-                **(
-                    {"default": options[CONF_AI_TASK_MODEL]}
-                    if CONF_AI_TASK_MODEL in options
-                    else {}
-                ),
-            ): SelectSelector(
-                SelectSelectorConfig(options=model_options, custom_value=False)
+        ): SelectSelector(
+            SelectSelectorConfig(options=model_options, custom_value=False)
+        ),
+        vol.Required(
+            CONF_AI_TASK_TIMEOUT,
+            default=options.get(CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT),
+        ): vol.All(vol.Coerce(int), vol.Range(min=1)),
+        vol.Required(
+            CONF_ENABLE_DEVICE_CONTROL,
+            default=bool(
+                options.get(CONF_ENABLE_DEVICE_CONTROL, options.get(CONF_LLM_HASS_API))
             ),
+        ): BooleanSelector(),
+    }
+    if home_assistant_api_supported() or options.get(CONF_ENABLE_HOME_ASSISTANT_API):
+        fields[
             vol.Required(
-                CONF_AI_TASK_TIMEOUT,
-                default=options.get(CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT),
-            ): vol.All(vol.Coerce(int), vol.Range(min=1)),
-            vol.Required(
-                CONF_ENABLE_DEVICE_CONTROL,
-                default=bool(
-                    options.get(
-                        CONF_ENABLE_DEVICE_CONTROL, options.get(CONF_LLM_HASS_API)
-                    )
-                ),
-            ): BooleanSelector(),
-            vol.Optional(
-                CONF_PROMPT,
-                description={"suggested_value": options.get(CONF_PROMPT, "")},
-            ): TextSelector(),
-        }
-    )
+                CONF_ENABLE_HOME_ASSISTANT_API,
+                default=bool(options.get(CONF_ENABLE_HOME_ASSISTANT_API, False)),
+            )
+        ] = BooleanSelector()
+    fields[
+        vol.Optional(
+            CONF_PROMPT,
+            description={"suggested_value": options.get(CONF_PROMPT, "")},
+        )
+    ] = TextSelector()
+    return vol.Schema(fields)
 
 
 def _model_label(model: Any) -> str:
