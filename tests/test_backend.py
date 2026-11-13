@@ -2557,6 +2557,36 @@ async def test_data_task_selects_apis_for_caller(
     await assert_clean(setup)
 
 
+async def test_data_task_logs_admin_tools_notice_once(setup, monkeypatch, caplog):
+    monkeypatch.setattr(
+        setup.module.llm, "LLM_API_HOME_ASSISTANT", "homeassistant", raising=False
+    )
+    setup.entry.options[CONF_ENABLE_HOME_ASSISTANT_API] = True
+    setup.backend.hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(return_value=SimpleNamespace(is_admin=False))
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(2):
+            assert (
+                await setup.backend.async_generate_data(
+                    "task", task_request(setup), ChatLog()
+                )
+                == "Hello"
+            )
+
+    notice_records = [
+        record
+        for record in caplog.records
+        if "administrator tools are unavailable for this AI Task" in record.message
+    ]
+    assert [record.levelno for record in notice_records] == [
+        logging.WARNING,
+        logging.DEBUG,
+    ]
+    await assert_clean(setup)
+
+
 async def test_data_task_falls_back_when_admin_is_revoked_during_api_lookup(
     setup, ha_boundary, monkeypatch
 ):

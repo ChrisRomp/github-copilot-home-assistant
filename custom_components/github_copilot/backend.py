@@ -217,6 +217,7 @@ class ConversationBackend:
         self._quota_exceeded = False
         self._rejected_models: dict[str, float] = {}
         self._available_model_ids: set[str] = set()
+        self._admin_tools_warning_logged = False
 
     async def async_handle_message(
         self,
@@ -438,11 +439,17 @@ class ConversationBackend:
                         self.hass, api_ids, request.context
                     )
         if request.admin_notice:
-            _LOGGER.warning(
+            log = (
+                _LOGGER.debug
+                if self._admin_tools_warning_logged
+                else _LOGGER.warning
+            )
+            log(
                 "Home Assistant administrator tools are unavailable for this AI "
                 "Task; continuing with the remaining tools. %s",
                 request.admin_notice,
             )
+            self._admin_tools_warning_logged = True
         if request.structure is not None:
             request.output_schema = prepare_output_schema(
                 request.structure, llm.selector_serializer
