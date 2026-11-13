@@ -103,12 +103,11 @@ Keep tokens private and out of screenshots, issue reports, and chat messages.
 After authentication, the **Configure GitHub Copilot** dialog lets you choose
 how the conversation agent and AI Task entity behave.
 
-![The configuration dialog with separate Conversation model and AI Task model selectors, a 180-second AI Task timeout, the device-control toggle, and Additional instructions.](images/setup/configure-integration.png)
+![The configuration dialog with separate model selectors, a 180-second AI Task timeout, both device-control and administrator-tools switches enabled, and empty Additional instructions.](images/setup/configure-integration.png)
 
 The selected models are examples; availability depends on your account. The
-screenshot shows device control enabled, but it is **off by default**. It
-predates the separate administrator-tools option available on Home Assistant
-2026.11 and newer.
+screenshot shows device control and administrator tools enabled, but both are
+**off by default**. Administrator tools require Home Assistant 2026.11 or newer.
 
 | Setting | What to choose |
 | --- | --- |
