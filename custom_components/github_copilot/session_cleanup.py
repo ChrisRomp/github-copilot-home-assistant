@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from copilot import CopilotClient
 
 _LOGGER = logging.getLogger(__name__)
-VERIFIED_RUNTIME = "1.0.103"
+VERIFIED_RUNTIME = "1.0.109"
 SCAN_LIMIT = 200
 DELETE_LIMIT = 25
 CLEANUP_TIMEOUT_SECONDS = 10
