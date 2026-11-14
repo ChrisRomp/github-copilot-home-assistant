@@ -5,12 +5,12 @@ For user-facing setup and behavior, see the [README](../README.md) and
 
 ## Environment and checks
 
-Development uses Python 3.14. The validation workflow tests Home Assistant
-2026.10.0, the minimum supported version, and 2026.11.0. Run these commands from
-the repository root:
+Development requires Python 3.14.2 or newer. The validation workflow tests Home
+Assistant 2026.10.0, the minimum supported version, and 2026.11.0. Run these
+commands from the repository root:
 
 ```sh
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev]' 'homeassistant==2026.11.0'
 pytest
 ruff check .
 ruff format --check .
@@ -44,6 +44,20 @@ Keep the SDK version pins in `custom_components/github_copilot/manifest.json`
 and `pyproject.toml` in sync. The SDK wheel pins the native runtime version.
 Keep the integration version in those files synchronized with the GitHub
 release tag.
+
+The development HA dependency range retains the minimum supported version so
+the same dependency set can be installed for both CI matrix entries.
+
+Dependabot security updates must remain enabled in the repository settings.
+`.github/dependabot.yml` groups security fixes into separate Python and GitHub
+Actions pull requests; routine version-update PRs are disabled. Security updates
+are not delayed until the configured version-update schedule.
+
+Dependabot's Python updater does not maintain HA's integration manifest. Any SDK
+update must also update that manifest's pin and reverify the native runtime
+contracts and image resource profile before advancing the compatibility gates.
+CI rejects mismatched SDK pins and integration versions; it does not replace
+runtime qualification. Do not auto-merge SDK updates.
 
 See [OAuth setup for maintainers](oauth.md) for OAuth App configuration
 and token lifecycle details.
@@ -296,16 +310,16 @@ Add `--asset-representations` to retain an additional asset payload and repeat i
 by reference alongside the native output, exercising representation-independent
 admission while accounting for other held assets.
 
-With runtime 1.0.103, PNG/JPEG/static GIF/WebP inputs reached the fake model;
-oversized inputs were rejected before inference. The latest profile, including
-generated-PNG pixel decoding after integrity and budget checks, peaked below
-463 MiB for successful input cases and below 497 MiB for the large valid output.
-A deliberately oversized output reached the 512 MiB ceiling and was rejected,
+With runtime 1.0.109 (SDK 1.0.31), PNG/JPEG/static GIF/WebP inputs reached the
+fake model; oversized inputs were rejected before inference. The latest profile, including
+generated-PNG pixel decoding and duplicate asset representations, peaked below
+441 MiB for successful input cases and below 458 MiB for the large valid output.
+A deliberately oversized output was rejected with a peak below 470 MiB,
 without OOM or process death. These numbers include Python, the native runtime,
 and test infrastructure, not a running HA server. Re-profile after changing the
 SDK, input/output bounds, or image processing.
 
-Native generation was verified on runtime 1.0.103, including explicit session
+Native generation was reverified on runtime 1.0.109, including explicit session
 credentials with logged-in-user fallback disabled. The implementation uses
 `session.tools.execute` with only `builtin:image_generation` offered, rather than
 asking a chat model to choose a tool. Permission approval is single-use and bound
@@ -313,6 +327,13 @@ to the tool-call ID and exact prompt arguments; managed approvals are not
 bypassed. It requests `save_to_disk=False`, validates the canonical PNG, and
 deduplicates duplicate output representations. Referenced binary assets are
 handled only within the owning task.
+
+The live requalification used the existing GitHub CLI sign-in, passed its token
+only in memory as an explicit session credential, and made one synthetic image
+request with no chat model selected. The production image collector accepted
+the returned PNG, no image file was saved by the runtime, and the disposable
+session was removed. This live check requires separate authorization because it
+consumes account usage; the loopback-only resource probe cannot replace it.
 
 The image contract/resource gates are enabled for the verified runtime. A new
 runtime version does not automatically inherit image support: its contracts and

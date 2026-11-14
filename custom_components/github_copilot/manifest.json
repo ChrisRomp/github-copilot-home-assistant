@@ -8,6 +8,6 @@
   "documentation": "https://github.com/ChrisRomp/github-copilot-home-assistant",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/ChrisRomp/github-copilot-home-assistant/issues",
-  "requirements": ["github-copilot-sdk==1.0.26"],
-  "version": "0.3.0"
+  "requirements": ["github-copilot-sdk==1.0.31"],
+  "version": "0.4.0"
 }

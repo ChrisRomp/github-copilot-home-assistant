@@ -403,6 +403,12 @@ On Home Assistant 2026.11 or newer, updates appear under **Settings > Updates**.
 On 2026.10, use HACS to update. Restart Home Assistant after updating an
 already-loaded integration.
 
+Version 0.4.0 adds optional administrator tools on Home Assistant 2026.11 or
+newer. They remain disabled for existing entries unless enabled in the
+integration's options, and each request requires an authenticated administrator.
+Existing conversation, AI Task, and Assist device-control settings are preserved.
+Home Assistant 2026.10 remains supported without administrator tools.
+
 Upgrading from 0.2.x to 0.3.0 adds an AI Task entity to each existing entry without
 another sign-in. Its model is initially copied from the saved conversation model
 and then remains independently configurable; its timeout defaults to 180 seconds.
