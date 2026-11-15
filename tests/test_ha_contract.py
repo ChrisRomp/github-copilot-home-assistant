@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -105,6 +106,89 @@ async def test_real_chat_memory_keeps_user_input_and_provenance_unchanged(tmp_pa
     finally:
         await backend.async_stop()
         await manager.async_close()
+        await hass.async_stop()
+
+
+async def test_real_entry_removal_reports_orphaned_memory(
+    tmp_path, monkeypatch, caplog
+):
+    from pathlib import Path
+    from types import MappingProxyType
+
+    from homeassistant.config_entries import ConfigEntries, ConfigEntry
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+    from homeassistant.helpers import issue_registry as ir
+    from homeassistant.helpers.storage import Store
+
+    from custom_components import github_copilot
+    from custom_components.github_copilot.const import DOMAIN
+    from custom_components.github_copilot.memory import MemoryManager
+
+    hass = HomeAssistant(str(tmp_path))
+    try:
+        hass.config_entries = ConfigEntries(hass, {})
+        await hass.config_entries.async_initialize()
+        if setup_devices := getattr(dr, "async_setup", None):
+            setup_devices(hass)
+        await dr.async_load(hass)
+        await er.async_load(hass)
+        await ir.async_load(hass)
+        entry = ConfigEntry(
+            domain=DOMAIN,
+            entry_id="entry",
+            title="GitHub Copilot",
+            data={},
+            options={},
+            version=1,
+            minor_version=2,
+            source="user",
+            unique_id=None,
+            discovery_keys=MappingProxyType({}),
+            subentries_data=None,
+        )
+        entry._integration_for_domain = SimpleNamespace(
+            domain=DOMAIN,
+            logger=logging.getLogger("homeassistant.components.github_copilot"),
+            async_get_component=AsyncMock(return_value=github_copilot),
+        )
+        hass.config_entries._entries[entry.entry_id] = entry
+        memory = MemoryManager(hass, entry.entry_id)
+        saved = await memory.async_tool(
+            "ha_memory_save",
+            {
+                "text": "PRIVATE_HOUSEHOLD_FACT",
+                "source": "PRIVATE_HOUSEHOLD_FACT",
+                "expected_revision": 0,
+            },
+            "PRIVATE_HOUSEHOLD_FACT",
+        )
+        assert saved["status"] == "saved"
+        original = Path(memory.store.path).read_bytes()
+        await memory.async_close()
+        original_remove = Store.async_remove
+
+        async def fail_memory_remove(store):
+            if store.key == memory.key:
+                raise PermissionError("PRIVATE_FILESYSTEM_DETAIL")
+            await original_remove(store)
+
+        monkeypatch.setattr(Store, "async_remove", fail_memory_remove)
+        result = await hass.config_entries.async_remove(entry.entry_id)
+        assert result == {"require_restart": False}
+        assert hass.config_entries.async_get_entry(entry.entry_id) is None
+        assert Path(memory.store.path).read_bytes() == original
+        issue = ir.async_get(hass).async_get_issue(
+            DOMAIN, "memory_cleanup_failed_entry"
+        )
+        assert issue is not None
+        assert issue.is_persistent
+        assert issue.translation_key == "memory_cleanup_failed"
+        assert issue.translation_placeholders == {"filename": memory.key}
+        assert "PRIVATE_HOUSEHOLD_FACT" not in caplog.text
+        assert "PRIVATE_FILESYSTEM_DETAIL" not in caplog.text
+    finally:
         await hass.async_stop()
 
 

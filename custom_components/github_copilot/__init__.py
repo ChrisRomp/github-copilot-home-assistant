@@ -148,6 +148,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     from .const import (
         DATA_CREDENTIAL_LOCKS,
+        ISSUE_MEMORY_CLEANUP_FAILED,
         ISSUE_MODEL_FALLBACK,
         ISSUE_MODEL_UNAVAILABLE,
         ISSUE_QUOTA_EXCEEDED,
@@ -162,15 +163,29 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         await runtime.async_stop()
         _remove_stopped_runtime(hass, entry, runtime)
 
-    memory_error: OSError | None = None
+    memory = MemoryManager(hass, entry.entry_id)
+    memory_issue_id = f"{ISSUE_MEMORY_CLEANUP_FAILED}_{entry.entry_id}"
     try:
-        await MemoryManager(hass, entry.entry_id).async_remove()
+        await memory.async_remove()
     except OSError as err:
-        memory_error = err
         _LOGGER.error(
             "Unable to remove shared memory (%s); continuing other entry cleanup",
             type(err).__name__,
         )
+        # HA removes the entry even when this callback raises. Keep the warning
+        # independent of the entry so HA's registry cleanup does not erase it.
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            memory_issue_id,
+            is_fixable=False,
+            is_persistent=True,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_MEMORY_CLEANUP_FAILED,
+            translation_placeholders={"filename": memory.key},
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, memory_issue_id)
     await asyncio.to_thread(remove_entry_directory, hass, entry.entry_id)
     hass.data.get(DATA_CREDENTIAL_LOCKS, {}).pop(entry.entry_id, None)
 
@@ -182,5 +197,3 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ISSUE_TASK_MODEL_UNAVAILABLE,
     ):
         ir.async_delete_issue(hass, DOMAIN, f"{issue}_{entry.entry_id}")
-    if memory_error is not None:
-        raise memory_error

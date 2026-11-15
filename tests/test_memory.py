@@ -392,6 +392,8 @@ async def test_memory_unlink_failure_still_cleans_other_entry_state(
     memory.hass.data[DATA_CREDENTIAL_LOCKS] = {"entry": object(), "other": other_lock}
     delete_issue = Mock()
     monkeypatch.setattr(ir, "async_delete_issue", delete_issue)
+    create_issue = Mock()
+    monkeypatch.setattr(ir, "async_create_issue", create_issue)
     original_remove = Store.async_remove
 
     async def fail_memory_remove(store):
@@ -400,14 +402,16 @@ async def test_memory_unlink_failure_still_cleans_other_entry_state(
         await original_remove(store)
 
     monkeypatch.setattr(Store, "async_remove", fail_memory_remove)
-    with pytest.raises(PermissionError):
-        await async_remove_entry(
-            memory.hass, SimpleNamespace(entry_id="entry", options={})
-        )
+    await async_remove_entry(memory.hass, SimpleNamespace(entry_id="entry", options={}))
     assert Path(memory.store.path).read_bytes() == original
     assert not session_state.exists()
     assert memory.hass.data[DATA_CREDENTIAL_LOCKS] == {"other": other_lock}
     assert delete_issue.call_count == 5
+    create_issue.assert_called_once()
+    assert create_issue.call_args.kwargs["translation_key"] == "memory_cleanup_failed"
+    assert create_issue.call_args.kwargs["translation_placeholders"] == {
+        "filename": memory.key
+    }
     assert "continuing other entry cleanup" in caplog.text
     assert "PRIVATE_FILESYSTEM_DETAIL" not in caplog.text
     assert "Warm reading lights" not in caplog.text

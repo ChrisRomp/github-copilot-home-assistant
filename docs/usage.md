@@ -5,30 +5,25 @@ the [setup guide](setup.md).
 
 ## Settings
 
-During initial setup, choose a model and optionally enable device control,
-administrator tools, or **Additional instructions** on the same screen. To
-change these settings later, open **Settings > Devices & services > GitHub
-Copilot > Configure**.
+Choose your models, optional device control, administrator tools, shared memory,
+and **Additional instructions** under **Settings > Devices & services > GitHub
+Copilot > Configure**. These options are also available during initial setup.
 
 Device control is disabled by default and is limited to entities exposed to
-Home Assistant Assist. The integration does not give the Copilot runtime a
-general Home Assistant REST token. Additional instructions are literal text;
+Home Assistant Assist. Additional instructions are literal text;
 Home Assistant templates are not expanded.
 
 On Home Assistant 2026.11 or newer, **Allow Home Assistant administrator tools**
-is a separate opt-in for conversations and data tasks. It enables HA's
-administrator API, including tools for logs, history, configuration and
-administrative actions such as calling actions or reloading integrations.
-This API is not limited to Assist-exposed entities, even if device control is
+is a separate opt-in for conversations and data tasks. It allows access to logs,
+history, configuration, and administrative actions such as reloading integrations.
+This access is not limited to Assist-exposed entities, even if device control is
 disabled. Results, including potentially sensitive log entries, are sent to
 GitHub Copilot.
 
-Administrator tools require the context of a Home Assistant administrator.
-Non-admin or unauthenticated callers can still chat and use enabled Assist
-tools, but the reply explains that administrator tools are unavailable.
-Automations and voice requests may not carry an administrator identity; data
-tasks continue with their remaining tools and log the restriction without
-changing their requested output structure.
+Administrator tools require an authenticated Home Assistant administrator.
+Other users can still chat and use enabled Assist tools, but administrator tools
+are unavailable to them. Automations and voice requests may not identify an
+administrator, so these tools may be unavailable there too.
 
 The option is hidden on older HA versions. If HA is downgraded after enabling
 it, the agent continues without administrator tools and reports the restriction;
@@ -36,74 +31,45 @@ disable the option or upgrade HA to remove the warning.
 
 ## Shared memory
 
-**Enable shared memory** is off by default. Once enabled, the conversation model
-may automatically save clearly stated, durable, non-sensitive household facts;
-you do not have to say "remember this." Everyone who can use this integration
-entry's conversation agent can recall, change, or forget the same collection.
-Separate integration entries have separate stores. There is no per-user privacy
-or voice-speaker identification.
+**Enable shared memory** is off by default. Turn it on to let Copilot remember
+lasting household preferences across conversations, such as how you like your
+reading lights. It may remember clearly stated facts automatically; you do not
+have to say "remember this."
 
-Memory works with device control and administrator tools disabled. It grants no
-additional HA permissions, and a saved preference is not an automation. Data and
-image AI Tasks neither receive memories nor have memory tools.
+Everyone using the same GitHub Copilot integration entry shares its memories
+and can change or forget them. Separate entries keep separate memories. Copilot
+does not identify individual voices or keep private memories for each person.
 
-| Say | Intended behavior |
+Memory works without enabling device control or administrator tools. Remembering
+a preference does not create an automation or give Copilot permission to act.
+AI Tasks do not use shared memory.
+
+| Say | What to expect |
 | --- | --- |
-| "We prefer warm lighting for reading." | Save a shared, durable preference. |
-| "Set the lights to warm tonight." | Treat it as temporary, not a durable memory. |
-| "What do you remember?" | List the current collection. |
-| "Actually, use brighter reading lights from now on." | Update the superseded preference. |
-| "Forget our reading-light preference." | Delete the selected fact. |
-| "Forget everything you have remembered." | Delete all current facts. |
+| "We prefer warm lighting for reading." | Remember the preference. |
+| "Set the lights to warm tonight." | Treat it as a request for tonight, not something to remember. |
+| "What do you remember?" | Show the saved memories. |
+| "Actually, use brighter reading lights from now on." | Replace the old preference. |
+| "Forget our reading-light preference." | Forget that preference. |
+| "Forget everything you have remembered." | Clear all saved memories. |
 
-The store holds up to **50 facts**, each up to **300 characters**. All facts are
-available as reference context, not selected by a search engine. At capacity,
-the agent can replace a clearly superseded fact in the same save; it must not
-silently evict other facts. Exact duplicates and updates remain possible. If no
-safe replacement exists, it should report capacity and ask you. There is no
-age-based expiry, oldest-first eviction, or background curator.
-An update that would duplicate a different existing fact is rejected explicitly,
-not reported as unchanged. The agent can then explicitly forget the superseded
-fact rather than silently merging or deleting records.
+Copilot can remember up to **50 facts**, each up to **300 characters**. When
+memory is full, it can update a preference you have changed or ask what to
+forget. It should not discard unrelated facts to make room, and memories do not
+expire with age. Changes made in another chat are available on your next turn.
+Copilot can make mistakes, so ask what it remembers and correct anything wrong.
 
-Recall uses a full snapshot on the first turn, after a changed inventory, and
-after SDK context compaction, reset, truncation, or rewind. Unchanged turns do not
-append identical copies. Another chat's changes are reflected on your next turn. Within a turn,
-the list tool can retrieve the authoritative inventory. Model interpretation is
-probabilistic: these policies are instructions, not a guarantee that the model
-will always choose the right fact to save or replace.
-The source-excerpt check verifies that quoted text appeared in the request, not
-that it supports the proposed fact or authorizes forgetting. Requests sent by
-automations through `conversation.process` also count as user requests. Do not
-forward untrusted entity or external text as instructions; shared memory can
-amplify the consequences of a model following injected instructions.
+Saved memories stay in Home Assistant and are sent to GitHub Copilot when used.
+Do not store secrets or information intended for only one household member.
+Memories survive restarts and integration reloads. Turning memory off stops its
+use but keeps your saved facts; turning it back on restores them. Removing the
+integration entry deletes its saved memories.
 
-The versioned JSON store is
-`<config>/.storage/github_copilot.memory.<entry-id>`. It is HA-managed, not an
-editable Markdown file. Writes are atomic with private file permissions, **not
-encryption**. Each fact includes a short supporting excerpt of the actual user
-request and timestamps, not a complete transcript or user identifier. Stored
-facts are sent to GitHub Copilot when recalled; never store secrets or private
-information intended for only one household member.
-
-Disabling memory stops recall and tool access but retains its file. Re-enabling,
-reloading, restarting HA, and SDK session cleanup preserve the collection.
-Removing the integration entry deletes its memory store, even when disabled or
-unloaded. A memory-removal failure is reported even when other entry cleanup
-succeeds. Invalid or unreadable storage is reported and preserved, not reset.
-With memory enabled, this prevents startup or fails conversation turns before
-sending them to Copilot. Disable shared memory to continue without recall, or
-restore a valid backup while the integration entry is unloaded. Editing,
-replacing, or deleting the store while the entry is running is unsupported.
-
-Forgetting removes facts from future current snapshots, **not** earlier messages
-in active chats, already-sent model requests, or existing HA backups. Earlier
-chat files still follow the [session retention policy](#conversation-data-and-privacy).
-Diagnostics report only memory's enabled flag and an aggregate count (unknown
-when not loaded), never fact text or source quotations.
-Memory tool arguments and results are part of HA conversation history and may
-also appear in Assist debug traces; those can include facts, source excerpts,
-and full snapshots. Forgetting does not retroactively remove them.
+Forgetting a fact does **not** erase it from earlier chats, requests already sent
+to GitHub, Home Assistant debug traces, or backups. See
+[conversation data and privacy](#conversation-data-and-privacy).
+If Copilot reports that memory is unavailable, see
+[shared memory errors](#shared-memory-errors).
 
 ## AI Tasks
 
@@ -121,8 +87,7 @@ under **Settings > System > AI** before omitting `entity_id`. This integration
 does not change that preference automatically. A voice assistant and device
 control are not required to generate text, analyze attachments, or generate images.
 
-The **AI Task model** is independent of the conversation model. Existing entries
-initially copy their saved conversation model and billing snapshot once.
+The **AI Task model** is independent of the conversation model.
 **Additional instructions** apply only to conversations; each task supplies its
 own instructions. The task timeout defaults to 180 seconds and is configurable.
 Assist retains its 60-second timeout.
@@ -174,92 +139,40 @@ response_variable: comfort
 ```
 
 The response contains `data` and `conversation_id`. In this example,
-`{{ comfort.data.summary }}` is the generated summary. Structured results are
-validated against HA's selector schema. Unsupported structures, invalid JSON,
-missing required values, and invalid results fail explicitly; the integration
-does not substitute unstructured text. Open-ended object selectors are not
-supported by the strict output adapter.
+`{{ comfort.data.summary }}` is the generated summary. Results must match the
+fields you requested; otherwise the task returns an error rather than
+substituting unstructured text. Open-ended object selectors are not supported.
 
-Multi-select fields, bounded numbers, and fixed-length arrays such as RGB colors
-are supported. Provider schemas use textual hints for uniqueness, numeric
-constraints, and array lengths that are not accepted by all models' strict output
-APIs. The original HA selectors still validate the returned selections, numeric
-bounds, and array lengths.
-
-If a model rejects the structured response schema, the error names the model
-and recommends simplifying the structure or selecting another AI Task model.
-This is different from HA rejecting an invalid generated result. Integration
-warning summaries distinguish `provider_schema_rejected` from
-`output_validation_failed`, identify the active model, and include recognized
-unsupported schema keywords when available. These summaries omit prompts,
-schemas, generated values, and raw provider error payloads. Neither failure
-automatically retries the task or switches models.
+If the model rejects your structure, simplify it or choose another **AI Task
+model**. The integration does not automatically retry failed tasks or switch
+models for invalid output. A correctly formatted response can still contain
+factual mistakes.
 
 ### Device access and session lifecycle
 
 Enabling **Allow control of Assist-exposed devices** also enables those tools
-for data tasks. Disabled means no device tools, not merely an instruction to
-avoid them. Tasks use the existing Assist exposure choices and the action's
-caller context. No extra confirmation step is added. A task may have completed
-device actions before a timeout or output-validation failure; such requests are
-never automatically replayed. Caller-supplied custom LLM APIs are not supported.
+for data tasks, using your existing Assist exposure choices. No extra
+confirmation step is added. A task may have completed device actions before
+timing out or returning an error, so failed requests are not automatically
+repeated.
 
 At most two requests run per entry, with at most one AI Task at a time, so tasks
-cannot occupy both conversation slots. Busy requests fail promptly. Use HA's
-queued automation/script mode when that caller should wait rather than overlap;
-there is no integration-owned queue.
+cannot occupy both conversation slots. If tasks overlap, you may get a busy
+error. Use HA's queued automation/script mode when tasks should wait their turn.
 
-Each task uses a fresh SDK session that is deleted on completion or failure.
-HA still owns its automation traces, chat-log retention, and input media.
-Repeated task names do not share SDK history.
+Each task starts fresh, even if you reuse its name. Home Assistant may still
+retain automation traces and input media. See
+[conversation data and privacy](#conversation-data-and-privacy).
 
-Session disposal has its own cleanup deadlines; a response completed within the
-task timeout is not discarded merely because disconnecting takes longer.
-Cancellation still attempts deletion. If abort fails or native cleanup stops
-responding, the integration force-stops that runtime and schedules a reload without replaying
-requests. This can interrupt other conversations on the same entry. Forced
-termination or failed deletion can leave SDK files behind; backups remain
-sensitive. If termination cannot be confirmed, image work stays blocked until
-the runtime can be stopped safely.
-
-On integration startup or reload, a bounded cleanup pass attempts to remove
-abandoned SDK sessions from that entry's `session-state` directory before
-admitting new requests. A periodic pass runs after 24 hours, then waits another
-24 hours after each attempt. These defaults are fixed; there is no retention
-setting or extra retention period for abandoned data.
-
-Each pass checks at most 200 directory entries and attempts at most 25 deletions
-with a 10-second maintenance budget. Deletions are sequential, and maintenance
-passes are serialized across entries. Scan progress carries forward between
-passes so protected or failing candidates do not indefinitely hide a backlog.
-An unfinished operation remains owned after a timeout; no overlapping replacement
-is started. The budget cannot interrupt an operating-system filesystem call or
-undo a deletion already issued to the native runtime.
-
-Live conversations, AI Tasks, and sessions being created or disposed are
-protected regardless of age. The verified native runtime also refuses deletion
-of sessions owned by another process. Linked directories and unrecognized names
-are not followed or removed. Cleanup does not require working authentication or
-a model, and does not resume old conversations.
-
-Failures, deferred work, and limits produce warnings without session contents or
-IDs; outcome summaries include removed, protected, skipped, and failed counts.
-Remaining data can be revisited on a later daily pass or startup. This is
-best-effort recovery, not a guarantee of capped disk usage or a maximum retention
-age. A large backlog can require multiple passes. Restart or reload resets the
-daily timer and in-memory scan progress; missed passes are not replayed.
-
-Cleanup is disabled on native runtime versions whose ownership safeguards have
-not been verified. Credentials, shared runtime caches, HA traces, generated
-media, and existing backups are not removed by these passes.
+If a request gets stuck, the integration may reload to recover. This can
+interrupt other conversations using the same entry; requests are not replayed
+after recovery.
 
 ### Camera and image analysis
 
-Choose an AI Task model that reports vision support and image limits. Static
+Choose an AI Task model that supports image analysis. Static
 PNG, JPEG, WebP, and GIF inputs are supported when the selected model accepts the
 format. Animated images, arbitrary files, and remote URLs are not supported.
-If limits are unavailable after refreshing model discovery, the task fails
-explicitly rather than guessing a safe default.
 
 ```yaml
 action: ai_task.generate_data
@@ -278,37 +191,20 @@ GitHub even when tool access is disabled; those settings control tools, not data
 you supply. Image contents can contain prompt-injection instructions. Keep both
 tool options off for tasks that should not access or modify Home Assistant.
 
-Image processing, including SDK resizing, runs on the HA host. Processing is
-serialized across integration entries. Regular-file, MIME, dimension, and payload
-checks happen before expensive decoding or inference. A conservative admission
-budget accounts for decoded pixels and the SDK's multiple encoded-payload copies;
-it is not a fixed image-count allowance or a promise of 64 MiB total process RAM.
-The model's limits also apply.
+Large or numerous images may be rejected to protect your Home Assistant device,
+even when the model itself accepts them. Start with a **720p or 1080p JPEG
+sub-stream entity** if your camera integration provides one. If an image is too
+large, reduce its resolution, use a compressed JPEG, or attach fewer images.
+4K snapshots exceed the current limits.
 
-Structured validation checks the response shape, not whether descriptions or
-counts are factually correct.
-
-Large or numerous images can exceed the host budget even when the model accepts
-them. Use a lower-resolution camera/image source, compressed JPEGs, or fewer
-attachments rather than retrying unchanged input. HA resolves media before this
-integration receives it, so lower-resolution source configuration matters too.
-The bounded Linux ARM64 profile is described in the [development guide](development.md#ai-task-boundaries);
-it is not a performance guarantee for every Green, Yellow, or Raspberry Pi installation.
-
-For camera snapshots, start with a **720p or 1080p JPEG sub-stream entity** when
-your camera integration provides one. A 1920x1080 JPEG around 400 KB fits the
-current host estimate. A 2560x1440 snapshot leaves room for only a very small
-compressed file (roughly 175 KiB for the first image), and 3840x2160 / 4K exceeds
-the pixel allowance regardless of compression. These are examples, not a fixed
-2 MP limit; multiple images share the payload budget. Shrinking a camera card
-on the dashboard does not reduce the snapshot attached by `media-source://camera/`.
+Change the camera source itself: shrinking a camera card on the dashboard does
+not reduce the snapshot attached to a task.
 
 ### Image generation
 
-`ai_task.generate_image` is available only when the verified runtime reports an
-authorized default image model for your account. It is independent of the
-conversation and AI Task chat-model choices. No chat-model turn or HA device tools
-are used; only the explicitly requested native image operation is permitted.
+`ai_task.generate_image` is available when your Copilot account has access to
+image generation. It uses a separate image model, not your selected conversation
+or AI Task chat model, and does not use HA device tools.
 
 ```yaml
 action: ai_task.generate_image
@@ -320,11 +216,9 @@ response_variable: illustration
 ```
 
 The response includes `url`, `media_source_id`, `conversation_id`, dimensions,
-and the image model when reported. Home Assistant publishes the PNG through
-its AI Task media source, storing it in `ai_task/image` under the first configured
-media directory. HA does not automatically delete these images, so repeated
-generation increases disk usage. Neither signed URL expiry nor SDK session
-cleanup deletes stored images.
+and the image model when reported. Home Assistant keeps generated images until
+you delete them, so repeated generation increases disk usage. An expired image
+URL does not delete the saved image.
 
 On HA 2026.11 or later, use the administrator-only
 [`ai_task.clear_images`](https://www.home-assistant.io/actions/ai_task.clear_images/)
@@ -337,10 +231,10 @@ media cleanup, and the action is unavailable on our minimum supported HA version
 Cleanup covers the shared AI Task image folder across all providers, not just
 GitHub Copilot, and does not protect images referenced by dashboards or
 automations. Copy images you want to keep outside that folder before cleanup.
-Generated images and active SDK session data may be included in backups;
+Generated images and conversation data may be included in backups;
 deleting the originals does not remove copies from existing backups.
 
-Image-generation usage is charged according to the native image model, not
+Image-generation usage is charged according to the image model, not
 the selected chat model's multiplier. Generation is never automatically retried,
 including after a timeout, because usage may already have occurred. Reference
 images/editing are not supported by this release; omit `attachments` from
@@ -348,52 +242,24 @@ generation requests.
 
 ## Model selection and fallback
 
-If initial model discovery fails transiently, the startup check retries in the
-background after 5 and 15 seconds. A successful discovery refreshes image
-capabilities without requiring a text request. Unknown image capabilities remain
-disabled, and confirmed authentication/quota errors or a successfully retrieved
-catalog do not trigger these retries. If retries are exhausted, check the logs,
-correct the connection problem, and reload the integration.
+The model picker shows the models currently available to your account, including
+any organization restrictions and known billing multipliers.
 
-Each time you open the configuration dialog, the integration asks Copilot for
-the current list of models. Models disabled by account or organization policy
-are omitted.
+If your chosen model becomes unavailable, Copilot tries the closest available
+version in the same family and shows a notice in **Settings > Repairs**. Your
+saved choice is preserved and will be used again if it becomes available.
+If no suitable replacement exists, choose another model in **Configure**.
 
-The integration also checks the selected model when it starts and before every
-conversation turn and AI Task, including ongoing chats. It reuses the list for up to an hour
-and refreshes it immediately after a model/request failure. If the selected
-model is no longer available:
+Automatic fallback does not exceed your selected model's last known billing
+multiplier. If that cost is unknown, the Repair notice warns that cost may
+differ. A replacement with unknown cost is not automatically selected when the
+original cost is known.
 
-- It uses the closest available version in the same family. Families are inferred
-  by removing version numbers from model IDs, so `claude-sonnet-4.5` can fall
-  back to `claude-sonnet-5` and `gpt-6-sol` to `gpt-6.1-sol`. Variants such as
-  `gpt-5.6-sol-fast` count as a different family. A fallback is logged as a
-  warning and shown in **Settings > Repairs**. Your saved choice isn't changed,
-  so the original model is used again if it returns. Existing sessions switch
-  models without discarding conversation history.
-- Known billing multipliers appear in the model picker and fallback Repair.
-  Automatic fallback does not exceed the selected model's last known multiplier.
-  If that baseline is unknown, the Repair warns that cost may differ; if the
-  baseline is known but a replacement's cost is unknown, it is not auto-selected.
-- If no eligible model in the same family is available, conversations fail with
-  an error that names the missing model, and Repairs asks you to choose another.
-
-When the configuration dialog opens, it never preselects an unavailable model.
-It preselects the fallback, if there is one, or the first available model, and
-explains what changed.
-
-Conversation and task model fallbacks and Repairs are tracked separately.
-One role succeeding does not clear the other role's model-availability notice.
-The task fallback notice lists both text/structured-data and image-analysis
-choices, since vision requirements can select a different model. Alternating
-request types does not replace one notice with the other.
-
-If a model disappears during a request, the error names that model and, when
-available, its replacement for the next message. The failed request is not
-automatically replayed, since it may already have produced output or controlled
-a device. If discovery still lists a model that the API explicitly rejected,
-that model is excluded from conversation use for up to an hour before it is
-considered again.
+Conversation and AI Task models have separate fallback notices. Image-analysis
+tasks may need a different replacement because they require vision support.
+If a model becomes unavailable during a request, the replacement is used for
+the next request; the failed request is not repeated because it may already
+have controlled a device or consumed usage.
 
 ## Conversation data and privacy
 
@@ -401,72 +267,34 @@ Prompts, the information needed to answer them, and tool results are sent to
 GitHub Copilot. Model inference runs in GitHub's cloud service, not on your
 Home Assistant device.
 
-Conversations have a five-minute idle limit and are isolated by conversation,
-user, and originating device. The SDK can write session files while a chat is
-active. The integration deletes its SDK sessions when HA releases a chat, when
-an idle session is cleaned up, and during normal unload or shutdown.
+Conversations expire after five minutes of inactivity. Restarting Home Assistant
+starts fresh chats, but any enabled shared memories remain available.
 
-An abrupt exit or failed cleanup can leave files behind; startup and daily
-cleanup attempt bounded recovery of abandoned SDK sessions. Backups taken while
-a chat is active or residual files remain may include conversation data.
-Cleanup does not rewrite existing backups. A Home Assistant restart starts fresh
-conversations, not restored SDK sessions. Credentials and settings remain in HA's
-config-entry storage; treat that storage and Home Assistant backups as sensitive.
-Shared native binaries have a separate
-[runtime cache policy](#runtime-cache-and-manual-recovery); session cleanup does
-not remove them.
+Temporary conversation data can be saved on your Home Assistant device. The
+integration cleans up its expired chats and retries leftover files at startup
+and daily, but an unexpected shutdown or cleanup failure can leave data behind.
+Home Assistant can also retain debug traces, automation traces, and backups
+containing conversation data. Deleting a chat or memory does not erase those
+copies or requests already sent to GitHub. Treat backups as sensitive: they may
+also contain credentials, settings, and generated images.
 
-Home Assistant tools come only from the APIs enabled for the request. The
-administrator API has broader access than the Assist device-control API.
-Other SDK permission requests are rejected. Prompt-injection defenses cannot
-eliminate all risk, and the integration adds no extra action-confirmation step.
-For the implementation details, see
-[instructions and tool permissions](development.md#instructions-and-tool-permissions).
+Copilot can only use the Home Assistant tools you enable. Administrator tools
+have broader access than Assist device control. There is no extra confirmation
+step before actions, and protections against misleading instructions in device
+or external data cannot eliminate all risk. Keep tool access off for tasks that
+should only generate text or analyze images. Do not turn untrusted external
+content into instructions in your automations.
 
 ## Runtime cache and manual recovery
 
-The SDK-pinned native runtime is downloaded and checksum-verified into
-`<config>/.storage/github_copilot/runtime/<runtime-version>/`. This cache survives
-restarts and container replacement.
+The integration keeps downloaded runtime files so it does not need to download
+them on every restart. On supported Linux hosts, it removes unused older
+versions when it can do so safely. Downgrading may require another download.
 
-On supported Linux hosts, one bounded cleanup pass runs after successful
-integration setup and HA startup. It keeps the current pinned version and may
-remove obsolete versions, including abandoned downloads. Versions still used by
-another runtime process, including an orphan from an earlier HA instance, are
-retained. If process ownership cannot be checked safely, nothing uncertain is
-removed. Other platforms retain the cache for manual cleanup.
-
-There is no reserved rollback version: after cleanup, downgrading the integration
-may require downloading the older runtime again. Keep access to GitHub or your
-configured runtime download source available. Failed upgrades do not trigger
-cleanup. Large caches, interrupted deletion, and safety deferrals may leave
-versions or `.pruning-*` directories until a later restart. Cleanup affects future
-backup contents, not backups already taken.
-
-After a rollback, a running current-pin runtime can also retain leftover
-`.pruning-<pin>-*` trash. Original command-line paths cannot reliably distinguish
-users of the rebuilt runtime from users of its trash, so cleanup keeps both.
-Restarts alone may not reclaim that trash while the version remains active; use
-the manual recovery procedure below if needed.
-
-For manual recovery:
-
-1. Stop Home Assistant. Disabling integration entries is not enough: configuration
-   dialogs can also start temporary runtime processes.
-2. Confirm that native runtime and installer processes using this cache have
-   stopped too. If orphaned processes cannot be ruled out, restart the owning
-   container or host and keep HA stopped before proceeding.
-3. Remove only the intended obsolete version or cleanup-owned
-   `.pruning-<version>-<32-hex>` directory. To force a full re-download, remove the
-   exact `<config>/.storage/github_copilot/runtime/` directory. Do not remove
-   `.storage/github_copilot/`, entry-owned session directories, credentials, or
-   generated media.
-4. Start Home Assistant and allow it to download the pinned runtime again if
-   necessary.
-
-Do not share this private cache between HA instances or containers, or launch
-unmanaged processes from it while cleanup is running. Implementation safeguards
-and limits are described in [runtime cache retention](development.md#runtime-cache-retention).
+You normally do not need to manage these files. If disk usage or a damaged
+download requires manual cleanup, follow the
+[advanced recovery procedure](development.md#manual-runtime-cache-recovery).
+Do not delete Home Assistant storage folders while it is running.
 
 ## Updates and existing installations
 
@@ -504,38 +332,44 @@ Assist pipelines, scripts, or automations that reference it.
 
 ### GitHub sign-in errors
 
-If task-session creation, data inference, or native image generation reports a
-confirmed authentication failure, such as a revoked token, the integration
-starts Home Assistant's reauthentication flow even when model discovery was
-cached. Reauthenticate the integration; the failed task is not automatically
-replayed. Policy denials and temporary rate limits alone do not trigger
-reauthentication.
+If your token expires or is revoked, Home Assistant asks you to reauthenticate
+the integration. Complete that flow, then retry your request if appropriate.
+Failed tasks are not automatically repeated. Organization policy restrictions
+and temporary rate limits are separate problems; signing in again may not fix
+them.
 
 ### Quota errors
 
 If Copilot reports exhausted usage quota, the integration returns an error,
 logs a warning, and creates a notice in **Settings > Repairs**. Check your AI
 Credits usage and limits in GitHub, or contact your organization administrator.
-The notice persists until a conversation or validated AI Task response succeeds or the integration
-entry is removed. Quota failures do not trigger model fallback or automatic
-retries. Temporary rate limiting alone is not treated as exhausted quota.
+Quota failures do not trigger model fallback or automatic retries. Temporary
+rate limiting alone is not treated as exhausted quota.
+
+### Shared memory errors
+
+If saved memories cannot be read, Copilot reports an error rather than erasing
+them. This can prevent conversations or integration startup while memory is
+enabled. Turn off **Enable shared memory** in **Configure** to continue without
+memory.
+
+For restoring a backup or investigating storage errors, see
+[memory storage and recovery](development.md#shared-conversation-memory).
+If memories could not be deleted when you removed the integration, check
+**Settings > Repairs** for instructions to remove the remaining data.
 
 ### Setup failures
 
-Home Assistant installs the pinned GitHub Copilot SDK, which downloads its
-native runtime. Linux ARM64 and x86-64 glibc/musl release assets are available;
-32-bit runtime support is not.
-
-Network/download, checksum, storage, and unsupported-platform failures are
-reported during setup. Check outbound access to GitHub and whether Home
-Assistant can write to its configuration directory. The runtime cache survives
-Core container replacement; see [runtime storage](development.md#runtime-storage).
+Check that Home Assistant is running on a supported 64-bit Linux system, can
+reach GitHub, and can write to its configuration directory. Setup reports
+download and storage failures. If a download needs to be replaced, see
+[runtime cache and manual recovery](#runtime-cache-and-manual-recovery).
 
 ### Missing icon
 
-The integration bundles its icon in `brand/` for Home Assistant to show after
-installation. If HACS or the pre-install Marketplace listing shows a placeholder,
-this does not affect setup or operation.
+If HACS or the pre-install Marketplace listing shows a placeholder icon, this
+does not affect setup or operation. Home Assistant should show the integration's
+icon after installation.
 
 ### Diagnostics and bug reports
 

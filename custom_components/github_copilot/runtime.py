@@ -82,6 +82,9 @@ class CopilotRuntime:
         from copilot import CopilotClient
         from copilot.client import RuntimeConnection
 
+        if self._stopping:
+            await self.async_stop()
+            self.memory = MemoryManager(self.hass, self.entry.entry_id)
         self._stopping = False
         if self.entry.options.get(CONF_ENABLE_SHARED_MEMORY, False):
             await self.memory.async_snapshot()

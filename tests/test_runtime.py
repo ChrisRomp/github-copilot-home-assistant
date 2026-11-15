@@ -14,8 +14,10 @@ import pytest
 from copilot._jsonrpc import JsonRpcError
 from copilot.client import GitHubTokenProviderArgs
 from copilot.generated.rpc import GitHubTokenAcquireReason
+from homeassistant.core import HomeAssistant
 
 from custom_components.github_copilot.auth import OAuthError, ReauthenticationRequired
+from custom_components.github_copilot.memory import MemoryManager
 from custom_components.github_copilot.runtime import CopilotRuntime
 
 
@@ -1128,6 +1130,59 @@ async def test_restart_owns_new_worker_and_reuses_shared_maintenance_lock(sdk_ru
     ]
     await runtime.async_stop()
     assert second.done()
+
+
+@pytest.fixture
+async def runtime_memory_hass(tmp_path):
+    hass = HomeAssistant(str(tmp_path))
+    yield hass
+    await hass.async_stop()
+
+
+async def test_restart_reopens_memory_tools_and_retains_facts(
+    runtime_memory_hass, sdk_runtime
+):
+    runtime = sdk_runtime.runtime
+    runtime.hass = runtime_memory_hass
+    runtime.memory = MemoryManager(runtime_memory_hass, runtime.entry.entry_id)
+    runtime.entry.options["enable_shared_memory"] = True
+    old_memory = runtime.memory
+    try:
+        await runtime.async_start()
+        saved = await runtime.memory.async_tool(
+            "ha_memory_save",
+            {"text": "Warm reading lights", "source": "Warm", "expected_revision": 0},
+            "Warm reading lights",
+        )
+        assert saved["status"] == "saved"
+        await runtime.async_stop()
+        await runtime.async_start()
+        assert await runtime.memory.async_snapshot() == saved["snapshot"]
+        listed = await runtime.memory.async_tool("ha_memory_list", {}, "List memories")
+        assert listed["status"] == "listed"
+        assert listed["snapshot"] == saved["snapshot"]
+        updated = await runtime.memory.async_tool(
+            "ha_memory_save",
+            {
+                "text": "Bright reading lights",
+                "source": "Bright",
+                "expected_revision": 1,
+                "id": listed["snapshot"]["facts"][0]["id"],
+            },
+            "Bright reading lights",
+        )
+        assert updated["status"] == "saved"
+        forgotten = await runtime.memory.async_tool(
+            "ha_memory_forget",
+            {"expected_revision": 2, "ids": [updated["snapshot"]["facts"][0]["id"]]},
+            "Forget the reading preference",
+        )
+        assert forgotten["status"] == "deleted"
+        assert (await old_memory.async_tool("ha_memory_list", {}, ""))[
+            "status"
+        ] == "unavailable"
+    finally:
+        await runtime.async_stop()
 
 
 async def test_daily_maintenance_retries_unexpected_failure_at_next_interval(
