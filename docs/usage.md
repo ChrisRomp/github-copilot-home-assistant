@@ -17,8 +17,7 @@ On Home Assistant 2026.11 or newer, **Allow Home Assistant administrator tools**
 is a separate opt-in for conversations and data tasks. It allows access to logs,
 history, configuration, and administrative actions such as reloading integrations.
 This access is not limited to Assist-exposed entities, even if device control is
-disabled. Results, including potentially sensitive log entries, are sent to
-GitHub Copilot.
+disabled.
 
 Administrator tools require an authenticated Home Assistant administrator.
 Other users can still chat and use enabled Assist tools, but administrator tools
@@ -59,8 +58,8 @@ forget. It should not discard unrelated facts to make room, and memories do not
 expire with age. Changes made in another chat are available on your next turn.
 Copilot can make mistakes, so ask what it remembers and correct anything wrong.
 
-Saved memories stay in Home Assistant and are sent to GitHub Copilot when used.
-Do not store secrets or information intended for only one household member.
+Memories are stored locally in Home Assistant, not in GitHub's native memory
+service. Do not store secrets or information intended for only one household member.
 Memories survive restarts and integration reloads. Turning memory off stops its
 use but keeps your saved facts; turning it back on restores them. Removing the
 integration entry deletes its saved memories.
@@ -186,9 +185,9 @@ data:
 response_variable: driveway
 ```
 
-Use your camera's actual entity ID. Explicitly attached images are sent to
-GitHub even when tool access is disabled; those settings control tools, not data
-you supply. Image contents can contain prompt-injection instructions. Keep both
+Use your camera's actual entity ID. Image analysis works even when tool access
+is disabled; those settings control tools, not attachments you supply.
+Image contents can contain prompt-injection instructions. Keep both
 tool options off for tasks that should not access or modify Home Assistant.
 
 Large or numerous images may be rejected to protect your Home Assistant device,
@@ -263,9 +262,10 @@ have controlled a device or consumed usage.
 
 ## Conversation data and privacy
 
-Prompts, the information needed to answer them, and tool results are sent to
-GitHub Copilot. Model inference runs in GitHub's cloud service, not on your
-Home Assistant device.
+Prompts, the information needed to answer them, attached images, and tool results
+are sent to GitHub Copilot. Model inference runs in GitHub's cloud service, not on your
+Home Assistant device. For details about how GitHub Copilot processes data, see the
+[GitHub Copilot Trust Center](https://copilot.github.trust.page).
 
 Conversations expire after five minutes of inactivity. Restarting Home Assistant
 starts fresh chats, but any enabled shared memories remain available.
@@ -301,6 +301,11 @@ Do not delete Home Assistant storage folders while it is running.
 On Home Assistant 2026.11 or newer, updates appear under **Settings > Updates**.
 On 2026.10, use HACS to update. Restart Home Assistant after updating an
 already-loaded integration.
+
+Version 0.5.0 adds [shared conversation memory](#shared-memory). It remains
+disabled for existing entries unless **Enable shared memory** is turned on in
+the integration's options. Existing conversation, AI Task, and tool settings
+are preserved.
 
 Version 0.4.0 adds optional administrator tools on Home Assistant 2026.11 or
 newer. They remain disabled for existing entries unless enabled in the

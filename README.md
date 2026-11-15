@@ -74,9 +74,9 @@ Change these settings under
 
 **Enable shared memory** is a separate, disabled-by-default option for
 conversations. It automatically remembers durable household facts in Home
-Assistant, shared by everyone using that integration entry and sent to Copilot
-when recalled. It works without device or administrator tools and never applies
-to AI Tasks. See [shared memory](docs/usage.md#shared-memory) for limits and deletion.
+Assistant, shared by everyone using that integration entry. It works without
+device or administrator tools and never applies to AI Tasks. See
+[shared memory](docs/usage.md#shared-memory) for limits and deletion.
 
 An AI Task entity is created alongside the conversation entity without another
 sign-in. Use it in scripts and automations, or choose it as your preferred provider
