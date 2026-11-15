@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 from homeassistant.core import CoreState, HomeAssistant
+from homeassistant.helpers import storage as ha_storage
 from homeassistant.helpers.storage import Store
 from homeassistant.util.file import WriteError
 
@@ -37,7 +38,9 @@ async def save(manager, text="Warm reading lights", revision=0, **kwargs):
     )
 
 
-async def test_private_atomic_persistence_and_entry_isolation(memory):
+async def test_private_atomic_persistence_and_entry_isolation(memory, monkeypatch):
+    write_atomic = Mock(wraps=ha_storage.write_utf8_file_atomic)
+    monkeypatch.setattr(ha_storage, "write_utf8_file_atomic", write_atomic)
     result = await save(memory)
     assert result["status"] == "saved"
     snapshot = result["snapshot"]
@@ -51,8 +54,9 @@ async def test_private_atomic_persistence_and_entry_isolation(memory):
     }
     path = Path(memory.store.path)
     assert path.stat().st_mode & 0o777 == 0o600
-    assert memory.store._atomic_writes is True
-    assert memory.store._private is True
+    write_atomic.assert_called_once()
+    assert write_atomic.call_args.args[0] == str(path)
+    assert write_atomic.call_args.args[2] is True
     stored = json.loads(path.read_text())
     fact = stored["data"]["facts"][0]
     assert fact["source"] == "Warm reading lights"
@@ -228,10 +232,10 @@ async def test_real_store_swallowed_write_error_is_not_success(
 ):
     original = (await save(memory))["snapshot"]
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise WriteError("Permission denied")
 
-    monkeypatch.setattr(memory.store, "_write_prepared_data", fail)
+    monkeypatch.setattr(ha_storage, "write_utf8_file_atomic", fail)
     result = await save(memory, "SECRET_NEW_FACT", revision=1)
     assert "Error writing config" in caplog.text  # HA swallowed the actual WriteError.
     assert result["status"] == "persistence_failure"
@@ -273,9 +277,14 @@ async def test_cancelled_write_drains_before_unlock_and_shutdown(
 ):
     await save(memory)
     entered, finish = threading.Event(), threading.Event()
-    original = memory.store._write_prepared_data if stage == "write" else memory._read
+    target, method = (
+        (ha_storage, "write_utf8_file_atomic")
+        if stage == "write"
+        else (memory, "_read")
+    )
+    original = getattr(target, method)
 
-    def blocked(*args):
+    def blocked(*args, **kwargs):
         # Only block the verification read, not the pre-mutation read.
         if (
             stage == "write"
@@ -283,13 +292,9 @@ async def test_cancelled_write_drains_before_unlock_and_shutdown(
         ):
             entered.set()
             assert finish.wait(5)
-        return original(*args)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(
-        memory.store if stage == "write" else memory,
-        "_write_prepared_data" if stage == "write" else "_read",
-        blocked,
-    )
+    monkeypatch.setattr(target, method, blocked)
     task = asyncio.create_task(save(memory, "Second fact", revision=1))
     closing = None
     try:
