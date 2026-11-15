@@ -262,8 +262,8 @@ have controlled a device or consumed usage.
 
 ## Conversation data and privacy
 
-Prompts, the information needed to answer them, and tool results are sent to
-GitHub Copilot. Model inference runs in GitHub's cloud service, not on your
+Prompts, the information needed to answer them, attached images, and tool results
+are sent to GitHub Copilot. Model inference runs in GitHub's cloud service, not on your
 Home Assistant device. For details about how GitHub Copilot processes data, see the
 [GitHub Copilot Trust Center](https://copilot.github.trust.page).
 
