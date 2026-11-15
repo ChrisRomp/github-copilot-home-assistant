@@ -16,11 +16,8 @@ You need:
   [HACS](https://www.hacs.xyz/docs/use/download/download/) installed separately
   on 2026.10.
 
-GitHub Copilot processes conversations and AI Tasks in the cloud. Prompts,
-attached images, relevant device information, and tool results are sent to GitHub
-Copilot. See
-[conversation data and privacy](usage.md#conversation-data-and-privacy) for
-details.
+For data handling and retention details, see
+[conversation data and privacy](usage.md#conversation-data-and-privacy).
 
 ## 1. Install the integration
 
@@ -103,11 +100,12 @@ Keep tokens private and out of screenshots, issue reports, and chat messages.
 After authentication, the **Configure GitHub Copilot** dialog lets you choose
 how the conversation agent and AI Task entity behave.
 
-![The configuration dialog with separate model selectors, a 180-second AI Task timeout, both device-control and administrator-tools switches enabled, and empty Additional instructions.](images/setup/configure-integration.png)
+![The configuration dialog with separate model selectors, a 180-second AI Task timeout, device control, administrator tools, and shared memory enabled, and empty Additional instructions.](images/setup/configure-integration.png)
 
 The selected models are examples; availability depends on your account. The
-screenshot shows device control and administrator tools enabled, but both are
-**off by default**. Administrator tools require Home Assistant 2026.11 or newer.
+screenshot shows device control, administrator tools, and shared memory enabled,
+but all three are **off by default**. Administrator tools require Home Assistant
+2026.11 or newer.
 
 | Setting | What to choose |
 | --- | --- |
@@ -116,7 +114,7 @@ screenshot shows device control and administrator tools enabled, but both are
 | **AI Task timeout (seconds)** | Defaults to 180 seconds. This does not change Assist's 60-second timeout. |
 | **Allow control of Assist-exposed devices** | Allows conversations and AI Tasks to use Assist-exposed tools. It is **off by default**. |
 | **Allow Home Assistant administrator tools** | On HA 2026.11 or newer, allows administrator-authenticated conversations and data tasks to access logs, history and configuration, and perform administrative actions. Access is not restricted to Assist-exposed entities. It is **off by default**. |
-| **Enable shared memory** | **Off by default.** Automatically remembers durable household facts for all callers of this entry's conversation agent. Stored in Home Assistant and sent to Copilot when recalled; not private per-user. Independent of device/admin tools; AI Tasks never receive memory. |
+| **Enable shared memory** | **Off by default.** Automatically remembers durable household facts for all callers of this entry's conversation agent. Stored in Home Assistant; not private per-user. Independent of device/admin tools; AI Tasks never receive memory. |
 | **Additional instructions** | Instructions for conversations only, such as "Keep replies brief and use Celsius." AI Tasks use the instructions supplied by each action. |
 
 For camera or image analysis, choose an AI Task model with vision support.
@@ -126,9 +124,9 @@ of these chat-model selections.
 
 Additional instructions are literal text, not Home Assistant templates. If you
 enable device control, review which entities you have exposed to Assist.
-Administrator tools can access more than those entities and send their results,
-including potentially sensitive logs, to GitHub. The integration does not add an
-extra confirmation step before actions.
+Administrator tools can access more than those entities, including potentially
+sensitive logs and configuration. The integration does not add an extra
+confirmation step before actions.
 
 Select **Submit** to save. When Home Assistant shows **Success**, select
 **Finish**.
@@ -140,7 +138,7 @@ beside the integration entry).
 Shared memory is not suitable for secrets or information meant for only one
 household member. Disabling it retains saved facts; re-enabling restores them.
 See [shared memory](usage.md#shared-memory) for examples, capacity, and deletion
-limits. The screenshot above predates this option.
+limits.
 
 An AI Task entity appears alongside the conversation entity without another
 sign-in. It normally uses `ai_task.github_copilot`; use the actual entity ID shown
