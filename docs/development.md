@@ -207,6 +207,62 @@ Session cleanup and backup implications are described in the
 
 ## Instructions and tool permissions
 
+### Shared conversation memory
+
+`memory.py` owns one `MemoryManager` and mutation lock per entry runtime. The
+version-1 HA Store key is `github_copilot.memory.<entry-id>`, outside the SDK
+session directory. It uses private, atomic writes; `async_save` can swallow HA
+write errors, so acknowledgement requires an executor-backed, non-cached disk
+read matching the full candidate collection. The normal Store load path is
+deliberately not used: it can rename corrupt JSON and return an empty result.
+Malformed, unsupported, and unreadable files instead fail closed without
+overwriting recoverable data. Missing files represent empty collections.
+
+The schema validates IDs, timestamps, bounded fact/source strings, collection
+size, and monotonic nonnegative revisions. Mutation calls serialize through the
+entry lock and reject stale expected revisions with the latest snapshot.
+Supporting source quotations must be exact excerpts of the unchanged actual
+current user request; this establishes provenance, not semantic truth. Exact
+duplicates are unchanged; explicit-ID updates work at capacity without eviction.
+Accepted writes and verification reads drain on cancellation before unlocking;
+shutdown closes admission and drains memory before tearing down the runtime.
+Entry removal explicitly calls `Store.async_remove`, even without a loaded
+runtime. Reloads, disabling, and SDK cleanup do not delete it.
+
+`ha_memory_list`, `ha_memory_save`, and `ha_memory_forget` are integration-owned
+conversation tools, routed separately from HA device/admin APIs. They recheck
+the enabled option and active turn, including after waiting for the memory lock.
+Native SDK memory is explicitly disabled for every session. Data and image tasks
+never get these tools, the memory policy, or reference snapshots.
+
+Only fixed memory policy enters the trusted identity override. Fact contents
+are JSON reference data in the SDK user input or untrusted tool results, never
+system/developer content, owner custom instructions, or tool descriptions.
+HA-visible input and source provenance stay unchanged; SDK `display_prompt`
+retains the actual request while the model-bound prompt carries separate
+reference data. Snapshots contain IDs, text, revision and capacity, not sources
+or timestamps. Session revision tracking avoids unchanged copies and refreshes
+after other-chat writes, compaction, or context clearing. Mutation results carry
+the full new inventory and update that session's tracking; old history is not
+rewritten when forgetting.
+
+Memory-enabled conversation sessions raise the SDK large-tool-output threshold
+to 256,000 bytes so even a full, JSON-escaped Unicode inventory remains inline
+instead of becoming an unreadable file reference. This threshold also applies
+to other tool results in those sessions; disabled conversations and AI Tasks
+retain the SDK default. Native contracts verify all 50 maximum-length facts
+actually reach the model.
+
+`tests/test_memory.py` uses real HA Store/disk for limits, concurrency, private
+permissions, swallowed write failures, corruption preservation, cancellation,
+and unloaded-entry removal. Backend tests cover tool/lifecycle boundaries.
+Opt-in native contracts exercise actual outbound user/tool versus system roles,
+snapshot refresh, context reset and compaction through the cached runtime and a
+loopback fake model. No live GitHub requests or HA device actions are needed.
+Report unavailable native/HA contracts as unverified, not passing.
+
+### Trusted instructions and live context
+
 Only fixed integration rules and the owner's **Additional instructions** enter
 the SDK's system-instruction channel. Additional instructions are literal text:
 HA templates are not expanded into that privileged channel. HA's combined,

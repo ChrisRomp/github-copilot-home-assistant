@@ -338,6 +338,45 @@ async def test_runtime_disables_native_expiry_so_backend_owns_session_lifetime(
     await sdk_runtime.runtime.async_stop()
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_runtime_loads_memory_only_when_enabled_and_closes_before_backend(
+    sdk_runtime, enabled
+):
+    runtime = sdk_runtime.runtime
+    runtime.entry.options["enable_shared_memory"] = enabled
+
+    async def load():
+        sdk_runtime.factory.assert_not_called()
+        return {"revision": 0, "facts": []}
+
+    runtime.memory.async_snapshot = AsyncMock(side_effect=load)
+    await runtime.async_start()
+    assert runtime.memory.async_snapshot.await_count == int(enabled)
+    assert sdk_runtime.backend_factory.call_args.kwargs["memory"] is runtime.memory
+
+    async def stop():
+        assert runtime.memory._closed
+        assert not runtime.memory._lock.locked()
+
+    sdk_runtime.backend.async_stop.side_effect = stop
+    await runtime.async_stop()
+
+
+async def test_memory_load_failure_prevents_startup_without_overwriting(sdk_runtime):
+    from custom_components.github_copilot.memory import MemoryStorageError
+
+    runtime = sdk_runtime.runtime
+    runtime.entry.options["enable_shared_memory"] = True
+    runtime.memory.async_snapshot = AsyncMock(
+        side_effect=MemoryStorageError("Memory is corrupt and preserved.")
+    )
+    with pytest.raises(MemoryStorageError, match="preserved"):
+        await runtime.async_start()
+    sdk_runtime.factory.assert_not_called()
+    sdk_runtime.backend_factory.assert_not_called()
+    await runtime.async_stop()
+
+
 @pytest.mark.parametrize("availability", ["available", "unavailable", None])
 async def test_fallback_probe_recovers_image_catalog_without_bypassing_gate(
     sdk_runtime, monkeypatch, availability

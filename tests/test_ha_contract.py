@@ -19,6 +19,95 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+async def test_real_chat_memory_keeps_user_input_and_provenance_unchanged(tmp_path):
+    from homeassistant.components.conversation import ConversationInput
+    from homeassistant.components.conversation.chat_log import (
+        ChatLog,
+        ToolResultContent,
+        UserContent,
+    )
+    from homeassistant.core import Context, HomeAssistant
+
+    from custom_components.github_copilot.backend import ConversationBackend
+    from custom_components.github_copilot.memory import MemoryManager
+
+    hass = HomeAssistant(str(tmp_path))
+    manager = MemoryManager(hass, "entry")
+    session = create_autospec(CopilotSession, instance=True)
+    session.session_id = "sdk-memory"
+    session.on.return_value = Mock()
+    session.rpc = SimpleNamespace(options=SimpleNamespace(update=AsyncMock()))
+    backend = ConversationBackend(
+        hass,
+        SimpleNamespace(
+            entry_id="entry",
+            data={},
+            options={
+                "model": "gpt-4.1",
+                "enable_shared_memory": True,
+            },
+        ),
+        SimpleNamespace(
+            create_session=AsyncMock(return_value=session), delete_session=AsyncMock()
+        ),
+        AsyncMock(),
+        AsyncMock(return_value=[SimpleNamespace(id="gpt-4.1")]),
+        access_token_getter=AsyncMock(return_value="not-used"),
+        memory=manager,
+    )
+    text = "We prefer warm reading lights."
+    chat = ChatLog(hass, "memory-chat")
+    chat.async_add_user_content(UserContent(content=text))
+    user = ConversationInput(
+        text=text,
+        context=Context(),
+        conversation_id="memory-chat",
+        device_id=None,
+        satellite_id=None,
+        language="en",
+        agent_id="conversation.test",
+    )
+
+    async def send(prompt, **kwargs):
+        assert prompt.endswith("Actual user request:\n" + text)
+        assert kwargs["display_prompt"] == text
+        tools = session.set_tools.await_args.args[0]
+        assert not any(tool.name.startswith("ha__") for tool in tools)
+        tool = next(t for t in tools if t.name == "ha_memory_save")
+        result = await tool.handler(
+            ToolInvocation(
+                tool_name=tool.name,
+                tool_call_id="save-fact",
+                arguments={
+                    "text": "Warm reading lights",
+                    "source": "warm reading lights",
+                    "expected_revision": 0,
+                },
+            )
+        )
+        assert result.result_type == "success"
+        return SimpleNamespace(
+            data=AssistantMessageData(content="Saved.", message_id="m")
+        )
+
+    session.send_and_wait.side_effect = send
+    try:
+        await backend.async_handle_message(user.agent_id, user, chat)
+        assert user.text == text
+        assert [c.content for c in chat.content if isinstance(c, UserContent)] == [text]
+        results = [c for c in chat.content if isinstance(c, ToolResultContent)]
+        assert len(results) == 1
+        assert results[0].result.data["snapshot"]["count"] == 1
+        from pathlib import Path
+
+        stored = json.loads(Path(manager.store.path).read_text())
+        assert stored["data"]["facts"][0]["source"] == "warm reading lights"
+    finally:
+        await backend.async_stop()
+        await manager.async_close()
+        await hass.async_stop()
+
+
 @pytest.mark.parametrize(
     ("time_zone", "offset_hours"),
     [("Asia/Tokyo", 9), ("Pacific/Honolulu", -10)],

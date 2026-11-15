@@ -34,6 +34,63 @@ The option is hidden on older HA versions. If HA is downgraded after enabling
 it, the agent continues without administrator tools and reports the restriction;
 disable the option or upgrade HA to remove the warning.
 
+## Shared memory
+
+**Enable shared memory** is off by default. Once enabled, the conversation model
+may automatically save clearly stated, durable, non-sensitive household facts;
+you do not have to say "remember this." Everyone who can use this integration
+entry's conversation agent can recall, change, or forget the same collection.
+Separate integration entries have separate stores. There is no per-user privacy
+or voice-speaker identification.
+
+Memory works with device control and administrator tools disabled. It grants no
+additional HA permissions, and a saved preference is not an automation. Data and
+image AI Tasks neither receive memories nor have memory tools.
+
+| Say | Intended behavior |
+| --- | --- |
+| "We prefer warm lighting for reading." | Save a shared, durable preference. |
+| "Set the lights to warm tonight." | Treat it as temporary, not a durable memory. |
+| "What do you remember?" | List the current collection. |
+| "Actually, use brighter reading lights from now on." | Update the superseded preference. |
+| "Forget our reading-light preference." | Delete the selected fact. |
+| "Forget everything you have remembered." | Delete all current facts. |
+
+The store holds up to **50 facts**, each up to **300 characters**. All facts are
+available as reference context, not selected by a search engine. At capacity,
+the agent can replace a clearly superseded fact in the same save; it must not
+silently evict other facts. Exact duplicates and updates remain possible. If no
+safe replacement exists, it should report capacity and ask you. There is no
+age-based expiry, oldest-first eviction, or background curator.
+
+Recall uses a full snapshot on the first turn, after a changed inventory, and
+after SDK context compaction/reset. Unchanged turns do not append identical
+copies. Another chat's changes are reflected on your next turn. Within a turn,
+the list tool can retrieve the authoritative inventory. Model interpretation is
+probabilistic: these policies are instructions, not a guarantee that the model
+will always choose the right fact to save or replace.
+
+The versioned JSON store is
+`<config>/.storage/github_copilot.memory.<entry-id>`. It is HA-managed, not an
+editable Markdown file. Writes are atomic with private file permissions, **not
+encryption**. Each fact includes a short supporting excerpt of the actual user
+request and timestamps, not a complete transcript or user identifier. Stored
+facts are sent to GitHub Copilot when recalled; never store secrets or private
+information intended for only one household member.
+
+Disabling memory stops recall and tool access but retains its file. Re-enabling,
+reloading, restarting HA, and SDK session cleanup preserve the collection.
+Removing the integration entry deletes its memory store, even when disabled or
+unloaded. Invalid or unreadable storage is reported and preserved, not reset.
+If this prevents startup, disable shared memory or restore the file from a valid
+backup before re-enabling it.
+
+Forgetting removes facts from future current snapshots, **not** earlier messages
+in active chats, already-sent model requests, or existing HA backups. Earlier
+chat files still follow the [session retention policy](#conversation-data-and-privacy).
+Diagnostics report only memory's enabled flag and an aggregate count (unknown
+when not loaded), never fact text or source quotations.
+
 ## AI Tasks
 
 Home Assistant's [AI Task documentation](https://www.home-assistant.io/integrations/ai_task/)

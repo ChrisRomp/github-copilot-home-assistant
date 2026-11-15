@@ -116,6 +116,7 @@ screenshot shows device control and administrator tools enabled, but both are
 | **AI Task timeout (seconds)** | Defaults to 180 seconds. This does not change Assist's 60-second timeout. |
 | **Allow control of Assist-exposed devices** | Allows conversations and AI Tasks to use Assist-exposed tools. It is **off by default**. |
 | **Allow Home Assistant administrator tools** | On HA 2026.11 or newer, allows administrator-authenticated conversations and data tasks to access logs, history and configuration, and perform administrative actions. Access is not restricted to Assist-exposed entities. It is **off by default**. |
+| **Enable shared memory** | **Off by default.** Automatically remembers durable household facts for all callers of this entry's conversation agent. Stored in Home Assistant and sent to Copilot when recalled; not private per-user. Independent of device/admin tools; AI Tasks never receive memory. |
 | **Additional instructions** | Instructions for conversations only, such as "Keep replies brief and use Celsius." AI Tasks use the instructions supplied by each action. |
 
 For camera or image analysis, choose an AI Task model with vision support.
@@ -135,6 +136,11 @@ Select **Submit** to save. When Home Assistant shows **Success**, select
 You can change these settings later under
 **Settings > Devices & services > GitHub Copilot > Configure** (the gear icon
 beside the integration entry).
+
+Shared memory is not suitable for secrets or information meant for only one
+household member. Disabling it retains saved facts; re-enabling restores them.
+See [shared memory](usage.md#shared-memory) for examples, capacity, and deletion
+limits. The screenshot above predates this option.
 
 An AI Task entity appears alongside the conversation entity without another
 sign-in. It normally uses `ai_task.github_copilot`; use the actual entity ID shown

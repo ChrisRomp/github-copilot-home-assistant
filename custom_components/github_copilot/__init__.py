@@ -33,6 +33,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
     from homeassistant.exceptions import ConfigEntryNotReady
 
+    from .memory import MemoryStorageError
     from .provisioning import RuntimeDownloadError
     from .runtime import CopilotRuntime
     from .runtime_cache import async_schedule_runtime_prune
@@ -73,7 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.exception("Failed to stop the Copilot runtime after setup failed")
         else:
             _remove_stopped_runtime(hass, entry, runtime)
-        if isinstance(err, (OSError, RuntimeDownloadError)):
+        if isinstance(err, (OSError, RuntimeDownloadError, MemoryStorageError)):
             raise ConfigEntryNotReady(
                 f"Unable to start the Copilot runtime: {err}"
             ) from err
@@ -153,6 +154,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ISSUE_TASK_MODEL_FALLBACK,
         ISSUE_TASK_MODEL_UNAVAILABLE,
     )
+    from .memory import MemoryManager
     from .runtime import remove_entry_directory
 
     runtime: CopilotRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
@@ -160,6 +162,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         await runtime.async_stop()
         _remove_stopped_runtime(hass, entry, runtime)
 
+    await MemoryManager(hass, entry.entry_id).async_remove()
     await asyncio.to_thread(remove_entry_directory, hass, entry.entry_id)
     hass.data.get(DATA_CREDENTIAL_LOCKS, {}).pop(entry.entry_id, None)
 

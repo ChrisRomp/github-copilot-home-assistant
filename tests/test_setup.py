@@ -21,10 +21,12 @@ from custom_components.github_copilot.const import (
     DATA_RUNTIME_PRUNE,
     DOMAIN,
 )
+from custom_components.github_copilot.memory import MemoryManager
 
 
 @pytest.fixture
 async def setup_entry(ha_boundary, monkeypatch, tmp_path):
+    monkeypatch.setattr(MemoryManager, "async_remove", AsyncMock())
     monkeypatch.setattr(
         sys.modules["homeassistant.const"],
         "EVENT_HOMEASSISTANT_STOP",
@@ -370,6 +372,7 @@ async def test_remove_stops_runtime_retained_after_failed_setup(
     remove = Mock(side_effect=remove_directory)
     monkeypatch.setattr(runtime_module, "remove_entry_directory", remove)
     await async_remove_entry(setup.hass, setup.entry)
+    MemoryManager.async_remove.assert_awaited_once()
     remove.assert_called_once_with(setup.hass, setup.entry.entry_id)
     assert DOMAIN not in setup.hass.data
 

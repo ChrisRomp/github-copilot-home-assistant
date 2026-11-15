@@ -26,9 +26,13 @@ async def test_diagnostics_platform_returns_only_safe_status(state):
             "model": "selected-model",
             "enable_device_control": True,
             "prompt": "private-system-prompt",
+            "enable_shared_memory": True,
         },
     )
     runtime = SimpleNamespace(
+        memory=SimpleNamespace(
+            count=3, facts=["private-fact"], source="private-source"
+        ),
         is_started=state == "started",
         backend=(
             None
@@ -60,6 +64,8 @@ async def test_diagnostics_platform_returns_only_safe_status(state):
         "device_control_enabled": True,
         "home_assistant_api_enabled": False,
         "runtime_started": state == "started",
+        "shared_memory_enabled": True,
+        "shared_memory_count": None if state == "missing" else 3,
     }
     assert "private-" not in json.dumps(result)
 
@@ -89,4 +95,6 @@ async def test_diagnostics_handles_missing_optional_entry_values():
         "device_control_enabled": False,
         "home_assistant_api_enabled": False,
         "runtime_started": False,
+        "shared_memory_enabled": False,
+        "shared_memory_count": None,
     }
