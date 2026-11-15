@@ -158,20 +158,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     from .memory import MemoryManager
     from .runtime import remove_entry_directory
 
-    runtime: CopilotRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if runtime is not None:
-        await runtime.async_stop()
-        _remove_stopped_runtime(hass, entry, runtime)
-
     memory = MemoryManager(hass, entry.entry_id)
     memory_issue_id = f"{ISSUE_MEMORY_CLEANUP_FAILED}_{entry.entry_id}"
-    try:
-        await memory.async_remove()
-    except OSError as err:
-        _LOGGER.error(
-            "Unable to remove shared memory (%s); continuing other entry cleanup",
-            type(err).__name__,
-        )
+
+    def report_memory_cleanup_failure() -> None:
         # HA removes the entry even when this callback raises. Keep the warning
         # independent of the entry so HA's registry cleanup does not erase it.
         ir.async_create_issue(
@@ -184,6 +174,26 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
             translation_key=ISSUE_MEMORY_CLEANUP_FAILED,
             translation_placeholders={"filename": memory.key},
         )
+
+    runtime: CopilotRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if runtime is not None:
+        stopped = False
+        try:
+            await runtime.async_stop()
+            stopped = True
+        finally:
+            if not stopped:
+                report_memory_cleanup_failure()
+        _remove_stopped_runtime(hass, entry, runtime)
+
+    try:
+        await memory.async_remove()
+    except OSError as err:
+        _LOGGER.error(
+            "Unable to remove shared memory (%s); continuing other entry cleanup",
+            type(err).__name__,
+        )
+        report_memory_cleanup_failure()
     else:
         ir.async_delete_issue(hass, DOMAIN, memory_issue_id)
     await asyncio.to_thread(remove_entry_directory, hass, entry.entry_id)

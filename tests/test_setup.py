@@ -402,6 +402,15 @@ async def test_remove_preserves_state_when_retained_runtime_cannot_stop(
     ir.async_delete_issue.assert_not_called()
     assert setup.hass.data[DOMAIN]["entry"] is setup.runtime
     assert setup.hass.data[DATA_CREDENTIAL_LOCKS]["entry"] is lock
+    MemoryManager.async_remove.assert_not_awaited()
+    ir.async_create_issue.assert_called_once()
+    assert ir.async_create_issue.call_args.kwargs["is_persistent"] is True
+    assert ir.async_create_issue.call_args.kwargs["translation_key"] == (
+        "memory_cleanup_failed"
+    )
+    assert ir.async_create_issue.call_args.kwargs["translation_placeholders"] == {
+        "filename": "github_copilot.memory.entry"
+    }
 
 
 async def test_remove_unloaded_entry_preserves_other_runtime_and_lock(

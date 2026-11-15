@@ -271,7 +271,10 @@ runtime. HA removes an entry even if its removal callback raises, so a failed
 memory unlink is logged without raw details and reported through a persistent
 Repair identifying the leftover file and manual cleanup steps. The Repair is
 not tied to the removed config entry, so HA's registry cleanup retains it.
-Other entry cleanup continues. Reloads, disabling, and SDK cleanup do not delete
+If runtime shutdown fails or is cancelled before deletion, the same Repair is
+created before propagating the failure; runtime ownership and live session files
+are retained. After a memory unlink failure, other entry cleanup continues.
+Reloads, disabling, and SDK cleanup do not delete
 memory. Restarting the same runtime drains its previous stop and creates a fresh
 manager before loading the retained store; old tool handlers keep their closed
 manager.

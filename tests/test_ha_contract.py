@@ -109,8 +109,9 @@ async def test_real_chat_memory_keeps_user_input_and_provenance_unchanged(tmp_pa
         await hass.async_stop()
 
 
+@pytest.mark.parametrize("failure", ["unlink", "stop"])
 async def test_real_entry_removal_reports_orphaned_memory(
-    tmp_path, monkeypatch, caplog
+    tmp_path, monkeypatch, caplog, failure
 ):
     from pathlib import Path
     from types import MappingProxyType
@@ -123,6 +124,7 @@ async def test_real_entry_removal_reports_orphaned_memory(
     from homeassistant.helpers.storage import Store
 
     from custom_components import github_copilot
+    from custom_components.github_copilot import runtime as runtime_module
     from custom_components.github_copilot.const import DOMAIN
     from custom_components.github_copilot.memory import MemoryManager
 
@@ -167,6 +169,16 @@ async def test_real_entry_removal_reports_orphaned_memory(
         assert saved["status"] == "saved"
         original = Path(memory.store.path).read_bytes()
         await memory.async_close()
+        runtime = SimpleNamespace(
+            async_stop=AsyncMock(side_effect=RuntimeError("Runtime is still running"))
+        )
+        if failure == "stop":
+            hass.data[DOMAIN] = {entry.entry_id: runtime}
+        session_state = Path(hass.config.path(".storage", DOMAIN, entry.entry_id))
+        session_state.mkdir(parents=True)
+        (session_state / "state").write_text("Live SDK state")
+        remove_directory = Mock(wraps=runtime_module.remove_entry_directory)
+        monkeypatch.setattr(runtime_module, "remove_entry_directory", remove_directory)
         original_remove = Store.async_remove
 
         async def fail_memory_remove(store):
@@ -174,7 +186,8 @@ async def test_real_entry_removal_reports_orphaned_memory(
                 raise PermissionError("PRIVATE_FILESYSTEM_DETAIL")
             await original_remove(store)
 
-        monkeypatch.setattr(Store, "async_remove", fail_memory_remove)
+        remove_memory = create_autospec(original_remove, side_effect=fail_memory_remove)
+        monkeypatch.setattr(Store, "async_remove", remove_memory)
         result = await hass.config_entries.async_remove(entry.entry_id)
         assert result == {"require_restart": False}
         assert hass.config_entries.async_get_entry(entry.entry_id) is None
@@ -186,6 +199,13 @@ async def test_real_entry_removal_reports_orphaned_memory(
         assert issue.is_persistent
         assert issue.translation_key == "memory_cleanup_failed"
         assert issue.translation_placeholders == {"filename": memory.key}
+        if failure == "stop":
+            assert hass.data[DOMAIN][entry.entry_id] is runtime
+            assert (session_state / "state").read_text() == "Live SDK state"
+            remove_memory.assert_not_awaited()
+            remove_directory.assert_not_called()
+        else:
+            assert not session_state.exists()
         assert "PRIVATE_HOUSEHOLD_FACT" not in caplog.text
         assert "PRIVATE_FILESYSTEM_DETAIL" not in caplog.text
     finally:
