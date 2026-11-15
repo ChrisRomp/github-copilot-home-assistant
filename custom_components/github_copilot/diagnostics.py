@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .const import (
+    CONF_ENABLE_SHARED_MEMORY,
     DOMAIN,
     IMAGE_GENERATION_VERIFIED,
     IMAGE_HOST_BUDGET_VERIFIED,
@@ -52,4 +53,6 @@ async def async_get_config_entry_diagnostics(
             "enable_home_assistant_api", False
         ),
         "runtime_started": runtime is not None and runtime.is_started,
+        "shared_memory_enabled": entry.options.get(CONF_ENABLE_SHARED_MEMORY, False),
+        "shared_memory_count": getattr(getattr(runtime, "memory", None), "count", None),
     }

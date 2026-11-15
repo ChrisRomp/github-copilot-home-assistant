@@ -36,6 +36,7 @@
           "ai_task_timeout": "AI Task timeout (seconds)",
           "enable_device_control": "Allow control of Assist-exposed devices",
           "enable_home_assistant_api": "Allow Home Assistant administrator tools",
+          "enable_shared_memory": "Enable shared memory",
           "prompt": "Additional instructions"
         },
         "data_description": {
@@ -43,6 +44,7 @@
           "ai_task_model": "Initially uses the conversation model, then remains independently configurable.",
           "ai_task_timeout": "Applies to AI Tasks only. Assist keeps its 60-second timeout.",
           "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools.",
+          "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry and sent to Copilot when recalled. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
         }
       }
@@ -80,6 +82,7 @@
           "ai_task_timeout": "AI Task timeout (seconds)",
           "enable_device_control": "Allow control of Assist-exposed devices",
           "enable_home_assistant_api": "Allow Home Assistant administrator tools",
+          "enable_shared_memory": "Enable shared memory",
           "prompt": "Additional instructions"
         },
         "data_description": {
@@ -87,6 +90,7 @@
           "ai_task_model": "Initially uses the conversation model, then remains independently configurable.",
           "ai_task_timeout": "Applies to AI Tasks only. Assist keeps its 60-second timeout.",
           "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools.",
+          "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry and sent to Copilot when recalled. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
         }
       }
@@ -105,6 +109,10 @@
     }
   },
   "issues": {
+    "memory_cleanup_failed": {
+      "title": "GitHub Copilot shared memories could not be deleted",
+      "description": "Home Assistant removed the integration entry, but its saved shared memories may remain in `.storage/{filename}` inside your Home Assistant configuration directory. Stop Home Assistant, check the file permissions, and delete that file to remove the remaining memories. After cleanup, you can ignore this notice in Settings > Repairs. Deleting the file does not erase earlier chats, debug traces, or backups."
+    },
     "task_model_fallback": {
       "title": "GitHub Copilot AI Task model unavailable",
       "description": "AI Task model {model} is unavailable. Text and structured-data fallback: {fallback} ({billing}). Image-analysis fallback: {vision_fallback} ({vision_billing}); '-' means none is available. Each fallback stays within the known billing limit. Your conversation model is configured separately. Open GitHub Copilot > Configure to change the AI Task model."

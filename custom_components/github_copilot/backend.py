@@ -26,7 +26,11 @@ from copilot.session_events import (
     AssistantMessageData,
     AssistantMessageDeltaData,
     SessionBinaryAssetData,
+    SessionCompactionCompleteData,
+    SessionContextClearedData,
     SessionErrorData,
+    SessionSnapshotRewindData,
+    SessionTruncationData,
 )
 from copilot.tools import Tool as CopilotTool
 from copilot.tools import ToolInvocation
@@ -55,6 +59,7 @@ from .const import (
     CONF_AI_TASK_MODEL_BILLING,
     CONF_AI_TASK_TIMEOUT,
     CONF_AUTH_METHOD,
+    CONF_ENABLE_SHARED_MEMORY,
     CONF_MODEL,
     CONF_MODEL_BILLING,
     CONF_PROMPT,
@@ -71,6 +76,15 @@ from .const import (
     ISSUE_TASK_MODEL_UNAVAILABLE,
     MAX_ACTIVE_SESSIONS,
     MAX_CONCURRENT_TURNS,
+    MEMORY_FORGET_TOOL,
+    MEMORY_LIST_TOOL,
+    MEMORY_MAX_FACTS,
+    MEMORY_MAX_RESULT_BYTES,
+    MEMORY_MAX_SOURCE,
+    MEMORY_MAX_TEXT,
+    MEMORY_POLICY,
+    MEMORY_SAVE_TOOL,
+    MEMORY_TOOLS,
     MODEL_CACHE_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
     SDK_CLEANUP_TIMEOUT_SECONDS,
@@ -87,6 +101,7 @@ from .llm_api import (
     async_require_admin,
     selected_llm_apis,
 )
+from .memory import MemoryManager, render_reference
 from .models import (
     ModelResolution,
     model_budget,
@@ -143,6 +158,8 @@ class _SessionRecord:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_used: float = field(default_factory=time.monotonic)
     current_handler: Any | None = None
+    memory_revision: int | None = None
+    memory_generation: int = 0
 
 
 @dataclass
@@ -192,6 +209,7 @@ class ConversationBackend:
         image_model_getter: Callable[[], Any | None] | None = None,
         force_stop: Callable[[], Awaitable[None]] | None = None,
         on_runtime_failure: Callable[[bool], None] | None = None,
+        memory: MemoryManager | None = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
@@ -202,6 +220,7 @@ class ConversationBackend:
         self._image_model_getter = image_model_getter
         self._force_stop = force_stop or self._async_force_client
         self._on_runtime_failure = on_runtime_failure
+        self.memory = memory
         self._force_stop_task: asyncio.Task[None] | None = None
         self._stop_unconfirmed = False
         self._quarantined_image_lock: asyncio.Lock | None = None
@@ -508,6 +527,7 @@ class ConversationBackend:
     ) -> str:
         """Serialize turns for one conversation and stream its events."""
         is_task = isinstance(user_input, DataTaskRequest)
+        memory_enabled = not is_task and self._memory_enabled
         api = user_input.api if is_task else chat_log.llm_api
         api_ids = selected_llm_apis(self.entry.options)
         if api is not None and not api_ids:
@@ -554,6 +574,8 @@ class ConversationBackend:
         session_key = self._session_key(
             chat_log.conversation_id, context, admin_api_active
         )
+        if self._memory_enabled and not is_task:
+            session_key += ":shared-memory"
         instructions = "" if is_task else self._system_instructions()
 
         async with (
@@ -566,6 +588,7 @@ class ConversationBackend:
             if self._closed:
                 raise HomeAssistantError("GitHub Copilot is shutting down.")
             record.last_used = time.monotonic()
+            memory_generation = record.memory_generation
             if record.prompt_context["instructions"] != instructions:
                 # Only owner-authored text enters the mutable system-instruction field.
                 await record.session.rpc.options.update(
@@ -597,7 +620,9 @@ class ConversationBackend:
                 queue.put_nowait(tool_request)
                 return tool_request.result
 
-            sdk_tools = self._build_tools(ha_api, on_tool, tool_names, admin_notice)
+            sdk_tools = self._build_tools(
+                ha_api, on_tool, tool_names, admin_notice, include_memory=not is_task
+            )
             loop = asyncio.get_running_loop()
             session_error: SessionErrorData | None = None
 
@@ -669,9 +694,10 @@ class ConversationBackend:
                     ha_name = tool_names.get(item.sdk_name)
                     arguments = item.invocation.arguments
                     is_context = item.sdk_name == CONTEXT_TOOL_NAME
+                    is_memory = item.sdk_name in MEMORY_TOOLS and not is_task
                     if (
                         ha_name is None
-                        or (ha_api is None and not is_context)
+                        or (ha_api is None and not is_context and not is_memory)
                         or not isinstance(arguments, dict)
                     ):
                         if not item.result.done():
@@ -699,7 +725,18 @@ class ConversationBackend:
                         # Consuming the tool-call delta above can yield to shutdown.
                         if not active or self._closed:
                             raise asyncio.CancelledError
-                        if is_context:
+                        if is_memory:
+                            if not self._memory_enabled or self.memory is None:
+                                raise HomeAssistantError("Shared memory is disabled.")
+                            tool_result = await self.memory.async_tool(
+                                item.sdk_name,
+                                arguments,
+                                user_input.text,
+                                is_active=lambda: (
+                                    active and not self._closed and self._memory_enabled
+                                ),
+                            )
+                        elif is_context:
                             if (
                                 admin_api_active
                                 and arguments.get("section") == "assist_api"
@@ -773,6 +810,12 @@ class ConversationBackend:
                                 result_type=("failure" if tool_failed else "success"),
                             )
                         )
+                        if (
+                            is_memory
+                            and "snapshot" in tool_result
+                            and record.memory_generation == memory_generation
+                        ):
+                            record.memory_revision = tool_result["snapshot"]["revision"]
 
                 if not is_task and admin_notice and assistant_content:
                     yield {"content": f"\n\n{admin_notice}"}
@@ -784,9 +827,21 @@ class ConversationBackend:
                     await require_active_assist()
                 if admin_api_active:
                     await require_active_admin()
+                if not is_task and memory_enabled != self._memory_enabled:
+                    raise HomeAssistantError("Shared memory availability changed.")
+                prompt = user_input.text
+                if not is_task and self._memory_enabled:
+                    assert self.memory is not None
+                    snapshot = await self.memory.async_snapshot()
+                    if not active or self._closed or not self._memory_enabled:
+                        raise HomeAssistantError("Shared memory became unavailable.")
+                    if record.memory_revision != snapshot["revision"]:
+                        prompt = render_reference(snapshot, user_input.text)
+                        if record.memory_generation == memory_generation:
+                            record.memory_revision = snapshot["revision"]
                 send_started = True
                 return await record.session.send_and_wait(
-                    user_input.text,
+                    prompt,
                     timeout=(
                         self.entry.options.get(
                             CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT
@@ -804,7 +859,11 @@ class ConversationBackend:
                             ),
                         }
                         if is_task
-                        else {}
+                        else (
+                            {"display_prompt": user_input.text}
+                            if prompt != user_input.text
+                            else {}
+                        )
                     ),
                 )
 
@@ -921,6 +980,8 @@ class ConversationBackend:
                 ) from err
             finally:
                 active = False
+                if not completed:
+                    record.memory_revision = None
                 record.current_handler = None
                 if unsubscribe is not None:
                     unsubscribe()
@@ -1272,7 +1333,9 @@ class ConversationBackend:
                     )
                 return await current(invocation)
 
-            sdk_tools = self._build_tools(api, handler, tools, admin_notice)
+            sdk_tools = self._build_tools(
+                api, handler, tools, admin_notice, include_memory=True
+            )
             prompt_context = {"instructions": instructions}
             model_id = await self.async_resolve_model()
             try:
@@ -1290,6 +1353,22 @@ class ConversationBackend:
             record = _SessionRecord(
                 session=session, model_id=model_id, prompt_context=prompt_context
             )
+            if self._memory_enabled:
+
+                def invalidate_memory(event: Any) -> None:
+                    if not getattr(event, "agent_id", None) and isinstance(
+                        event.data,
+                        (
+                            SessionCompactionCompleteData,
+                            SessionContextClearedData,
+                            SessionSnapshotRewindData,
+                            SessionTruncationData,
+                        ),
+                    ):
+                        record.memory_generation += 1
+                        record.memory_revision = None
+
+                session.on(invalidate_memory)
             self._sessions[key] = record
             if ha_session := current_session.get():
                 ha_session.async_on_cleanup(
@@ -1459,7 +1538,8 @@ class ConversationBackend:
                             "action": "replace",
                             "content": AI_TASK_SYSTEM_PROMPT
                             if task_mode
-                            else DEFAULT_SYSTEM_PROMPT,
+                            else DEFAULT_SYSTEM_PROMPT
+                            + (f"\n\n{MEMORY_POLICY}" if self._memory_enabled else ""),
                         },
                     },
                 },
@@ -1479,6 +1559,13 @@ class ConversationBackend:
                 on_permission_request=permission,
                 streaming=True,
                 enable_session_store=False,
+                memory={"enabled": False},
+                # Keep the bounded full inventory inline, including escaped Unicode.
+                large_output=(
+                    {"max_size_bytes": MEMORY_MAX_RESULT_BYTES}
+                    if not task_mode and self._memory_enabled
+                    else None
+                ),
                 enable_skills=False,
                 enable_file_hooks=False,
                 enable_config_discovery=False,
@@ -1786,6 +1873,12 @@ class ConversationBackend:
         """Return owner-authored text, never HA's mixed/rendered SystemContent."""
         return self.entry.options.get(CONF_PROMPT) or ""
 
+    @property
+    def _memory_enabled(self) -> bool:
+        return self.memory is not None and bool(
+            self.entry.options.get(CONF_ENABLE_SHARED_MEMORY, False)
+        )
+
     @staticmethod
     def _context_tool_result(
         arguments: dict[str, Any],
@@ -1822,9 +1915,81 @@ class ConversationBackend:
         handler: Any,
         names: dict[str, str],
         admin_notice: str | None = None,
+        *,
+        include_memory: bool = False,
     ) -> list[CopilotTool]:
         """Convert the selected Home Assistant APIs to SDK tool definitions."""
         tools: list[CopilotTool] = []
+        if include_memory and self._memory_enabled:
+            revision = {"type": "integer", "minimum": 0}
+            parameters = {
+                MEMORY_LIST_TOOL: ({}, []),
+                MEMORY_SAVE_TOOL: (
+                    {
+                        "expected_revision": revision,
+                        "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": MEMORY_MAX_TEXT,
+                        },
+                        "source": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": MEMORY_MAX_SOURCE,
+                            "description": (
+                                "Exact excerpt of the actual current user request."
+                            ),
+                        },
+                        "id": {
+                            "type": "string",
+                            "description": "Existing fact ID to update or replace.",
+                        },
+                    },
+                    ["expected_revision", "text", "source"],
+                ),
+                MEMORY_FORGET_TOOL: (
+                    {
+                        "expected_revision": revision,
+                        "ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": MEMORY_MAX_FACTS,
+                            "uniqueItems": True,
+                        },
+                    },
+                    ["expected_revision", "ids"],
+                ),
+            }
+            descriptions = {
+                MEMORY_LIST_TOOL: "List the full current inventory of",
+                MEMORY_SAVE_TOOL: (
+                    "Save a durable household fact, or update an existing ID in"
+                ),
+                MEMORY_FORGET_TOOL: "Delete selected fact IDs from",
+            }
+            for name, (properties, required) in parameters.items():
+                names[name] = name
+                tools.append(
+                    CopilotTool(
+                        name=name,
+                        description=(
+                            f"{descriptions[name]} shared memory stored in "
+                            "Home Assistant "
+                            "for this integration entry. All conversation callers "
+                            "share it. "
+                            "Returned snapshots supersede earlier inventories."
+                        ),
+                        parameters={
+                            "type": "object",
+                            "properties": properties,
+                            "required": required,
+                            "additionalProperties": False,
+                        },
+                        handler=handler,
+                        skip_permission=True,
+                    )
+                )
         for ha_tool in api.tools if api is not None else ():
             try:
                 schema = convert_tool_schema(

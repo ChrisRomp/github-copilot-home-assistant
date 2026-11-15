@@ -33,6 +33,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
     from homeassistant.exceptions import ConfigEntryNotReady
 
+    from .memory import MemoryStorageError
     from .provisioning import RuntimeDownloadError
     from .runtime import CopilotRuntime
     from .runtime_cache import async_schedule_runtime_prune
@@ -73,7 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.exception("Failed to stop the Copilot runtime after setup failed")
         else:
             _remove_stopped_runtime(hass, entry, runtime)
-        if isinstance(err, (OSError, RuntimeDownloadError)):
+        if isinstance(err, (OSError, RuntimeDownloadError, MemoryStorageError)):
             raise ConfigEntryNotReady(
                 f"Unable to start the Copilot runtime: {err}"
             ) from err
@@ -142,24 +143,76 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove entry-owned state and Repairs, retaining the shared runtime cache."""
     import asyncio
+    from pathlib import Path
 
     from homeassistant.helpers import issue_registry as ir
 
+    from .cleanup import async_wait_cleanup
     from .const import (
         DATA_CREDENTIAL_LOCKS,
+        ISSUE_MEMORY_CLEANUP_FAILED,
         ISSUE_MODEL_FALLBACK,
         ISSUE_MODEL_UNAVAILABLE,
         ISSUE_QUOTA_EXCEEDED,
         ISSUE_TASK_MODEL_FALLBACK,
         ISSUE_TASK_MODEL_UNAVAILABLE,
     )
+    from .memory import MemoryManager
     from .runtime import remove_entry_directory
+
+    memory = MemoryManager(hass, entry.entry_id)
+    memory_issue_id = f"{ISSUE_MEMORY_CLEANUP_FAILED}_{entry.entry_id}"
+
+    async def report_memory_cleanup_failure() -> None:
+        if runtime is not None:
+            await runtime.memory.async_close()
+        try:
+            await asyncio.to_thread(
+                Path(hass.config.path(".storage", memory.key)).lstat
+            )
+        except FileNotFoundError:
+            return
+        except OSError as err:
+            _LOGGER.warning(
+                "Unable to determine whether shared memory remains (%s)",
+                type(err).__name__,
+            )
+        # HA removes the entry even when this callback raises. Keep the warning
+        # independent of the entry so HA's registry cleanup does not erase it.
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            memory_issue_id,
+            is_fixable=False,
+            is_persistent=True,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_MEMORY_CLEANUP_FAILED,
+            translation_placeholders={"filename": memory.key},
+        )
 
     runtime: CopilotRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if runtime is not None:
-        await runtime.async_stop()
+        stopped = False
+        try:
+            await runtime.async_stop()
+            stopped = True
+        finally:
+            if not stopped:
+                await async_wait_cleanup(
+                    asyncio.create_task(report_memory_cleanup_failure())
+                )
         _remove_stopped_runtime(hass, entry, runtime)
 
+    try:
+        await memory.async_remove()
+    except OSError as err:
+        _LOGGER.error(
+            "Unable to remove shared memory (%s); continuing other entry cleanup",
+            type(err).__name__,
+        )
+        await async_wait_cleanup(asyncio.create_task(report_memory_cleanup_failure()))
+    else:
+        ir.async_delete_issue(hass, DOMAIN, memory_issue_id)
     await asyncio.to_thread(remove_entry_directory, hass, entry.entry_id)
     hass.data.get(DATA_CREDENTIAL_LOCKS, {}).pop(entry.entry_id, None)
 

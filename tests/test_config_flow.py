@@ -81,6 +81,7 @@ async def test_oauth_progress_reuses_one_poll_and_returns_model_form(
     assert submitted == {
         "model": "gpt-6-luna",
         "enable_device_control": False,
+        "enable_shared_memory": False,
         "ai_task_timeout": 180,
     }
     result = await setup.flow.async_step_model(submitted)
@@ -90,6 +91,7 @@ async def test_oauth_progress_reuses_one_poll_and_returns_model_form(
         "ai_task_model": "gpt-6-luna",
         "ai_task_timeout": 180,
         "enable_device_control": False,
+        "enable_shared_memory": False,
         "llm_hass_api": None,
         "prompt": "",
     }
@@ -135,6 +137,7 @@ async def test_initial_conversation_options_are_saved(
         "ai_task_model": "gpt-6-luna",
         "ai_task_timeout": 180,
         "enable_device_control": device_control_enabled,
+        "enable_shared_memory": False,
         "llm_hass_api": ["assist"] if device_control_enabled else None,
         "prompt": prompt if prompt is not None else "",
     }
@@ -157,6 +160,7 @@ async def test_initial_options_require_an_available_model_and_default_control_of
         "model": "gpt-6-luna",
         "ai_task_timeout": 180,
         "enable_device_control": False,
+        "enable_shared_memory": False,
     }
     with pytest.raises(vol.Invalid):
         schema({})
@@ -164,6 +168,15 @@ async def test_initial_options_require_an_available_model_and_default_control_of
         schema({"model": "unavailable"})
     prompt_field = next(key for key in schema.schema if key == "prompt")
     assert prompt_field.description == {"suggested_value": ""}
+
+
+async def test_setup_can_enable_memory_without_home_assistant_tools(flow_setup):
+    form = await flow_setup.flow.async_step_pat({"token": "github_pat_test"})
+    result = await flow_setup.flow.async_step_model(
+        form["data_schema"]({"model": "gpt-6-luna", "enable_shared_memory": True})
+    )
+    assert result["options"]["enable_shared_memory"] is True
+    assert result["options"]["llm_hass_api"] is None
 
 
 @pytest.mark.parametrize("device_control", [False, True])

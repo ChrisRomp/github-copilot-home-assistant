@@ -72,6 +72,12 @@ configuration and administrative actions beyond Assist-exposed entities.
 Change these settings under
 **Settings > Devices & services > GitHub Copilot > Configure**.
 
+**Enable shared memory** is a separate, disabled-by-default option for
+conversations. It automatically remembers durable household facts in Home
+Assistant, shared by everyone using that integration entry and sent to Copilot
+when recalled. It works without device or administrator tools and never applies
+to AI Tasks. See [shared memory](docs/usage.md#shared-memory) for limits and deletion.
+
 An AI Task entity is created alongside the conversation entity without another
 sign-in. Use it in scripts and automations, or choose it as your preferred provider
 under **Settings > System > AI**. See the [AI Task usage guide](docs/usage.md#ai-tasks)
@@ -85,6 +91,10 @@ information, and tool results are sent to GitHub Copilot. Credentials and
 temporary conversation files can be included in Home Assistant backups; treat
 those backups as sensitive. Logs and configuration may contain sensitive data;
 review the administrator-tools option before enabling it.
+
+Optional shared memories also persist in HA storage and backups. Disabling
+memory preserves them; removing the integration entry deletes its memory store.
+Forgetting does not erase earlier chat messages, model requests, or backups.
 
 Chats expire after five minutes of inactivity, and a Home Assistant restart
 starts fresh conversations. AI Tasks use disposable sessions. Image requests are

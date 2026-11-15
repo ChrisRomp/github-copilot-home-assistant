@@ -141,7 +141,30 @@ status, and fixed reason categories, not process arguments, PIDs, paths, or raw
 errors. Benign unknown files and protected versions alone do not generate
 warnings. Bounds and repeated safety deferrals can leave work for later restarts;
 cleanup does not promise to reach every directory behind a persistent scan limit.
-See [manual recovery](usage.md#runtime-cache-and-manual-recovery).
+See [manual recovery](#manual-runtime-cache-recovery).
+
+### Manual runtime cache recovery
+
+Cache removal requires a stopped Home Assistant and no processes using the
+cache. Disabling integration entries alone is not enough.
+
+1. Stop Home Assistant. Configuration dialogs can also start temporary runtime
+   processes.
+2. Confirm that native runtime and installer processes using this cache have
+   stopped too. If orphaned processes cannot be ruled out, restart the owning
+   container or host and keep HA stopped before proceeding.
+3. Remove only the intended obsolete version or cleanup-owned
+   `.pruning-<version>-<32-hex>` directory. To force a full re-download, remove the
+   exact `<config>/.storage/github_copilot/runtime/` directory. Do not remove
+   `.storage/github_copilot/`, entry-owned session directories, credentials, or
+   generated media.
+4. Start Home Assistant and allow it to download the pinned runtime again if
+   necessary.
+
+Do not share this private cache between HA instances or containers, or launch
+unmanaged processes from it while cleanup is running. After a rollback, a
+running current-pin runtime can retain `.pruning-<pin>-*` trash; restarts alone
+may not reclaim it while that version remains active.
 
 ### Per-entry session retention
 
@@ -207,6 +230,105 @@ Session cleanup and backup implications are described in the
 
 ## Instructions and tool permissions
 
+### Shared conversation memory
+
+`memory.py` owns one `MemoryManager` and mutation lock per entry runtime. The
+version-1 HA JSON Store key is `github_copilot.memory.<entry-id>`, written to
+`<config>/.storage/github_copilot.memory.<entry-id>` outside the SDK session
+directory. It is HA-managed, not an editable Markdown file. It uses private file
+permissions and atomic writes, not encryption. `async_save` can swallow HA
+write errors, so acknowledgement requires an executor-backed, non-cached disk
+read matching the full candidate collection. The normal Store load path is
+deliberately not used: it can rename corrupt JSON and return an empty result.
+Malformed, unsupported, and unreadable files instead fail closed without
+overwriting recoverable data. Missing files represent empty collections.
+
+The collection holds at most 50 facts of 300 characters each. Records contain
+opaque stable IDs, fact text, creation/update timestamps, and a source quotation
+of at most 300 characters from the actual user request. No complete transcript
+or HA user identifier is stored. Diagnostics expose only the enabled flag and
+aggregate count, which is unknown before loading.
+
+With memory enabled, unreadable storage prevents startup or fails conversation
+turns before sending them to Copilot. Disabling memory permits use without
+recall and preserves the file. Restore a valid backup only while the integration
+entry is unloaded, then reload it. Editing, replacing, or deleting the store
+while the entry is running is unsupported; a restored revision could otherwise
+match an active session's inventory revision despite different contents.
+
+The schema validates IDs, timestamps, bounded fact/source strings, collection
+size, and monotonic nonnegative revisions. Mutation calls serialize through the
+entry lock and reject stale expected revisions with the latest snapshot.
+Supporting source quotations must be exact excerpts of the unchanged actual
+current user request; this establishes provenance, not semantic truth. Exact
+duplicates are unchanged; explicit-ID updates work at capacity without eviction.
+Updating one ID to text already held by another returns `invalid_input` with the
+duplicate ID and current snapshot, without changing either fact.
+Accepted writes and verification reads drain on cancellation before unlocking;
+shutdown closes admission and drains memory before tearing down the runtime.
+Entry removal explicitly calls `Store.async_remove`, even without a loaded
+runtime. HA removes an entry even if its removal callback raises, so a failed
+memory unlink is logged without raw details and reported through a persistent
+Repair identifying the leftover file and manual cleanup steps. The Repair is
+not tied to the removed config entry, so HA's registry cleanup retains it.
+If runtime shutdown fails or is cancelled before deletion, the same Repair is
+created before propagating the failure; runtime ownership and live session files
+are retained. Memory writes are first drained, then a metadata-only filesystem
+check suppresses the warning when storage is confirmed absent. An unreadable
+path still produces the warning because absence cannot be established.
+After manual cleanup, users can acknowledge the notice with HA's existing
+Ignore action; there is no background filesystem monitor or custom repair flow.
+After a memory unlink failure, other entry cleanup continues.
+Reloads, disabling, and SDK cleanup do not delete
+memory. Restarting the same runtime drains its previous stop and creates a fresh
+manager before loading the retained store; old tool handlers keep their closed
+manager.
+
+The excerpt check is not proof that a proposed fact is supported or that a
+deletion is authorized. Text passed through `conversation.process`, including
+templated automation text, counts as the user request. Remembering decisions
+still depend on model interpretation of the fixed policy; untrusted external
+content must not be promoted into request instructions.
+Memory tool arguments and results enter HA's ChatLog and may appear in Assist
+debug traces, including fact text, source excerpts, and full snapshots.
+Forgetting does not rewrite those records, already-sent requests, or backups.
+
+`ha_memory_list`, `ha_memory_save`, and `ha_memory_forget` are integration-owned
+conversation tools, routed separately from HA device/admin APIs. They recheck
+the enabled option and active turn, including after waiting for the memory lock.
+Native SDK memory is explicitly disabled for every session. Data and image tasks
+never get these tools, the memory policy, or reference snapshots.
+
+Only fixed memory policy enters the trusted identity override. Fact contents
+are JSON reference data in the SDK user input or untrusted tool results, never
+system/developer content, owner custom instructions, or tool descriptions.
+HA-visible input and source provenance stay unchanged; SDK `display_prompt`
+retains the actual request while the model-bound prompt carries separate
+reference data. Snapshots contain IDs, text, revision and capacity, not sources
+or timestamps. Reference JSON escapes `<`, `>`, and `&` so stored strings cannot
+close the reference delimiter; decoding it preserves the exact saved facts.
+Session revision tracking avoids unchanged copies and refreshes after other-chat
+writes, compaction, context clearing, truncation, or rewind. Mutation results carry
+the full new inventory and update that session's tracking; old history is not
+rewritten when forgetting.
+
+Memory-enabled conversation sessions raise the SDK large-tool-output threshold
+to 256,000 bytes so even a full, JSON-escaped Unicode inventory remains inline
+instead of becoming an unreadable file reference. This threshold also applies
+to other tool results in those sessions; disabled conversations and AI Tasks
+retain the SDK default. Native contracts verify all 50 maximum-length facts
+actually reach the model.
+
+`tests/test_memory.py` uses real HA Store/disk for limits, concurrency, private
+permissions, swallowed write failures, corruption preservation, cancellation,
+and unloaded-entry removal. Backend tests cover tool/lifecycle boundaries.
+Opt-in native contracts exercise actual outbound user/tool versus system roles,
+snapshot refresh, context reset and compaction through the cached runtime and a
+loopback fake model. No live GitHub requests or HA device actions are needed.
+Report unavailable native/HA contracts as unverified, not passing.
+
+### Trusted instructions and live context
+
 Only fixed integration rules and the owner's **Additional instructions** enter
 the SDK's system-instruction channel. Additional instructions are literal text:
 HA templates are not expanded into that privileged channel. HA's combined,
@@ -257,6 +379,12 @@ sessions outside the conversation-history cache. Their structured responses use
 native SDK schemas plus original HA validation. Schema/refusal errors must not
 be treated as model removal.
 
+Open-ended object selectors are not supported by the strict output adapter.
+Multi-select fields, bounded numbers, and fixed-length arrays such as RGB colors
+are supported. Provider schemas use textual hints for uniqueness, numeric
+constraints, and array lengths unsupported by some models' strict output APIs;
+the original HA selectors still validate these constraints on the result.
+
 Provider schema errors are classified from both OpenAI-style `response_format`
 and Anthropic-style `output_config.format.schema` messages, SDK error codes, and
 wrapped exceptions. Diagnostic summaries log the operation, active model, and
@@ -286,8 +414,8 @@ successful force-stop.
 Task Repair content is derived from both text and vision resolutions from the
 same catalog snapshot, while diagnostics retain the actual selected task model.
 The existing startup model check performs at most two delayed retries while the
-initial catalog is unknown; it stops on shutdown, known catalog state,
-authentication rejection, or quota exhaustion.
+initial catalog is unknown, after 5 and 15 seconds; it stops on shutdown, known
+catalog state, authentication rejection, or quota exhaustion.
 HA time selectors request local `HH:MM:SS` strings rather than RFC 3339 `time`
 values with offsets; original HA validation remains authoritative.
 
@@ -297,6 +425,12 @@ payload copies after the first Linux profile showed that the earlier estimate
 could admit dense PNG batches that exhausted a 512 MiB container. This is not a
 64 MiB total-RSS guarantee. Reads are bounded and nonblocking, non-regular files
 are rejected, and raster buffers are explicitly closed before inference.
+
+Input processing is serialized across integration entries. As examples of the
+current admission estimate, a 1920x1080 JPEG around 400 KB fits, a 2560x1440
+snapshot leaves room for roughly 175 KiB of compressed data for the first image,
+and 3840x2160 exceeds the pixel allowance regardless of compression. Multiple
+images share the payload budget; these examples are not a fixed 2 MP limit.
 
 `tests/image_resource_probe.py` exercises the production image helper and native
 SDK with a loopback-only fake model. It refuses to run unless the environment is
@@ -327,6 +461,12 @@ to the tool-call ID and exact prompt arguments; managed approvals are not
 bypassed. It requests `save_to_disk=False`, validates the canonical PNG, and
 deduplicates duplicate output representations. Referenced binary assets are
 handled only within the owning task.
+
+HA publishes generated PNGs through its AI Task media source and stores them in
+`ai_task/image` under the first configured media directory. Signed URL expiry and
+SDK session cleanup do not remove these files. HA 2026.11's `ai_task.clear_images`
+action manages that shared folder across providers, independently of this
+integration's session and runtime-cache cleanup.
 
 The live requalification used the existing GitHub CLI sign-in, passed its token
 only in memory as an explicit session credential, and made one synthetic image

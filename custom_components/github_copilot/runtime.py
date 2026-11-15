@@ -25,6 +25,7 @@ from .const import (
     CONF_ACCESS_TOKEN_EXPIRES_AT,
     CONF_AI_TASK_MODEL,
     CONF_AI_TASK_MODEL_BILLING,
+    CONF_ENABLE_SHARED_MEMORY,
     CONF_MODEL,
     CONF_MODEL_BILLING,
     DATA_SESSION_CLEANUP_LOCK,
@@ -38,6 +39,7 @@ from .const import (
     SESSION_CLEANUP_INTERVAL_SECONDS,
     VERIFIED_IMAGE_RUNTIME,
 )
+from .memory import MemoryManager
 from .models import model_billing
 from .provisioning import async_runtime_path
 from .session_cleanup import SessionCleanup
@@ -58,6 +60,7 @@ class CopilotRuntime:
         self.hass = hass
         self.entry = entry
         self.options = dict(entry.options)
+        self.memory = MemoryManager(hass, entry.entry_id)
         self.credentials = CredentialStore(hass, entry, OAUTH_CLIENT_ID)
         self.client: Any | None = None
         self.backend: Any | None = None
@@ -79,7 +82,12 @@ class CopilotRuntime:
         from copilot import CopilotClient
         from copilot.client import RuntimeConnection
 
+        if self._stopping:
+            await self.async_stop()
+            self.memory = MemoryManager(self.hass, self.entry.entry_id)
         self._stopping = False
+        if self.entry.options.get(CONF_ENABLE_SHARED_MEMORY, False):
+            await self.memory.async_snapshot()
         try:
             await self.credentials.async_ensure_account_id()
         except ReauthenticationRequired:
@@ -138,6 +146,7 @@ class CopilotRuntime:
             image_model_getter=self.image_model,
             force_stop=lambda: self._async_force_stop_client(client),
             on_runtime_failure=on_runtime_failure,
+            memory=self.memory,
         )
         self.backend = backend
         self.is_started = True
@@ -218,7 +227,12 @@ class CopilotRuntime:
         """Stop the SDK runtime and release its process resources."""
         async with self._stop_lock:
             self._stopping = True
+            self.memory.stop()
             interrupted: asyncio.CancelledError | None = None
+            try:
+                await self.memory.async_close()
+            except asyncio.CancelledError as err:
+                interrupted = err
             try:
                 await async_wait_cleanup(
                     asyncio.create_task(self._async_quiesce_maintenance())

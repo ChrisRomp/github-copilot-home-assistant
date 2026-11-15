@@ -45,6 +45,7 @@ from .const import (
     CONF_AUTH_METHOD,
     CONF_ENABLE_DEVICE_CONTROL,
     CONF_ENABLE_HOME_ASSISTANT_API,
+    CONF_ENABLE_SHARED_MEMORY,
     CONF_MODEL,
     CONF_MODEL_BILLING,
     CONF_REFRESH_TOKEN,
@@ -226,6 +227,9 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT
                 ),
                 CONF_ENABLE_DEVICE_CONTROL: device_control_enabled,
+                CONF_ENABLE_SHARED_MEMORY: user_input.get(
+                    CONF_ENABLE_SHARED_MEMORY, False
+                ),
                 CONF_PROMPT: user_input.get(CONF_PROMPT, ""),
             }
             if CONF_ENABLE_HOME_ASSISTANT_API in user_input:
@@ -365,6 +369,7 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
                 self._entry.options.get(CONF_AI_TASK_MODEL, options[CONF_MODEL]),
             )
             options.setdefault(CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT)
+            options.setdefault(CONF_ENABLE_SHARED_MEMORY, False)
             device_control_enabled = options[CONF_ENABLE_DEVICE_CONTROL]
             options[CONF_ENABLE_DEVICE_CONTROL] = device_control_enabled
             options[CONF_LLM_HASS_API] = selected_llm_apis(options)
@@ -509,6 +514,10 @@ def _options_schema(
             default=bool(
                 options.get(CONF_ENABLE_DEVICE_CONTROL, options.get(CONF_LLM_HASS_API))
             ),
+        ): BooleanSelector(),
+        vol.Required(
+            CONF_ENABLE_SHARED_MEMORY,
+            default=bool(options.get(CONF_ENABLE_SHARED_MEMORY, False)),
         ): BooleanSelector(),
     }
     if home_assistant_api_supported() or options.get(CONF_ENABLE_HOME_ASSISTANT_API):

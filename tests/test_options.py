@@ -27,6 +27,7 @@ def options_setup(ha_boundary):
             "ai_task_timeout": 180,
             CONF_PROMPT: "Previous instructions",
             CONF_ENABLE_DEVICE_CONTROL: True,
+            "enable_shared_memory": False,
             CONF_LLM_HASS_API: ["assist"],
         },
         data={
@@ -75,6 +76,7 @@ async def test_prompt_edit_preserves_unchanged_model_billing(options_setup, mult
         CONF_ENABLE_DEVICE_CONTROL: True,
         CONF_LLM_HASS_API: ["assist"],
         CONF_PROMPT: "Updated instructions",
+        "enable_shared_memory": False,
     }
     assert setup.entry.data == original_data
     setup.flow.hass.config_entries.async_update_entry.assert_called_once()
@@ -200,6 +202,22 @@ async def test_option_changes_preserve_independent_api_selection(
         expected_apis.append("homeassistant")
     assert result["data"][CONF_LLM_HASS_API] == (expected_apis or None)
     assert result["data"][CONF_ENABLE_HOME_ASSISTANT_API] is administrator_tools
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_shared_memory_option_is_independent_and_round_trips(
+    options_setup, enabled
+):
+    setup = options_setup
+    setup.entry.options.update(
+        enable_shared_memory=enabled, enable_device_control=False
+    )
+    form = await setup.flow.async_step_init()
+    submitted = form["data_schema"]({})
+    assert submitted["enable_shared_memory"] is enabled
+    result = await setup.flow.async_step_init(submitted)
+    assert result["data"]["enable_shared_memory"] is enabled
+    assert result["data"][CONF_LLM_HASS_API] is None
 
 
 async def test_downgrade_allows_disabling_unavailable_administrator_tools(

@@ -21,10 +21,12 @@ from custom_components.github_copilot.const import (
     DATA_RUNTIME_PRUNE,
     DOMAIN,
 )
+from custom_components.github_copilot.memory import MemoryManager
 
 
 @pytest.fixture
 async def setup_entry(ha_boundary, monkeypatch, tmp_path):
+    monkeypatch.setattr(MemoryManager, "async_remove", AsyncMock())
     monkeypatch.setattr(
         sys.modules["homeassistant.const"],
         "EVENT_HOMEASSISTANT_STOP",
@@ -65,6 +67,7 @@ async def setup_entry(ha_boundary, monkeypatch, tmp_path):
         ),
         bus=SimpleNamespace(async_listen_once=Mock(return_value=Mock())),
     )
+    runtime.memory = SimpleNamespace(async_close=AsyncMock())
     yield SimpleNamespace(hass=hass, entry=entry, runtime=runtime, callbacks=callbacks)
     await asyncio.gather(*tasks)
 
@@ -370,13 +373,15 @@ async def test_remove_stops_runtime_retained_after_failed_setup(
     remove = Mock(side_effect=remove_directory)
     monkeypatch.setattr(runtime_module, "remove_entry_directory", remove)
     await async_remove_entry(setup.hass, setup.entry)
+    MemoryManager.async_remove.assert_awaited_once()
     remove.assert_called_once_with(setup.hass, setup.entry.entry_id)
     assert DOMAIN not in setup.hass.data
 
 
 @pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.parametrize("storage", ["present", "missing", "unreadable"])
 async def test_remove_preserves_state_when_retained_runtime_cannot_stop(
-    setup_entry, monkeypatch, error_type
+    setup_entry, monkeypatch, error_type, storage
 ):
     from homeassistant.helpers import issue_registry as ir
 
@@ -392,6 +397,21 @@ async def test_remove_preserves_state_when_retained_runtime_cannot_stop(
     }
     remove = Mock()
     monkeypatch.setattr(runtime_module, "remove_entry_directory", remove)
+    memory_path = Path(
+        setup.hass.config.path(".storage", "github_copilot.memory.entry")
+    )
+    if storage == "present":
+        memory_path.parent.mkdir(parents=True)
+        memory_path.write_text("Retained memory data")
+    elif storage == "unreadable":
+        original_lstat = Path.lstat
+
+        def unreadable(path, *args, **kwargs):
+            if path == memory_path:
+                raise PermissionError("Cannot inspect memory storage")
+            return original_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", unreadable)
     with pytest.raises(error_type) as raised:
         await async_remove_entry(setup.hass, setup.entry)
     assert raised.value is error
@@ -399,6 +419,19 @@ async def test_remove_preserves_state_when_retained_runtime_cannot_stop(
     ir.async_delete_issue.assert_not_called()
     assert setup.hass.data[DOMAIN]["entry"] is setup.runtime
     assert setup.hass.data[DATA_CREDENTIAL_LOCKS]["entry"] is lock
+    MemoryManager.async_remove.assert_not_awaited()
+    setup.runtime.memory.async_close.assert_awaited_once()
+    if storage == "missing":
+        ir.async_create_issue.assert_not_called()
+        return
+    ir.async_create_issue.assert_called_once()
+    assert ir.async_create_issue.call_args.kwargs["is_persistent"] is True
+    assert ir.async_create_issue.call_args.kwargs["translation_key"] == (
+        "memory_cleanup_failed"
+    )
+    assert ir.async_create_issue.call_args.kwargs["translation_placeholders"] == {
+        "filename": "github_copilot.memory.entry"
+    }
 
 
 async def test_remove_unloaded_entry_preserves_other_runtime_and_lock(

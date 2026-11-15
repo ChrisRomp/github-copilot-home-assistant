@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -17,6 +18,218 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("HA_COPILOT_HA_TESTS") != "1",
     reason="Requires the full pinned Home Assistant dependencies",
 )
+
+
+async def test_real_chat_memory_keeps_user_input_and_provenance_unchanged(tmp_path):
+    from homeassistant.components.conversation import ConversationInput
+    from homeassistant.components.conversation.chat_log import (
+        ChatLog,
+        ToolResultContent,
+        UserContent,
+    )
+    from homeassistant.core import Context, HomeAssistant
+
+    from custom_components.github_copilot.backend import ConversationBackend
+    from custom_components.github_copilot.memory import MemoryManager
+
+    hass = HomeAssistant(str(tmp_path))
+    manager = MemoryManager(hass, "entry")
+    session = create_autospec(CopilotSession, instance=True)
+    session.session_id = "sdk-memory"
+    session.on.return_value = Mock()
+    session.rpc = SimpleNamespace(options=SimpleNamespace(update=AsyncMock()))
+    backend = ConversationBackend(
+        hass,
+        SimpleNamespace(
+            entry_id="entry",
+            data={},
+            options={
+                "model": "gpt-4.1",
+                "enable_shared_memory": True,
+            },
+        ),
+        SimpleNamespace(
+            create_session=AsyncMock(return_value=session), delete_session=AsyncMock()
+        ),
+        AsyncMock(),
+        AsyncMock(return_value=[SimpleNamespace(id="gpt-4.1")]),
+        access_token_getter=AsyncMock(return_value="not-used"),
+        memory=manager,
+    )
+    text = "We prefer warm reading lights."
+    chat = ChatLog(hass, "memory-chat")
+    chat.async_add_user_content(UserContent(content=text))
+    user = ConversationInput(
+        text=text,
+        context=Context(),
+        conversation_id="memory-chat",
+        device_id=None,
+        satellite_id=None,
+        language="en",
+        agent_id="conversation.test",
+    )
+
+    async def send(prompt, **kwargs):
+        assert prompt.endswith("Actual user request:\n" + text)
+        assert kwargs["display_prompt"] == text
+        tools = session.set_tools.await_args.args[0]
+        assert not any(tool.name.startswith("ha__") for tool in tools)
+        tool = next(t for t in tools if t.name == "ha_memory_save")
+        result = await tool.handler(
+            ToolInvocation(
+                tool_name=tool.name,
+                tool_call_id="save-fact",
+                arguments={
+                    "text": "Warm reading lights",
+                    "source": "warm reading lights",
+                    "expected_revision": 0,
+                },
+            )
+        )
+        assert result.result_type == "success"
+        return SimpleNamespace(
+            data=AssistantMessageData(content="Saved.", message_id="m")
+        )
+
+    session.send_and_wait.side_effect = send
+    try:
+        await backend.async_handle_message(user.agent_id, user, chat)
+        assert user.text == text
+        assert [c.content for c in chat.content if isinstance(c, UserContent)] == [text]
+        results = [c for c in chat.content if isinstance(c, ToolResultContent)]
+        assert len(results) == 1
+        assert results[0].result.data["snapshot"]["count"] == 1
+        from pathlib import Path
+
+        stored = json.loads(Path(manager.store.path).read_text())
+        assert stored["data"]["facts"][0]["source"] == "warm reading lights"
+    finally:
+        await backend.async_stop()
+        await manager.async_close()
+        await hass.async_stop()
+
+
+@pytest.mark.parametrize(
+    ("failure", "has_storage"), [("unlink", True), ("stop", True), ("stop", False)]
+)
+async def test_real_entry_removal_reports_orphaned_memory(
+    tmp_path, monkeypatch, caplog, failure, has_storage
+):
+    from pathlib import Path
+    from types import MappingProxyType
+
+    from homeassistant.config_entries import ConfigEntries, ConfigEntry
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+    from homeassistant.helpers import issue_registry as ir
+    from homeassistant.helpers.storage import Store
+
+    from custom_components import github_copilot
+    from custom_components.github_copilot import runtime as runtime_module
+    from custom_components.github_copilot.const import DOMAIN
+    from custom_components.github_copilot.memory import MemoryManager
+
+    hass = HomeAssistant(str(tmp_path))
+    try:
+        hass.config_entries = ConfigEntries(hass, {})
+        await hass.config_entries.async_initialize()
+        if setup_devices := getattr(dr, "async_setup", None):
+            setup_devices(hass)
+        await dr.async_load(hass)
+        await er.async_load(hass)
+        await ir.async_load(hass)
+        entry = ConfigEntry(
+            domain=DOMAIN,
+            entry_id="entry",
+            title="GitHub Copilot",
+            data={},
+            options={},
+            version=1,
+            minor_version=2,
+            source="user",
+            unique_id=None,
+            discovery_keys=MappingProxyType({}),
+            subentries_data=None,
+        )
+        entry._integration_for_domain = SimpleNamespace(
+            domain=DOMAIN,
+            logger=logging.getLogger("homeassistant.components.github_copilot"),
+            async_get_component=AsyncMock(return_value=github_copilot),
+        )
+        hass.config_entries._entries[entry.entry_id] = entry
+        memory = MemoryManager(hass, entry.entry_id)
+        original = None
+        if has_storage:
+            saved = await memory.async_tool(
+                "ha_memory_save",
+                {
+                    "text": "PRIVATE_HOUSEHOLD_FACT",
+                    "source": "PRIVATE_HOUSEHOLD_FACT",
+                    "expected_revision": 0,
+                },
+                "PRIVATE_HOUSEHOLD_FACT",
+            )
+            assert saved["status"] == "saved"
+            original = Path(memory.store.path).read_bytes()
+        await memory.async_close()
+        runtime = SimpleNamespace(
+            async_stop=AsyncMock(side_effect=RuntimeError("Runtime is still running")),
+            memory=memory,
+        )
+        if failure == "stop":
+            hass.data[DOMAIN] = {entry.entry_id: runtime}
+        session_state = Path(hass.config.path(".storage", DOMAIN, entry.entry_id))
+        session_state.mkdir(parents=True)
+        (session_state / "state").write_text("Live SDK state")
+        remove_directory = Mock(wraps=runtime_module.remove_entry_directory)
+        monkeypatch.setattr(runtime_module, "remove_entry_directory", remove_directory)
+        original_remove = Store.async_remove
+
+        async def fail_memory_remove(store):
+            if store.key == memory.key:
+                raise PermissionError("PRIVATE_FILESYSTEM_DETAIL")
+            await original_remove(store)
+
+        remove_memory = create_autospec(original_remove, side_effect=fail_memory_remove)
+        monkeypatch.setattr(Store, "async_remove", remove_memory)
+        result = await hass.config_entries.async_remove(entry.entry_id)
+        assert result == {"require_restart": False}
+        assert hass.config_entries.async_get_entry(entry.entry_id) is None
+        if has_storage:
+            assert Path(memory.store.path).read_bytes() == original
+        else:
+            assert not Path(memory.store.path).exists()
+        issue = ir.async_get(hass).async_get_issue(
+            DOMAIN, "memory_cleanup_failed_entry"
+        )
+        if has_storage:
+            assert issue is not None
+            assert issue.is_persistent
+            assert issue.translation_key == "memory_cleanup_failed"
+            assert issue.translation_placeholders == {"filename": memory.key}
+        else:
+            assert issue is None
+        if failure == "stop":
+            assert hass.data[DOMAIN][entry.entry_id] is runtime
+            assert (session_state / "state").read_text() == "Live SDK state"
+            remove_memory.assert_not_awaited()
+            remove_directory.assert_not_called()
+        else:
+            assert not session_state.exists()
+        assert "PRIVATE_HOUSEHOLD_FACT" not in caplog.text
+        assert "PRIVATE_FILESYSTEM_DETAIL" not in caplog.text
+        if failure == "unlink":
+            Path(memory.store.path).unlink()
+            ir.async_ignore_issue(hass, DOMAIN, "memory_cleanup_failed_entry", True)
+            assert (
+                ir.async_get(hass)
+                .async_get_issue(DOMAIN, "memory_cleanup_failed_entry")
+                .dismissed_version
+                is not None
+            )
+    finally:
+        await hass.async_stop()
 
 
 @pytest.mark.parametrize(

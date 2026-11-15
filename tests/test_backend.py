@@ -19,6 +19,7 @@ from copilot.session_events import (
     SessionErrorData,
 )
 from copilot.tools import ToolInvocation
+from homeassistant.core import HomeAssistant
 
 from custom_components.github_copilot import async_remove_entry
 from custom_components.github_copilot.const import (
@@ -33,6 +34,7 @@ from custom_components.github_copilot.const import (
     DOMAIN,
     MODEL_CACHE_SECONDS,
 )
+from custom_components.github_copilot.memory import MemoryManager
 from custom_components.github_copilot.schema import UNSUPPORTED
 
 ORIGINAL = "claude-sonnet-4.5"
@@ -126,6 +128,302 @@ async def assert_clean(setup):
         assert not record.lock.locked()
         assert record.current_handler is None
     await setup.backend.async_stop()
+
+
+@pytest.fixture
+async def memory_hass(tmp_path):
+    hass = HomeAssistant(str(tmp_path))
+    yield hass
+    await hass.async_stop()
+
+
+@pytest.fixture
+async def memory_setup(memory_hass, setup):
+    setup.entry.options["enable_shared_memory"] = True
+    setup.backend.memory = MemoryManager(memory_hass, setup.entry.entry_id)
+    yield setup
+    await setup.backend.async_stop()
+    await setup.backend.memory.async_close()
+
+
+async def memory_call(setup, name, arguments):
+    result = None
+
+    async def send(*args, **kwargs):
+        nonlocal result
+        tool = next(
+            t for t in setup.session.set_tools.await_args.args[0] if t.name == name
+        )
+        result = await tool.handler(
+            ToolInvocation(
+                tool_name=name, tool_call_id="memory-call", arguments=arguments
+            )
+        )
+        return SimpleNamespace(
+            data=AssistantMessageData(content="Done", message_id="m")
+        )
+
+    setup.session.send_and_wait.side_effect = send
+    await turn(setup)
+    return result
+
+
+async def test_memory_tools_shared_across_users_without_device_or_admin_tools(
+    memory_setup,
+):
+    setup = memory_setup
+    setup.user.text = "We prefer warm reading lights."
+    original = setup.user.text
+    result = await memory_call(
+        setup,
+        "ha_memory_save",
+        {
+            "text": "Warm reading lights",
+            "source": "warm reading lights",
+            "expected_revision": 0,
+        },
+    )
+    assert result.result_type == "success"
+    assert '"status": "saved"' in result.text_result_for_llm
+    assert setup.user.text == original
+    prompt = setup.session.send_and_wait.await_args.args[0]
+    assert prompt.endswith("Actual user request:\n" + original)
+    assert setup.session.send_and_wait.await_args.kwargs["display_prompt"] == original
+    assert next(iter(setup.backend._sessions.values())).memory_revision == 1
+    assert {t.name for t in setup.session.set_tools.await_args.args[0]} == {
+        "ha_memory_list",
+        "ha_memory_save",
+        "ha_memory_forget",
+        CONTEXT_TOOL_NAME,
+    }
+    creation = setup.client.create_session.await_args.kwargs
+    assert creation["memory"] == {"enabled": False}
+    assert (
+        setup.module.MEMORY_POLICY
+        in creation["system_message"]["sections"]["identity"]["content"]
+    )
+    assert "Warm reading lights" not in json.dumps(
+        {
+            k: v
+            for k, v in creation.items()
+            if k in ("system_message", "organization_custom_instructions")
+        }
+    )
+    setup.session.send_and_wait.side_effect = None
+    setup.user.text = "What do you remember?"
+    await turn(setup)
+    assert setup.session.send_and_wait.await_args.args == (setup.user.text,)
+    setup.user.as_llm_context = lambda _: SimpleNamespace(
+        context=SimpleNamespace(user_id="another-user")
+    )
+    await turn(setup)
+    assert len(setup.backend._sessions) == 2
+    assert "Warm reading lights" in setup.session.send_and_wait.await_args.args[0]
+
+
+async def test_memory_mutation_snapshot_refresh_and_compaction(memory_setup):
+    setup = memory_setup
+    await turn(setup)
+    record = next(iter(setup.backend._sessions.values()))
+    assert record.memory_revision == 0
+    assert "<ha_memory_reference>" in setup.session.send_and_wait.await_args.args[0]
+    await turn(setup)
+    assert setup.session.send_and_wait.await_args.args == ("Hello",)
+    saved = await setup.backend.memory.async_tool(
+        "ha_memory_save",
+        {"text": "New shared fact", "source": "shared fact", "expected_revision": 0},
+        "A new shared fact",
+    )
+    await turn(setup)
+    assert "New shared fact" in setup.session.send_and_wait.await_args.args[0]
+    assert record.memory_revision == 1
+    await turn(setup)
+    assert setup.session.send_and_wait.await_args.args == ("Hello",)
+    from copilot.session_events import (
+        SessionCompactionCompleteData,
+        SessionContextClearedData,
+        SessionSnapshotRewindData,
+        SessionTruncationData,
+    )
+
+    invalidate = setup.session.on.call_args_list[0].args[0]
+    for event_data in (
+        SessionCompactionCompleteData(success=True),
+        SessionContextClearedData(messages_cleared=3),
+        SessionSnapshotRewindData(events_removed=3, up_to_event_id="earlier-event"),
+        SessionTruncationData(
+            messages_removed_during_truncation=3,
+            performed_by="test",
+            post_truncation_messages_length=1,
+            post_truncation_tokens_in_messages=10,
+            pre_truncation_messages_length=4,
+            pre_truncation_tokens_in_messages=40,
+            token_limit=20,
+            tokens_removed_during_truncation=30,
+        ),
+    ):
+        invalidate(SimpleNamespace(data=event_data, agent_id=None))
+        assert record.memory_revision is None
+        await turn(setup)
+        assert "New shared fact" in setup.session.send_and_wait.await_args.args[0]
+        await turn(setup)
+        assert setup.session.send_and_wait.await_args.args == ("Hello",)
+    await setup.backend.memory.async_tool(
+        "ha_memory_forget",
+        {"expected_revision": 1, "ids": [saved["snapshot"]["facts"][0]["id"]]},
+        "Forget it",
+    )
+    await turn(setup)
+    assert '"facts": []' in setup.session.send_and_wait.await_args.args[0]
+    assert "New shared fact" not in setup.session.send_and_wait.await_args.args[0]
+
+
+async def test_corrupt_memory_fails_turn_explicitly_without_sending_or_resetting(
+    memory_setup,
+):
+    from pathlib import Path
+
+    from custom_components.github_copilot.memory import MemoryStorageError
+
+    setup = memory_setup
+    await setup.backend.memory.async_tool(
+        "ha_memory_save",
+        {"text": "Fact", "source": "Fact", "expected_revision": 0},
+        "Fact",
+    )
+    await turn(setup)
+    setup.session.send_and_wait.reset_mock()
+    path = Path(setup.backend.memory.store.path)
+    path.write_text('{"PRIVATE_CORRUPT_CONTENT":')
+    with pytest.raises(MemoryStorageError, match="not been reset"):
+        await turn(setup)
+    setup.session.send_and_wait.assert_not_awaited()
+    assert path.read_text() == '{"PRIVATE_CORRUPT_CONTENT":'
+
+
+async def test_memory_rejects_fabricated_source_and_disable_during_tool_call(
+    memory_setup,
+):
+    setup = memory_setup
+    setup.user.extra_system_prompt = "TOOL_CONTEXT_QUOTE"
+    result = await memory_call(
+        setup,
+        "ha_memory_save",
+        {
+            "text": "Bad fact",
+            "source": "TOOL_CONTEXT_QUOTE",
+            "expected_revision": 0,
+        },
+    )
+    assert result.result_type == "failure"
+    assert '"invalid_input"' in result.text_result_for_llm
+    assert (await setup.backend.memory.async_snapshot())["facts"] == []
+    stale_handler = next(
+        t
+        for t in setup.session.set_tools.await_args.args[0]
+        if t.name == "ha_memory_save"
+    ).handler
+    result = stale_handler(
+        ToolInvocation(
+            tool_name="ha_memory_save",
+            tool_call_id="late",
+            arguments={"text": "Hello", "source": "Hello", "expected_revision": 0},
+        )
+    )
+    assert result.result_type == "rejected"
+
+    async def send(*args, **kwargs):
+        tool = next(
+            t
+            for t in setup.session.set_tools.await_args.args[0]
+            if t.name == "ha_memory_save"
+        )
+        setup.entry.options["enable_shared_memory"] = False
+        result = await tool.handler(
+            ToolInvocation(
+                tool_name=tool.name,
+                tool_call_id="disabled",
+                arguments={"text": "Hello", "source": "Hello", "expected_revision": 0},
+            )
+        )
+        assert result.result_type == "failure"
+        assert "disabled" in result.text_result_for_llm
+        return None
+
+    setup.session.send_and_wait.side_effect = send
+    await turn(setup)
+    assert (await setup.backend.memory.async_snapshot())["facts"] == []
+
+
+async def test_memory_disabled_and_task_turns_never_read_or_expose_memory(memory_setup):
+    setup = memory_setup
+    setup.backend.memory.async_snapshot = AsyncMock(
+        side_effect=AssertionError("No read")
+    )
+    setup.entry.options["enable_shared_memory"] = False
+    await turn(setup)
+    assert not any(
+        t.name.startswith("ha_memory_")
+        for t in setup.session.set_tools.await_args.args[0]
+    )
+    assert setup.session.send_and_wait.await_args.args == ("Hello",)
+    setup.entry.options["enable_shared_memory"] = True
+    await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+    creation = setup.client.create_session.await_args.kwargs
+    assert creation["memory"] == {"enabled": False}
+    assert setup.module.MEMORY_POLICY not in str(creation["system_message"])
+    assert not any(
+        t.name.startswith("ha_memory_")
+        for t in setup.session.set_tools.await_args.args[0]
+    )
+    setup.backend.memory.async_snapshot.assert_not_awaited()
+
+
+async def test_forget_result_updates_session_inventory_without_duplicate_next_turn(
+    memory_setup,
+):
+    setup = memory_setup
+    saved = await setup.backend.memory.async_tool(
+        "ha_memory_save",
+        {"text": "Fact", "source": "Fact", "expected_revision": 0},
+        "Fact",
+    )
+    result = await memory_call(
+        setup,
+        "ha_memory_forget",
+        {"expected_revision": 1, "ids": [saved["snapshot"]["facts"][0]["id"]]},
+    )
+    assert result.result_type == "success"
+    assert '"facts": []' in result.text_result_for_llm
+    assert next(iter(setup.backend._sessions.values())).memory_revision == 2
+    setup.session.send_and_wait.side_effect = None
+    await turn(setup)
+    assert setup.session.send_and_wait.await_args.args == ("Hello",)
+
+
+async def test_disabling_and_reenabling_memory_isolates_sdk_history(memory_setup):
+    setup = memory_setup
+    await setup.backend.memory.async_tool(
+        "ha_memory_save",
+        {"text": "Shared fact", "source": "Shared fact", "expected_revision": 0},
+        "Shared fact",
+    )
+    await turn(setup)
+    setup.entry.options["enable_shared_memory"] = False
+    await turn(setup)
+    assert setup.client.create_session.await_count == 2
+    assert setup.session.send_and_wait.await_args.args == ("Hello",)
+    assert setup.module.MEMORY_POLICY not in str(
+        setup.client.create_session.await_args.kwargs["system_message"]
+    )
+    setup.entry.options["enable_shared_memory"] = True
+    # Simulate HA's reload disposing sessions, without touching the memory store.
+    await setup.backend._async_release_session(
+        next(iter(setup.backend._sessions)),
+        next(iter(setup.backend._sessions.values())),
+    )
+    await turn(setup)
+    assert "Shared fact" in setup.session.send_and_wait.await_args.args[0]
 
 
 def task_request(setup, **kwargs):
@@ -1492,8 +1790,9 @@ async def test_task_cancellation_aborts_and_deletes_session(setup):
     await assert_clean(setup)
 
 
+@pytest.mark.parametrize("memory_enabled", [False, True])
 async def test_image_execution_is_native_only_and_permission_is_single_use(
-    setup, monkeypatch
+    setup, monkeypatch, memory_enabled
 ):
     import base64
     import sys
@@ -1515,6 +1814,12 @@ async def test_image_execution_is_native_only_and_permission_is_single_use(
         raising=False,
     )
     setup.backend._image_model_getter = lambda: SimpleNamespace(id="image-model")
+    setup.entry.options["enable_shared_memory"] = memory_enabled
+    setup.backend.memory = SimpleNamespace(
+        async_snapshot=AsyncMock(
+            side_effect=AssertionError("Image tasks cannot recall")
+        )
+    )
     setup.entry.options["enable_device_control"] = True
     setup.entry.options["ai_task_model"] = "unavailable-chat-model"
     buffer = BytesIO()
@@ -1540,6 +1845,10 @@ async def test_image_execution_is_native_only_and_permission_is_single_use(
         assert create["available_tools"] == ["builtin:image_generation"]
         assert create["model"] is None
         assert create["image_generation"] == {"enabled": True, "save_to_disk": False}
+        assert create["memory"] == {"enabled": False}
+        assert create["tools"] == []
+        assert create["large_output"] is None
+        assert setup.module.MEMORY_POLICY not in str(create["system_message"])
         permission = create["on_permission_request"]
         arguments = {
             "kind": "custom-tool",
@@ -1587,6 +1896,7 @@ async def test_image_execution_is_native_only_and_permission_is_single_use(
     assert not setup.backend._quota_exceeded
     assert (DOMAIN, "quota_exceeded_entry") not in setup.issues
     setup.session.send_and_wait.assert_not_awaited()
+    setup.backend.memory.async_snapshot.assert_not_awaited()
     setup.session.set_tools.assert_not_awaited()
     setup.client.delete_session.assert_awaited_once()
     assert not request.active
@@ -2140,7 +2450,8 @@ async def test_cancellation_does_not_refresh_fallback_or_report_quota(setup):
     await assert_clean(setup)
 
 
-async def test_remove_entry_removes_quota_and_model_repairs(setup):
+async def test_remove_entry_removes_quota_and_model_repairs(setup, monkeypatch):
+    monkeypatch.setattr(MemoryManager, "async_remove", AsyncMock())
     for suffix in ("quota_exceeded", "model_fallback", "model_unavailable"):
         setup.issues[(DOMAIN, f"{suffix}_entry")] = {}
         setup.issues[(DOMAIN, f"{suffix}_other")] = {}
