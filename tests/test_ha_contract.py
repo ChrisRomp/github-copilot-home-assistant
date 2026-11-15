@@ -109,9 +109,11 @@ async def test_real_chat_memory_keeps_user_input_and_provenance_unchanged(tmp_pa
         await hass.async_stop()
 
 
-@pytest.mark.parametrize("failure", ["unlink", "stop"])
+@pytest.mark.parametrize(
+    ("failure", "has_storage"), [("unlink", True), ("stop", True), ("stop", False)]
+)
 async def test_real_entry_removal_reports_orphaned_memory(
-    tmp_path, monkeypatch, caplog, failure
+    tmp_path, monkeypatch, caplog, failure, has_storage
 ):
     from pathlib import Path
     from types import MappingProxyType
@@ -157,20 +159,23 @@ async def test_real_entry_removal_reports_orphaned_memory(
         )
         hass.config_entries._entries[entry.entry_id] = entry
         memory = MemoryManager(hass, entry.entry_id)
-        saved = await memory.async_tool(
-            "ha_memory_save",
-            {
-                "text": "PRIVATE_HOUSEHOLD_FACT",
-                "source": "PRIVATE_HOUSEHOLD_FACT",
-                "expected_revision": 0,
-            },
-            "PRIVATE_HOUSEHOLD_FACT",
-        )
-        assert saved["status"] == "saved"
-        original = Path(memory.store.path).read_bytes()
+        original = None
+        if has_storage:
+            saved = await memory.async_tool(
+                "ha_memory_save",
+                {
+                    "text": "PRIVATE_HOUSEHOLD_FACT",
+                    "source": "PRIVATE_HOUSEHOLD_FACT",
+                    "expected_revision": 0,
+                },
+                "PRIVATE_HOUSEHOLD_FACT",
+            )
+            assert saved["status"] == "saved"
+            original = Path(memory.store.path).read_bytes()
         await memory.async_close()
         runtime = SimpleNamespace(
-            async_stop=AsyncMock(side_effect=RuntimeError("Runtime is still running"))
+            async_stop=AsyncMock(side_effect=RuntimeError("Runtime is still running")),
+            memory=memory,
         )
         if failure == "stop":
             hass.data[DOMAIN] = {entry.entry_id: runtime}
@@ -191,14 +196,20 @@ async def test_real_entry_removal_reports_orphaned_memory(
         result = await hass.config_entries.async_remove(entry.entry_id)
         assert result == {"require_restart": False}
         assert hass.config_entries.async_get_entry(entry.entry_id) is None
-        assert Path(memory.store.path).read_bytes() == original
+        if has_storage:
+            assert Path(memory.store.path).read_bytes() == original
+        else:
+            assert not Path(memory.store.path).exists()
         issue = ir.async_get(hass).async_get_issue(
             DOMAIN, "memory_cleanup_failed_entry"
         )
-        assert issue is not None
-        assert issue.is_persistent
-        assert issue.translation_key == "memory_cleanup_failed"
-        assert issue.translation_placeholders == {"filename": memory.key}
+        if has_storage:
+            assert issue is not None
+            assert issue.is_persistent
+            assert issue.translation_key == "memory_cleanup_failed"
+            assert issue.translation_placeholders == {"filename": memory.key}
+        else:
+            assert issue is None
         if failure == "stop":
             assert hass.data[DOMAIN][entry.entry_id] is runtime
             assert (session_state / "state").read_text() == "Live SDK state"
@@ -208,6 +219,15 @@ async def test_real_entry_removal_reports_orphaned_memory(
             assert not session_state.exists()
         assert "PRIVATE_HOUSEHOLD_FACT" not in caplog.text
         assert "PRIVATE_FILESYSTEM_DETAIL" not in caplog.text
+        if failure == "unlink":
+            Path(memory.store.path).unlink()
+            ir.async_ignore_issue(hass, DOMAIN, "memory_cleanup_failed_entry", True)
+            assert (
+                ir.async_get(hass)
+                .async_get_issue(DOMAIN, "memory_cleanup_failed_entry")
+                .dismissed_version
+                is not None
+            )
     finally:
         await hass.async_stop()
 

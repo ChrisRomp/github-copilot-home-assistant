@@ -143,9 +143,11 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove entry-owned state and Repairs, retaining the shared runtime cache."""
     import asyncio
+    from pathlib import Path
 
     from homeassistant.helpers import issue_registry as ir
 
+    from .cleanup import async_wait_cleanup
     from .const import (
         DATA_CREDENTIAL_LOCKS,
         ISSUE_MEMORY_CLEANUP_FAILED,
@@ -161,7 +163,20 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     memory = MemoryManager(hass, entry.entry_id)
     memory_issue_id = f"{ISSUE_MEMORY_CLEANUP_FAILED}_{entry.entry_id}"
 
-    def report_memory_cleanup_failure() -> None:
+    async def report_memory_cleanup_failure() -> None:
+        if runtime is not None:
+            await runtime.memory.async_close()
+        try:
+            await asyncio.to_thread(
+                Path(hass.config.path(".storage", memory.key)).lstat
+            )
+        except FileNotFoundError:
+            return
+        except OSError as err:
+            _LOGGER.warning(
+                "Unable to determine whether shared memory remains (%s)",
+                type(err).__name__,
+            )
         # HA removes the entry even when this callback raises. Keep the warning
         # independent of the entry so HA's registry cleanup does not erase it.
         ir.async_create_issue(
@@ -183,7 +198,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
             stopped = True
         finally:
             if not stopped:
-                report_memory_cleanup_failure()
+                await async_wait_cleanup(
+                    asyncio.create_task(report_memory_cleanup_failure())
+                )
         _remove_stopped_runtime(hass, entry, runtime)
 
     try:
@@ -193,7 +210,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
             "Unable to remove shared memory (%s); continuing other entry cleanup",
             type(err).__name__,
         )
-        report_memory_cleanup_failure()
+        await async_wait_cleanup(asyncio.create_task(report_memory_cleanup_failure()))
     else:
         ir.async_delete_issue(hass, DOMAIN, memory_issue_id)
     await asyncio.to_thread(remove_entry_directory, hass, entry.entry_id)

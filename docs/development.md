@@ -273,7 +273,12 @@ Repair identifying the leftover file and manual cleanup steps. The Repair is
 not tied to the removed config entry, so HA's registry cleanup retains it.
 If runtime shutdown fails or is cancelled before deletion, the same Repair is
 created before propagating the failure; runtime ownership and live session files
-are retained. After a memory unlink failure, other entry cleanup continues.
+are retained. Memory writes are first drained, then a metadata-only filesystem
+check suppresses the warning when storage is confirmed absent. An unreadable
+path still produces the warning because absence cannot be established.
+After manual cleanup, users can acknowledge the notice with HA's existing
+Ignore action; there is no background filesystem monitor or custom repair flow.
+After a memory unlink failure, other entry cleanup continues.
 Reloads, disabling, and SDK cleanup do not delete
 memory. Restarting the same runtime drains its previous stop and creates a fresh
 manager before loading the retained store; old tool handlers keep their closed
