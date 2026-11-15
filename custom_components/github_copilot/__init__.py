@@ -162,7 +162,15 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         await runtime.async_stop()
         _remove_stopped_runtime(hass, entry, runtime)
 
-    await MemoryManager(hass, entry.entry_id).async_remove()
+    memory_error: OSError | None = None
+    try:
+        await MemoryManager(hass, entry.entry_id).async_remove()
+    except OSError as err:
+        memory_error = err
+        _LOGGER.error(
+            "Unable to remove shared memory (%s); continuing other entry cleanup",
+            type(err).__name__,
+        )
     await asyncio.to_thread(remove_entry_directory, hass, entry.entry_id)
     hass.data.get(DATA_CREDENTIAL_LOCKS, {}).pop(entry.entry_id, None)
 
@@ -174,3 +182,5 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ISSUE_TASK_MODEL_UNAVAILABLE,
     ):
         ir.async_delete_issue(hass, DOMAIN, f"{issue}_{entry.entry_id}")
+    if memory_error is not None:
+        raise memory_error

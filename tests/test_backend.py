@@ -242,17 +242,32 @@ async def test_memory_mutation_snapshot_refresh_and_compaction(memory_setup):
     from copilot.session_events import (
         SessionCompactionCompleteData,
         SessionContextClearedData,
+        SessionSnapshotRewindData,
+        SessionTruncationData,
     )
 
     invalidate = setup.session.on.call_args_list[0].args[0]
     for event_data in (
         SessionCompactionCompleteData(success=True),
         SessionContextClearedData(messages_cleared=3),
+        SessionSnapshotRewindData(events_removed=3, up_to_event_id="earlier-event"),
+        SessionTruncationData(
+            messages_removed_during_truncation=3,
+            performed_by="test",
+            post_truncation_messages_length=1,
+            post_truncation_tokens_in_messages=10,
+            pre_truncation_messages_length=4,
+            pre_truncation_tokens_in_messages=40,
+            token_limit=20,
+            tokens_removed_during_truncation=30,
+        ),
     ):
         invalidate(SimpleNamespace(data=event_data, agent_id=None))
         assert record.memory_revision is None
         await turn(setup)
         assert "New shared fact" in setup.session.send_and_wait.await_args.args[0]
+        await turn(setup)
+        assert setup.session.send_and_wait.await_args.args == ("Hello",)
     await setup.backend.memory.async_tool(
         "ha_memory_forget",
         {"expected_revision": 1, "ids": [saved["snapshot"]["facts"][0]["id"]]},
@@ -261,6 +276,29 @@ async def test_memory_mutation_snapshot_refresh_and_compaction(memory_setup):
     await turn(setup)
     assert '"facts": []' in setup.session.send_and_wait.await_args.args[0]
     assert "New shared fact" not in setup.session.send_and_wait.await_args.args[0]
+
+
+async def test_corrupt_memory_fails_turn_explicitly_without_sending_or_resetting(
+    memory_setup,
+):
+    from pathlib import Path
+
+    from custom_components.github_copilot.memory import MemoryStorageError
+
+    setup = memory_setup
+    await setup.backend.memory.async_tool(
+        "ha_memory_save",
+        {"text": "Fact", "source": "Fact", "expected_revision": 0},
+        "Fact",
+    )
+    await turn(setup)
+    setup.session.send_and_wait.reset_mock()
+    path = Path(setup.backend.memory.store.path)
+    path.write_text('{"PRIVATE_CORRUPT_CONTENT":')
+    with pytest.raises(MemoryStorageError, match="not been reset"):
+        await turn(setup)
+    setup.session.send_and_wait.assert_not_awaited()
+    assert path.read_text() == '{"PRIVATE_CORRUPT_CONTENT":'
 
 
 async def test_memory_rejects_fabricated_source_and_disable_during_tool_call(

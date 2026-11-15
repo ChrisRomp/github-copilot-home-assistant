@@ -160,6 +160,13 @@ async def test_capacity_duplicate_and_same_call_replacement(memory):
     assert duplicate["status"] == "unchanged"
     assert duplicate["snapshot"] == snapshot
     identifier = snapshot["facts"][0]["id"]
+    collision = await save(memory, "Fact 1", revision=50, id=identifier)
+    assert collision["status"] == collision["error"] == "invalid_input"
+    assert collision["duplicate_id"] == snapshot["facts"][1]["id"]
+    assert collision["snapshot"] == snapshot
+    assert await memory.async_snapshot() == snapshot
+    same_fact = await save(memory, "Fact 0", revision=50, id=identifier)
+    assert same_fact == {"status": "unchanged", "snapshot": snapshot}
     replaced = await save(memory, "Brighter reading lights", revision=50, id=identifier)
     assert replaced["status"] == "saved"
     assert replaced["snapshot"]["revision"] == 51
@@ -366,3 +373,41 @@ async def test_entry_removal_deletes_memory_when_disabled_and_unloaded(
     assert not Path(memory.store.path).exists()
     assert (await other.async_snapshot())["count"] == 1
     await other.async_close()
+
+
+async def test_memory_unlink_failure_still_cleans_other_entry_state(
+    memory, monkeypatch, caplog
+):
+    from homeassistant.helpers import issue_registry as ir
+
+    from custom_components.github_copilot import async_remove_entry
+    from custom_components.github_copilot.const import DATA_CREDENTIAL_LOCKS, DOMAIN
+
+    await save(memory)
+    original = Path(memory.store.path).read_bytes()
+    session_state = Path(memory.hass.config.path(".storage", DOMAIN, "entry"))
+    session_state.mkdir(parents=True)
+    (session_state / "state").write_text("Disposable SDK state")
+    other_lock = object()
+    memory.hass.data[DATA_CREDENTIAL_LOCKS] = {"entry": object(), "other": other_lock}
+    delete_issue = Mock()
+    monkeypatch.setattr(ir, "async_delete_issue", delete_issue)
+    original_remove = Store.async_remove
+
+    async def fail_memory_remove(store):
+        if store.key == memory.key:
+            raise PermissionError("PRIVATE_FILESYSTEM_DETAIL")
+        await original_remove(store)
+
+    monkeypatch.setattr(Store, "async_remove", fail_memory_remove)
+    with pytest.raises(PermissionError):
+        await async_remove_entry(
+            memory.hass, SimpleNamespace(entry_id="entry", options={})
+        )
+    assert Path(memory.store.path).read_bytes() == original
+    assert not session_state.exists()
+    assert memory.hass.data[DATA_CREDENTIAL_LOCKS] == {"other": other_lock}
+    assert delete_issue.call_count == 5
+    assert "continuing other entry cleanup" in caplog.text
+    assert "PRIVATE_FILESYSTEM_DETAIL" not in caplog.text
+    assert "Warm reading lights" not in caplog.text

@@ -62,13 +62,21 @@ the agent can replace a clearly superseded fact in the same save; it must not
 silently evict other facts. Exact duplicates and updates remain possible. If no
 safe replacement exists, it should report capacity and ask you. There is no
 age-based expiry, oldest-first eviction, or background curator.
+An update that would duplicate a different existing fact is rejected explicitly,
+not reported as unchanged. The agent can then explicitly forget the superseded
+fact rather than silently merging or deleting records.
 
 Recall uses a full snapshot on the first turn, after a changed inventory, and
-after SDK context compaction/reset. Unchanged turns do not append identical
-copies. Another chat's changes are reflected on your next turn. Within a turn,
+after SDK context compaction, reset, truncation, or rewind. Unchanged turns do not
+append identical copies. Another chat's changes are reflected on your next turn. Within a turn,
 the list tool can retrieve the authoritative inventory. Model interpretation is
 probabilistic: these policies are instructions, not a guarantee that the model
 will always choose the right fact to save or replace.
+The source-excerpt check verifies that quoted text appeared in the request, not
+that it supports the proposed fact or authorizes forgetting. Requests sent by
+automations through `conversation.process` also count as user requests. Do not
+forward untrusted entity or external text as instructions; shared memory can
+amplify the consequences of a model following injected instructions.
 
 The versioned JSON store is
 `<config>/.storage/github_copilot.memory.<entry-id>`. It is HA-managed, not an
@@ -81,15 +89,21 @@ information intended for only one household member.
 Disabling memory stops recall and tool access but retains its file. Re-enabling,
 reloading, restarting HA, and SDK session cleanup preserve the collection.
 Removing the integration entry deletes its memory store, even when disabled or
-unloaded. Invalid or unreadable storage is reported and preserved, not reset.
-If this prevents startup, disable shared memory or restore the file from a valid
-backup before re-enabling it.
+unloaded. A memory-removal failure is reported even when other entry cleanup
+succeeds. Invalid or unreadable storage is reported and preserved, not reset.
+With memory enabled, this prevents startup or fails conversation turns before
+sending them to Copilot. Disable shared memory to continue without recall, or
+restore a valid backup while the integration entry is unloaded. Editing,
+replacing, or deleting the store while the entry is running is unsupported.
 
 Forgetting removes facts from future current snapshots, **not** earlier messages
 in active chats, already-sent model requests, or existing HA backups. Earlier
 chat files still follow the [session retention policy](#conversation-data-and-privacy).
 Diagnostics report only memory's enabled flag and an aggregate count (unknown
 when not loaded), never fact text or source quotations.
+Memory tool arguments and results are part of HA conversation history and may
+also appear in Assist debug traces; those can include facts, source excerpts,
+and full snapshots. Forgetting does not retroactively remove them.
 
 ## AI Tasks
 

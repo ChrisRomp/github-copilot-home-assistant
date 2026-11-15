@@ -224,10 +224,14 @@ entry lock and reject stale expected revisions with the latest snapshot.
 Supporting source quotations must be exact excerpts of the unchanged actual
 current user request; this establishes provenance, not semantic truth. Exact
 duplicates are unchanged; explicit-ID updates work at capacity without eviction.
+Updating one ID to text already held by another returns `invalid_input` with the
+duplicate ID and current snapshot, without changing either fact.
 Accepted writes and verification reads drain on cancellation before unlocking;
 shutdown closes admission and drains memory before tearing down the runtime.
 Entry removal explicitly calls `Store.async_remove`, even without a loaded
-runtime. Reloads, disabling, and SDK cleanup do not delete it.
+runtime. A memory unlink error is logged without raw details and re-raised after
+other entry cleanup; removal is not falsely reported as successful. Reloads,
+disabling, and SDK cleanup do not delete it.
 
 `ha_memory_list`, `ha_memory_save`, and `ha_memory_forget` are integration-owned
 conversation tools, routed separately from HA device/admin APIs. They recheck
@@ -241,8 +245,10 @@ system/developer content, owner custom instructions, or tool descriptions.
 HA-visible input and source provenance stay unchanged; SDK `display_prompt`
 retains the actual request while the model-bound prompt carries separate
 reference data. Snapshots contain IDs, text, revision and capacity, not sources
-or timestamps. Session revision tracking avoids unchanged copies and refreshes
-after other-chat writes, compaction, or context clearing. Mutation results carry
+or timestamps. Reference JSON escapes `<`, `>`, and `&` so stored strings cannot
+close the reference delimiter; decoding it preserves the exact saved facts.
+Session revision tracking avoids unchanged copies and refreshes after other-chat
+writes, compaction, context clearing, truncation, or rewind. Mutation results carry
 the full new inventory and update that session's tracking; old history is not
 rewritten when forgetting.
 

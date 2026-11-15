@@ -29,6 +29,8 @@ from copilot.session_events import (
     SessionCompactionCompleteData,
     SessionContextClearedData,
     SessionErrorData,
+    SessionSnapshotRewindData,
+    SessionTruncationData,
 )
 from copilot.tools import Tool as CopilotTool
 from copilot.tools import ToolInvocation
@@ -1356,7 +1358,12 @@ class ConversationBackend:
                 def invalidate_memory(event: Any) -> None:
                     if not getattr(event, "agent_id", None) and isinstance(
                         event.data,
-                        (SessionCompactionCompleteData, SessionContextClearedData),
+                        (
+                            SessionCompactionCompleteData,
+                            SessionContextClearedData,
+                            SessionSnapshotRewindData,
+                            SessionTruncationData,
+                        ),
                     ):
                         record.memory_generation += 1
                         record.memory_revision = None
