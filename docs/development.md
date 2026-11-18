@@ -329,11 +329,19 @@ Report unavailable native/HA contracts as unverified, not passing.
 
 ### Trusted instructions and live context
 
-Only fixed integration rules and the owner's **Additional instructions** enter
-the SDK's system-instruction channel. Additional instructions are literal text:
+Only fixed integration rules, capability state derived from integration options
+and HA eligibility checks, and the owner's **Additional instructions** enter the
+SDK's system-instruction channel. Additional instructions are literal text:
 HA templates are not expanded into that privileged channel. HA's combined,
 rendered system prompt is not forwarded there because it also contains device
 and request data.
+
+Conversation instructions describe shared memory, Assist device control, and
+administrator tools even when disabled, with their settings labels and
+configuration path. Administrator guidance distinguishes a disabled setting from
+an unsupported HA version or a caller without administrator access. This
+awareness does not expose disabled tools or read disabled memory, and is omitted
+from AI Task instructions. Option changes reload the integration and its sessions.
 
 For current entity information, the assistant is instructed to use HA's
 `GetLiveContext` tool with relevant name, domain, or area filters when available.
