@@ -9,6 +9,12 @@ Choose your models, optional device control, administrator tools, shared memory,
 and **Additional instructions** under **Settings > Devices & services > GitHub
 Copilot > Configure**. These options are also available during initial setup.
 
+You can ask Copilot about shared memory, Assist device control, or administrator
+tools even when they are disabled. It can explain which settings are enabled
+and where to enable a disabled feature, or why enabled administrator tools are
+unavailable to the current caller or HA version. Copilot does not turn these
+settings on for you.
+
 Device control is disabled by default and is limited to entities exposed to
 Home Assistant Assist. Additional instructions are literal text;
 Home Assistant templates are not expanded.

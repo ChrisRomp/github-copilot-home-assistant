@@ -219,6 +219,14 @@ async def test_native_shared_memory_roles_refresh_mutations_and_context_reset(
         original = user.text
         await turn(original)
         assert len(requests) == 2
+        system_content = "\n".join(
+            str(message["content"])
+            for message in requests[0]["messages"]
+            if message["role"] in ("system", "developer")
+        )
+        assert "Enable shared memory: enabled." in system_content
+        assert "Allow control of Assist-exposed devices: disabled." in system_content
+        assert "Allow Home Assistant administrator tools: disabled" in system_content
         assert requests[0]["messages"][-1]["role"] == "user"
         assert "<ha_memory_reference>" in str(requests[0]["messages"][-1])
         assert original in requests[0]["messages"][-1]["content"]
@@ -347,6 +355,7 @@ async def test_native_shared_memory_roles_refresh_mutations_and_context_reset(
             for tool in task_payload.get("tools", [])
         )
         assert module.MEMORY_POLICY not in str(task_payload["messages"])
+        assert "Optional integration features" not in str(task_payload["messages"])
 
         for payload in requests:
             for message in payload["messages"]:
@@ -723,6 +732,11 @@ async def test_native_device_context_is_tool_data_not_system_instructions(
                 in system_content,
                 "owner_instructions": "OWNER_STYLE_" in system_content,
             }
+            assert "Enable shared memory: disabled." in system_content
+            assert "Allow control of Assist-exposed devices: enabled." in system_content
+            assert (
+                "Allow Home Assistant administrator tools: disabled" in system_content
+            )
             assert "<environment_limitations>" in system_content
             assert "<prohibited_actions>" in system_content
             for message in request["messages"]:

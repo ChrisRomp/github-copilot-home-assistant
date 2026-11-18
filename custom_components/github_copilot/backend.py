@@ -55,10 +55,13 @@ from .cleanup import async_wait_cleanup
 from .const import (
     AI_TASK_SYSTEM_PROMPT,
     AUTH_METHOD_PAT,
+    CAPABILITIES_SYSTEM_PROMPT,
     CONF_AI_TASK_MODEL,
     CONF_AI_TASK_MODEL_BILLING,
     CONF_AI_TASK_TIMEOUT,
     CONF_AUTH_METHOD,
+    CONF_ENABLE_DEVICE_CONTROL,
+    CONF_ENABLE_HOME_ASSISTANT_API,
     CONF_ENABLE_SHARED_MEMORY,
     CONF_MODEL,
     CONF_MODEL_BILLING,
@@ -99,6 +102,7 @@ from .llm_api import (
     api_includes,
     async_available_llm_apis,
     async_require_admin,
+    home_assistant_api_supported,
     selected_llm_apis,
 )
 from .memory import MemoryManager, render_reference
@@ -1340,13 +1344,13 @@ class ConversationBackend:
             model_id = await self.async_resolve_model()
             try:
                 session = await self._async_create_sdk_session(
-                    model_id, sdk_tools, prompt_context
+                    model_id, sdk_tools, prompt_context, admin_notice=admin_notice
                 )
             except Exception as err:
                 model_id = await self._async_recover_model(model_id, err)
                 try:
                     session = await self._async_create_sdk_session(
-                        model_id, sdk_tools, prompt_context
+                        model_id, sdk_tools, prompt_context, admin_notice=admin_notice
                     )
                 except Exception as retry_err:
                     self._raise_sdk_error(model_id, retry_err)
@@ -1487,6 +1491,7 @@ class ConversationBackend:
         sdk_tools: list[CopilotTool],
         prompt_context: dict[str, str],
         *,
+        admin_notice: str | None = None,
         task_mode: bool = False,
         image_request: ImageTaskRequest | None = None,
         task_request: DataTaskRequest | None = None,
@@ -1538,8 +1543,7 @@ class ConversationBackend:
                             "action": "replace",
                             "content": AI_TASK_SYSTEM_PROMPT
                             if task_mode
-                            else DEFAULT_SYSTEM_PROMPT
-                            + (f"\n\n{MEMORY_POLICY}" if self._memory_enabled else ""),
+                            else self._conversation_system_prompt(admin_notice),
                         },
                     },
                 },
@@ -1872,6 +1876,35 @@ class ConversationBackend:
     def _system_instructions(self) -> str:
         """Return owner-authored text, never HA's mixed/rendered SystemContent."""
         return self.entry.options.get(CONF_PROMPT) or ""
+
+    def _conversation_system_prompt(self, admin_notice: str | None) -> str:
+        """Explain configured capabilities without granting access to their tools."""
+        admin_state = (
+            "enabled"
+            if self.entry.options.get(CONF_ENABLE_HOME_ASSISTANT_API)
+            else "disabled"
+        )
+        if not home_assistant_api_supported():
+            admin_state += "; unavailable on this Home Assistant version"
+        elif admin_notice:
+            admin_state += "; unavailable for this request"
+        parts = [
+            DEFAULT_SYSTEM_PROMPT,
+            CAPABILITIES_SYSTEM_PROMPT.format(
+                device_control=(
+                    "enabled"
+                    if self.entry.options.get(CONF_ENABLE_DEVICE_CONTROL)
+                    else "disabled"
+                ),
+                administrator_tools=admin_state,
+                shared_memory="enabled" if self._memory_enabled else "disabled",
+            ),
+        ]
+        if admin_notice:
+            parts.append(admin_notice)
+        if self._memory_enabled:
+            parts.append(MEMORY_POLICY)
+        return "\n\n".join(parts)
 
     @property
     def _memory_enabled(self) -> bool:
