@@ -100,12 +100,14 @@ Keep tokens private and out of screenshots, issue reports, and chat messages.
 After authentication, the **Configure GitHub Copilot** dialog lets you choose
 how the conversation agent and AI Task entity behave.
 
-![The configuration dialog with separate model selectors, a 180-second AI Task timeout, device control, administrator tools, and shared memory enabled, and empty Additional instructions.](images/setup/configure-integration.png)
+![The configuration dialog with separate model selectors, a 180-second AI Task timeout, device control enabled, the bedroom satellite selected for history, allow-all disabled, shared memory and administrator tools enabled, and empty Additional instructions.](images/setup/configure-integration.png)
 
-The selected models are examples; availability depends on your account. The
-screenshot shows device control, administrator tools, and shared memory enabled,
-but all three are **off by default**. Administrator tools require Home Assistant
-2026.11 or newer.
+The models and bedroom satellite are examples; model availability depends on
+your Copilot account, and satellites must be registered in Home Assistant. The
+screenshot shows device control, history access for one satellite, shared
+memory, and administrator tools enabled; **Allow history from all Assist
+satellites** is off. These optional capabilities are **off or empty by default**.
+Administrator tools require Home Assistant 2026.11 or newer.
 
 | Setting | What to choose |
 | --- | --- |
@@ -114,6 +116,8 @@ but all three are **off by default**. Administrator tools require Home Assistant
 | **AI Task timeout (seconds)** | Defaults to 180 seconds. This does not change Assist's 60-second timeout. |
 | **Allow control of Assist-exposed devices** | Allows conversations and AI Tasks to use Assist-exposed tools. It is **off by default**. |
 | **Allow Home Assistant administrator tools** | On HA 2026.11 or newer, allows administrator-authenticated conversations and data tasks to access logs, history and configuration, and perform administrative actions. Access is not restricted to Assist-exposed entities. It is **off by default**. |
+| **Assist satellites allowed to read history** | Lets selected, registered satellite endpoints make read-only history requests for currently Assist-exposed entities when no Home Assistant user is linked. The endpoint does not identify the speaker; anyone or any integration able to use it can ask about that history. It is **empty by default**. |
+| **Allow history from all Assist satellites** | Extends the same read-only access to all current and future satellite endpoints. Use only if every endpoint is trusted; it is **off by default**. |
 | **Enable shared memory** | **Off by default.** Automatically remembers durable household facts for all callers of this entry's conversation agent. Stored in Home Assistant; not private per-user. Independent of device/admin tools; AI Tasks never receive memory. |
 | **Additional instructions** | Instructions for conversations only, such as "Keep replies brief and use Celsius." AI Tasks use the instructions supplied by each action. |
 
@@ -123,7 +127,10 @@ Native image generation uses the account's available image model, not either
 of these chat-model selections.
 
 Additional instructions are literal text, not Home Assistant templates. If you
-enable device control, review which entities you have exposed to Assist.
+enable device control or satellite history, review which entities you have
+exposed to Assist. Satellite history is read-only and independently configurable
+from device control. See [voice satellite history](usage.md#voice-satellite-history)
+for its retention limits and endpoint trust implications.
 Administrator tools can access more than those entities, including potentially
 sensitive logs and configuration. The integration does not add an extra
 confirmation step before actions.

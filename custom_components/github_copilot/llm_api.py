@@ -15,16 +15,35 @@ if TYPE_CHECKING:
 
 ASSIST_API = "assist"
 HOME_ASSISTANT_API = "homeassistant"
-ADMIN_REQUIRED = (
-    "Home Assistant administration tools require an authenticated Home Assistant "
-    "administrator. Use an administrator account or disable these tools in the "
-    "GitHub Copilot integration settings."
+ADMIN_REQUIRED = "No Home Assistant user is linked to this request."
+ADMIN_REQUIRED_DIAGNOSTIC = (
+    "No Home Assistant user is linked to this request. Use an administrator "
+    "account or disable administrator tools in the GitHub Copilot integration "
+    "settings."
 )
-API_UNAVAILABLE = (
-    "Home Assistant administration tools require Home Assistant 2026.11 or newer. "
-    "Upgrade Home Assistant or disable these tools in the GitHub Copilot "
+ADMIN_USER_REQUIRED = (
+    "The Home Assistant user for this request is not an administrator."
+)
+ADMIN_USER_REQUIRED_DIAGNOSTIC = (
+    "The Home Assistant user for this request is not an administrator. Use an "
+    "administrator account or disable administrator tools in the GitHub Copilot "
     "integration settings."
 )
+API_UNAVAILABLE = (
+    "Home Assistant administrator tools are unavailable on this Home Assistant version."
+)
+API_UNAVAILABLE_DIAGNOSTIC = (
+    "Home Assistant administrator tools require Home Assistant 2026.11 or newer."
+)
+
+
+def admin_notice_for_diagnostics(notice: str | None) -> str | None:
+    """Keep task diagnostics actionable without lengthening voice replies."""
+    return {
+        ADMIN_REQUIRED: ADMIN_REQUIRED_DIAGNOSTIC,
+        ADMIN_USER_REQUIRED: ADMIN_USER_REQUIRED_DIAGNOSTIC,
+        API_UNAVAILABLE: API_UNAVAILABLE_DIAGNOSTIC,
+    }.get(notice, notice)
 
 
 def home_assistant_api_supported() -> bool:
@@ -68,13 +87,22 @@ async def async_available_llm_apis(
     if options.get(CONF_ENABLE_HOME_ASSISTANT_API):
         if not home_assistant_api_supported():
             return apis or None, API_UNAVAILABLE
-        if not await async_is_admin(hass, context):
+        user_id = context.user_id if context is not None else None
+        user = await hass.auth.async_get_user(user_id) if user_id else None
+        if user is None or not user.is_admin:
             apis.remove(HOME_ASSISTANT_API)
-            return apis or None, ADMIN_REQUIRED
+            return (
+                apis or None,
+                ADMIN_USER_REQUIRED if user is not None else ADMIN_REQUIRED,
+            )
     return apis or None, None
 
 
 async def async_require_admin(hass: HomeAssistant, context: Context | None) -> None:
     """Recheck authorization before every administrator-capable tool invocation."""
-    if not await async_is_admin(hass, context):
+    user_id = context.user_id if context is not None else None
+    user = await hass.auth.async_get_user(user_id) if user_id else None
+    if user is None:
         raise HomeAssistantError(ADMIN_REQUIRED)
+    if not user.is_admin:
+        raise HomeAssistantError(ADMIN_USER_REQUIRED)

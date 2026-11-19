@@ -34,6 +34,39 @@ The option is hidden on older HA versions. If HA is downgraded after enabling
 it, the agent continues without administrator tools and reports the restriction;
 disable the option or upgrade HA to remove the warning.
 
+## Voice satellite history
+
+**Assist satellites allowed to read history** grants selected satellite endpoints
+read-only access to retained Recorder state for entities that are currently
+exposed to Assist. It works independently of **Allow control of Assist-exposed
+devices** and does not grant device control, administrator APIs, or access to
+unexposed entities. Requests without an authenticated Home Assistant user can
+receive this access only when they come through an allowed, registered Assist
+satellite. Other requests are unchanged.
+
+Selecting a satellite trusts the endpoint, not the speaker. Anyone or any
+integration able to send a request through that endpoint may ask about the
+eligible entities' history. This also applies to software satellites that can be
+used remotely or by automations. Use **Allow history from all Assist satellites**
+only if every current and future satellite endpoint should receive the same
+access; otherwise leave it off and select only the endpoints you trust. Both
+options are off by default.
+
+The history tool can look up current Assist-exposed entities and read a bounded
+time range or the latest retained value at or before a specified time. It
+reports recorded values, timestamps, requested and covered intervals, and
+whether a range is complete. Each call accepts up to four entities and a range
+of at most 31 days; per-turn query, row, and output limits can make results
+incomplete, including a point lookup when the bounded search cannot establish
+the latest state. Point lookups report the actual time of the value they find,
+or that no value is retained. An unchanged range includes its latest retained
+observation at or before the range start when one is found. Recorder's current
+inclusion setting is reported separately and does not prove older retained rows are
+absent. Exposure is checked again when history is read, so removing an entity
+from Assist exposure prevents new reads. Disabling satellite access or removing
+an endpoint also prevents new reads; it does not erase results already delivered
+in earlier conversation history.
+
 ## Shared memory
 
 **Enable shared memory** is off by default. Turn it on to let Copilot remember

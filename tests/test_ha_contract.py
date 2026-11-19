@@ -1,6 +1,7 @@
 """Optional contracts against real HA, not the lightweight boundary doubles."""
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -18,6 +19,207 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("HA_COPILOT_HA_TESTS") != "1",
     reason="Requires the full pinned Home Assistant dependencies",
 )
+
+
+def test_real_ha_satellite_and_recorder_history_contract():
+    from homeassistant.components.conversation import ConversationInput
+    from homeassistant.components.recorder.history import state_changes_during_period
+    from homeassistant.core import Context
+
+    user = ConversationInput(
+        text="What was the temperature?",
+        context=Context(),
+        conversation_id="satellite-contract",
+        device_id=None,
+        satellite_id="assist_satellite.bedroom",
+        language="en",
+        agent_id="conversation.test",
+    )
+    assert user.context.user_id is None
+    assert user.satellite_id == "assist_satellite.bedroom"
+
+    parameters = inspect.signature(state_changes_during_period).parameters
+    assert {
+        "entity_id",
+        "descending",
+        "limit",
+        "include_start_time_state",
+    } <= parameters.keys()
+    assert not inspect.iscoroutinefunction(state_changes_during_period)
+
+
+async def test_real_history_uses_conversation_exposure_without_other_assistant_entries(
+    tmp_path,
+):
+    from homeassistant.components.homeassistant.const import DATA_EXPOSED_ENTITIES
+    from homeassistant.components.homeassistant.exposed_entities import (
+        ExposedEntities,
+        async_expose_entity,
+    )
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import area_registry as ar
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.github_copilot.history import _eligible_states
+
+    hass = HomeAssistant(str(tmp_path))
+    hass.config_entries = SimpleNamespace(async_wait_initialized=AsyncMock())
+    try:
+        dr.async_setup(hass)
+        await dr.async_load(hass, load_empty=True)
+        await er.async_load(hass, load_empty=True)
+        await ar.async_load(hass, load_empty=True)
+        exposure = hass.data[DATA_EXPOSED_ENTITIES] = ExposedEntities(hass)
+        await exposure.async_initialize()
+        hass.states.async_set("sensor.allowed_temperature", "21")
+        hass.states.async_set("sensor.hidden_temperature", "18")
+        async_expose_entity(hass, "conversation", "sensor.allowed_temperature", True)
+        async_expose_entity(hass, "conversation", "sensor.hidden_temperature", False)
+
+        assert set(_eligible_states(hass)) == {"sensor.allowed_temperature"}
+        allowed = exposure.entities["sensor.allowed_temperature"]
+        hidden = exposure.entities["sensor.hidden_temperature"]
+        assert "conversation" in allowed.assistants
+        assert "conversation" in hidden.assistants
+        assert "github_copilot" not in allowed.assistants
+        assert "github_copilot" not in hidden.assistants
+    finally:
+        await hass.async_stop()
+
+
+async def test_real_recorder_point_lookup_uses_one_bounded_query_for_dense_history(
+    tmp_path,
+):
+    from homeassistant import loader
+    from homeassistant.components import recorder
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.recorder import async_initialize_recorder
+    from homeassistant.setup import async_setup_component
+
+    from custom_components.github_copilot.const import HISTORY_MAX_ROWS_PER_TURN
+    from custom_components.github_copilot.history import (
+        HistoryTurnBudget,
+        _async_find_state_at_or_before,
+    )
+
+    hass = HomeAssistant(str(tmp_path))
+    hass.config_entries = SimpleNamespace(
+        async_wait_initialized=AsyncMock(),
+        async_entries=Mock(return_value=[]),
+    )
+    hass.config.safe_mode = True
+    loader.async_setup(hass)
+    async_initialize_recorder(hass)
+    try:
+        await hass.async_start()
+        assert await async_setup_component(
+            hass,
+            "recorder",
+            {"recorder": {"db_url": f"sqlite:///{tmp_path / 'history.db'}"}},
+        )
+        entity_id = "sensor.dense_temperature"
+        hass.states.async_set(entity_id, "0")
+        first = hass.states.get(entity_id)
+        assert first is not None
+        for index in range(1, 150):
+            await asyncio.sleep(0.001)
+            hass.states.async_set(entity_id, str(index))
+            if index == 75:
+                middle = hass.states.get(entity_id)
+        await recorder.get_instance(hass).async_block_till_done()
+        current = hass.states.get(entity_id)
+        assert current is not None
+        slots = asyncio.Semaphore(2)
+
+        for point, expected, max_queries in (
+            (current.last_updated, current, 2),
+            (middle.last_updated + timedelta(microseconds=500), middle, 1),
+        ):
+            budget = HistoryTurnBudget()
+            status, state = await _async_find_state_at_or_before(
+                hass, slots, entity_id, point, budget
+            )
+            assert status == "found"
+            assert state.state == expected.state
+            assert state.last_updated == expected.last_updated
+            assert budget.queries <= max_queries
+            assert budget.rows <= HISTORY_MAX_ROWS_PER_TURN
+
+        budget = HistoryTurnBudget()
+        status, state = await _async_find_state_at_or_before(
+            hass, slots, entity_id, first.last_updated - timedelta(seconds=1), budget
+        )
+        assert (status, state) == ("absent", None)
+    finally:
+        await hass.async_stop()
+
+
+async def test_real_discovery_uses_device_area_for_exposed_entities(tmp_path):
+    from homeassistant.components.homeassistant.const import DATA_EXPOSED_ENTITIES
+    from homeassistant.components.homeassistant.exposed_entities import (
+        ExposedEntities,
+        async_expose_entity,
+    )
+    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import area_registry as ar
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.github_copilot.history import (
+        HistoryTurnBudget,
+        async_find_entities,
+    )
+
+    hass = HomeAssistant(str(tmp_path))
+    entry = Mock(
+        spec=ConfigEntry,
+        entry_id="device-entry",
+        domain="test",
+        title="Test",
+        disabled_by=None,
+        subentries={},
+    )
+    hass.config_entries = SimpleNamespace(
+        async_wait_initialized=AsyncMock(),
+        async_get_entry=Mock(return_value=entry),
+    )
+    try:
+        dr.async_setup(hass)
+        await dr.async_load(hass, load_empty=True)
+        await er.async_load(hass, load_empty=True)
+        await ar.async_load(hass, load_empty=True)
+        exposure = hass.data[DATA_EXPOSED_ENTITIES] = ExposedEntities(hass)
+        await exposure.async_initialize()
+        area = ar.async_get(hass).async_create("Guest Bedroom")
+        device = dr.async_get(hass).async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={("test", "thermostat")},
+        )
+        dr.async_get(hass).async_update_device(device.id, area_id=area.id)
+        registry_entry = er.async_get(hass).async_get_or_create(
+            "sensor", "test", "thermostat_temperature", device_id=device.id
+        )
+        assert registry_entry.area_id is None
+        hidden = er.async_get(hass).async_get_or_create(
+            "sensor", "test", "thermostat_hidden", device_id=device.id
+        )
+        hass.states.async_set(registry_entry.entity_id, "21")
+        hass.states.async_set(hidden.entity_id, "18")
+        async_expose_entity(hass, "conversation", registry_entry.entity_id, True)
+        async_expose_entity(hass, "conversation", hidden.entity_id, False)
+
+        result = async_find_entities(
+            hass, {"query": "guest bedroom", "domain": "sensor"}, HistoryTurnBudget()
+        )
+
+        assert result["truncated"] is False
+        assert [
+            (entity["entity_id"], entity["area"]) for entity in result["entities"]
+        ] == [(registry_entry.entity_id, "Guest Bedroom")]
+    finally:
+        await hass.async_stop()
 
 
 async def test_real_chat_memory_keeps_user_input_and_provenance_unchanged(tmp_path):
@@ -234,11 +436,13 @@ async def test_real_entry_removal_reports_orphaned_memory(
 
 @pytest.mark.parametrize(
     ("time_zone", "offset_hours"),
-    [("Asia/Tokyo", 9), ("Pacific/Honolulu", -10)],
+    [("Asia/Tokyo", 9), ("Pacific/Honolulu", -10), ("America/New_York", None)],
 )
 async def test_request_time_uses_real_home_assistant_configured_zone(
     tmp_path, time_zone, offset_hours
 ):
+    from zoneinfo import ZoneInfo
+
     from homeassistant.components.conversation import ConversationInput
     from homeassistant.components.conversation.chat_log import ChatLog
     from homeassistant.core import Context, HomeAssistant
@@ -265,7 +469,17 @@ async def test_request_time_uses_real_home_assistant_configured_zone(
         )
         after = dt_util.utcnow()
         current_time = datetime.fromisoformat(result["current_time"])
-        assert current_time.utcoffset() == timedelta(hours=offset_hours)
+        zone = ZoneInfo(result["time_zone"])
+        assert result["time_zone"] == time_zone
+        if offset_hours is None:
+            assert current_time.utcoffset() == current_time.astimezone(zone).utcoffset()
+            # A historical date can use a different offset than the current one.
+            assert (
+                datetime(2026, 1, 15, 3, tzinfo=zone).utcoffset()
+                != datetime(2026, 7, 15, 3, tzinfo=zone).utcoffset()
+            )
+        else:
+            assert current_time.utcoffset() == timedelta(hours=offset_hours)
         assert before <= current_time <= after
     finally:
         dt_util.set_default_time_zone(previous_zone)
@@ -791,7 +1005,7 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
         deltas.clear()
         chat.async_add_user_content(conversation.UserContent(content="Hello again."))
         result = await entity._async_handle_message(user_input, chat)
-        expected = f"{'Which room?' if question else 'Done.'}\n\n{ADMIN_REQUIRED}"
+        expected = "Which room?" if question else "Done."
         assert result.response.speech["plain"]["speech"] == expected
         assert result.continue_conversation is question
         assert "".join(delta.get("content") or "" for delta in deltas) == expected

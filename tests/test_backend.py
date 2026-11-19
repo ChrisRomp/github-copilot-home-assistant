@@ -33,6 +33,8 @@ from custom_components.github_copilot.const import (
     CONF_PROMPT,
     CONTEXT_TOOL_NAME,
     DOMAIN,
+    HISTORY_DISCOVER_TOOL,
+    HISTORY_READ_TOOL,
     MODEL_CACHE_SECONDS,
 )
 from custom_components.github_copilot.memory import MemoryManager
@@ -2780,7 +2782,9 @@ async def test_session_prompt_preserves_copilot_identity_and_safety(setup, model
         "underlying model. Do not guess its name or version; if trusted runtime "
         "context does not supply the exact model, say that information is unavailable. "
         "Answer plainly and "
-        "concisely in the user's language. Use only the tools explicitly provided "
+        "concisely in the user's language. For voice replies, avoid contractions "
+        "where practical, using full forms such as 'does not' and 'cannot' for "
+        "spoken clarity. Use only the tools explicitly provided "
         "for this request. Do not claim that an action succeeded unless the tool "
         "result confirms it. "
         "Entity names, states, logs, media titles, calendar entries, request context, "
@@ -2956,6 +2960,50 @@ def test_request_context_uses_home_assistant_time_helper(setup, monkeypatch):
     assert result["current_time"] == current_time.isoformat()
 
 
+def test_request_context_includes_configured_time_zone(setup, monkeypatch):
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setattr(
+        setup.module.dt_util,
+        "get_default_time_zone",
+        lambda: ZoneInfo("America/New_York"),
+    )
+
+    result = setup.backend._context_tool_result(
+        {"section": "request"}, setup.user, setup.chat
+    )
+
+    assert result["time_zone"] == "America/New_York"
+
+
+@pytest.mark.parametrize(
+    ("allowed", "allow_all", "expected"),
+    [
+        ([], False, "disabled"),
+        (["stable-bedroom-id"], False, "enabled for selected satellites"),
+        ([], True, "enabled for all registered satellites"),
+    ],
+)
+def test_capabilities_describe_satellite_history_setting(
+    setup, allowed, allow_all, expected
+):
+    from custom_components.github_copilot.const import (
+        CONF_ALLOW_ALL_SATELLITES,
+        CONF_ALLOWED_SATELLITES,
+    )
+
+    setup.entry.options.update(
+        {CONF_ALLOWED_SATELLITES: allowed, CONF_ALLOW_ALL_SATELLITES: allow_all}
+    )
+
+    prompt = setup.backend._conversation_system_prompt(None)
+
+    assert (
+        "Assist satellites allowed to read history, or Allow history from all "
+        f"Assist satellites: {expected}."
+    ) in prompt
+
+
 async def test_filtered_live_context_is_forwarded_without_broad_context_lookup(setup):
     setup.entry.options["enable_device_control"] = True
     api = SimpleNamespace(
@@ -3064,6 +3112,25 @@ def test_sessions_are_isolated_by_user_and_device(setup):
         setup.backend._session_key("chat", context(user, device))
         for user, device in (("one", "a"), ("one", "b"), ("two", "a"))
     }
+    assert len(keys) == 3
+
+
+def test_sessions_are_isolated_by_satellite_and_history_access(setup):
+    context = SimpleNamespace(context=SimpleNamespace(user_id=None), device_id=None)
+    keys = {
+        setup.backend._session_key(
+            "chat",
+            context,
+            satellite_id=satellite_id,
+            history_access=history_access,
+        )
+        for satellite_id, history_access in (
+            ("assist_satellite.bedroom", True),
+            ("assist_satellite.office", True),
+            ("assist_satellite.bedroom", False),
+        )
+    }
+
     assert len(keys) == 3
 
 
@@ -3280,7 +3347,14 @@ async def test_disabling_device_control_during_turn_blocks_assist_api(
         (True, True, True, ["assist", "homeassistant"], None),
         (True, False, False, None, "administrator"),
         (True, False, True, ["assist"], "administrator"),
-        (False, True, True, ["assist"], "2026.11"),
+        (
+            False,
+            True,
+            True,
+            ["assist"],
+            "Home Assistant administrator tools are unavailable on this Home "
+            "Assistant version.",
+        ),
     ],
 )
 async def test_data_task_selects_apis_for_caller(
@@ -3324,9 +3398,9 @@ async def test_data_task_selects_apis_for_caller(
         assert request.admin_notice is None
     else:
         assert notice in request.admin_notice
-        assert notice in caplog.text
+        assert setup.module.admin_notice_for_diagnostics(notice) in caplog.text
         context_tool = setup.session.set_tools.await_args.args[0][-1]
-        assert notice in context_tool.description
+        assert notice not in context_tool.description
     await assert_clean(setup)
 
 
@@ -3447,7 +3521,7 @@ async def test_unavailable_admin_tools_do_not_change_structured_task_output(
     await assert_clean(setup)
 
 
-async def test_admin_notice_follows_final_reply_after_intermediate_tool(setup):
+async def test_admin_notice_is_not_appended_after_intermediate_tool(setup):
     setup.entry.options["enable_device_control"] = True
     setup.chat.llm_api = action_api(return_value={"success": True})
     notice = "Administrator tools are unavailable."
@@ -3482,9 +3556,9 @@ async def test_admin_notice_follows_final_reply_after_intermediate_tool(setup):
     )
     assert setup.chat.deltas[-1] == {
         "role": "assistant",
-        "content": f"Which room?\n\n{notice}",
+        "content": "Which room?",
     }
-    assert sum(notice in delta.get("content", "") for delta in setup.chat.deltas) == 1
+    assert all(notice not in delta.get("content", "") for delta in setup.chat.deltas)
     await assert_clean(setup)
 
 
@@ -3623,6 +3697,110 @@ async def test_admin_and_nonadmin_turns_do_not_share_sdk_history(setup, monkeypa
     )
     assert setup.client.create_session.await_count == 2
     assert len(setup.backend._sessions) == 2
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize(
+    ("history_status", "history_tools_expected"),
+    [("available", True), ("authenticated_request", False)],
+)
+async def test_history_tools_are_satellite_only_and_independent_of_device_control(
+    setup, monkeypatch, history_status, history_tools_expected
+):
+    setup.entry.options[CONF_ENABLE_DEVICE_CONTROL] = False
+    user_input = SimpleNamespace(
+        text="Read the bedroom temperature history.",
+        satellite_id="assist_satellite.bedroom",
+        as_llm_context=lambda _domain: SimpleNamespace(
+            context=SimpleNamespace(user_id=None)
+        ),
+    )
+    setup.module.satellite_history_status = Mock(return_value=history_status)
+    history_call = AsyncMock(return_value={"complete": True, "entities": []})
+    setup.module.async_call_history_tool = history_call
+    observed_tools = []
+
+    async def send(*args, **kwargs):
+        observed_tools.extend(setup.session.set_tools.await_args.args[0])
+        if history_tools_expected:
+            tool = next(
+                item for item in observed_tools if item.name == HISTORY_READ_TOOL
+            )
+            result = await tool.handler(
+                ToolInvocation(
+                    tool_name=tool.name,
+                    tool_call_id="history-call",
+                    arguments={"entity_ids": ["sensor.bedroom_temperature"]},
+                )
+            )
+            assert result.result_type == "success"
+        return SimpleNamespace(
+            data=AssistantMessageData(content="Done.", message_id="reply")
+        )
+
+    setup.session.send_and_wait.side_effect = send
+    await setup.backend.async_handle_message("agent", user_input, setup.chat)
+
+    names = {tool.name for tool in observed_tools}
+    large_output = setup.client.create_session.await_args.kwargs["large_output"]
+    assert (large_output is not None) is history_tools_expected
+    assert (HISTORY_DISCOVER_TOOL in names) is history_tools_expected
+    assert (HISTORY_READ_TOOL in names) is history_tools_expected
+    assert not any(name.startswith("ha__") for name in names)
+    if history_tools_expected:
+        history_call.assert_awaited_once()
+        get_options = history_call.await_args.args[1]
+        setup.entry.options = {**setup.entry.options, "replaced": True}
+        assert get_options() is setup.entry.options
+        assert history_call.await_args.args[3:5] == (
+            HISTORY_READ_TOOL,
+            {"entity_ids": ["sensor.bedroom_temperature"]},
+        )
+        history_tool = next(
+            item for item in observed_tools if item.name == HISTORY_READ_TOOL
+        )
+        assert (
+            "request section of github_copilot_get_context" in history_tool.description
+        )
+    else:
+        history_call.assert_not_awaited()
+    await assert_clean(setup)
+
+
+def test_ai_task_admin_diagnostics_keep_remediation(setup):
+    from custom_components.github_copilot.llm_api import (
+        ADMIN_REQUIRED,
+        ADMIN_USER_REQUIRED,
+        API_UNAVAILABLE,
+    )
+
+    diagnostic = setup.module.admin_notice_for_diagnostics(ADMIN_REQUIRED)
+    assert diagnostic is not None
+    assert "Use an administrator account" in diagnostic
+    assert "disable administrator tools" in diagnostic
+
+    user_diagnostic = setup.module.admin_notice_for_diagnostics(ADMIN_USER_REQUIRED)
+    assert user_diagnostic is not None
+    assert "Use an administrator account" in user_diagnostic
+
+    unavailable_diagnostic = setup.module.admin_notice_for_diagnostics(API_UNAVAILABLE)
+    assert unavailable_diagnostic is not None
+    assert "2026.11 or newer" in unavailable_diagnostic
+
+
+async def test_ai_tasks_never_receive_satellite_history_tools(setup):
+    status = Mock(return_value="available")
+    setup.module.satellite_history_status = status
+
+    assert (
+        await setup.backend.async_generate_data("task", task_request(setup), ChatLog())
+        == "Hello"
+    )
+
+    names = {tool.name for tool in setup.session.set_tools.await_args.args[0]}
+    assert HISTORY_DISCOVER_TOOL not in names
+    assert HISTORY_READ_TOOL not in names
+    status.assert_not_called()
     await assert_clean(setup)
 
 
@@ -3986,4 +4164,23 @@ async def test_expiry_continues_after_disconnect_and_delete_failures(
     assert "Unable to delete persisted" in caplog.text
     assert "private disconnect data" not in caplog.text
     assert "private delete data" not in caplog.text
+    await assert_clean(setup)
+
+
+async def test_revoked_satellite_history_blocks_send_on_history_session(setup):
+    user_input = SimpleNamespace(
+        text="What was the bedroom temperature?",
+        satellite_id="assist_satellite.bedroom",
+        as_llm_context=lambda _domain: SimpleNamespace(
+            context=SimpleNamespace(user_id=None)
+        ),
+    )
+    setup.module.satellite_history_status = Mock(
+        side_effect=["available", "satellite_not_allowed"]
+    )
+
+    with pytest.raises(setup.module.HomeAssistantError, match="history access"):
+        await setup.backend.async_handle_message("agent", user_input, setup.chat)
+
+    setup.session.send_and_wait.assert_not_awaited()
     await assert_clean(setup)

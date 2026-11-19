@@ -15,6 +15,8 @@ from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    EntitySelector,
+    EntitySelectorConfig,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -42,6 +44,8 @@ from .const import (
     CONF_AI_TASK_MODEL,
     CONF_AI_TASK_MODEL_BILLING,
     CONF_AI_TASK_TIMEOUT,
+    CONF_ALLOW_ALL_SATELLITES,
+    CONF_ALLOWED_SATELLITES,
     CONF_AUTH_METHOD,
     CONF_ENABLE_DEVICE_CONTROL,
     CONF_ENABLE_HOME_ASSISTANT_API,
@@ -56,6 +60,7 @@ from .const import (
     OAUTH_CLIENT_ID,
     OAUTH_DEVICE_VERIFICATION_URL,
 )
+from .history import selected_satellite_entity_ids
 from .llm_api import home_assistant_api_supported, selected_llm_apis
 from .models import (
     find_fallback_model,
@@ -207,7 +212,9 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
             ):
                 return self.async_show_form(
                     step_id="model",
-                    data_schema=_options_schema(self._model_options(), user_input),
+                    data_schema=_options_schema(
+                        self._model_options(), user_input, self.hass
+                    ),
                     errors={
                         CONF_ENABLE_HOME_ASSISTANT_API: "home_assistant_api_unavailable"
                     },
@@ -231,6 +238,12 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_ENABLE_SHARED_MEMORY, False
                 ),
                 CONF_PROMPT: user_input.get(CONF_PROMPT, ""),
+                CONF_ALLOW_ALL_SATELLITES: user_input.get(
+                    CONF_ALLOW_ALL_SATELLITES, False
+                ),
+                CONF_ALLOWED_SATELLITES: _satellite_registry_ids(
+                    self.hass, user_input.get(CONF_ALLOWED_SATELLITES, [])
+                ),
             }
             if CONF_ENABLE_HOME_ASSISTANT_API in user_input:
                 options[CONF_ENABLE_HOME_ASSISTANT_API] = user_input[
@@ -245,7 +258,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="model",
-            data_schema=_options_schema(self._model_options(), {}),
+            data_schema=_options_schema(self._model_options(), {}, self.hass),
         )
 
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> dict[str, Any]:
@@ -359,7 +372,9 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             ):
                 return self.async_show_form(
                     step_id="init",
-                    data_schema=_options_schema(self._model_options(), options),
+                    data_schema=_options_schema(
+                        self._model_options(), options, self.hass
+                    ),
                     errors={
                         CONF_ENABLE_HOME_ASSISTANT_API: "home_assistant_api_unavailable"
                     },
@@ -370,6 +385,12 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             )
             options.setdefault(CONF_AI_TASK_TIMEOUT, DEFAULT_AI_TASK_TIMEOUT)
             options.setdefault(CONF_ENABLE_SHARED_MEMORY, False)
+            options[CONF_ALLOW_ALL_SATELLITES] = bool(
+                options.get(CONF_ALLOW_ALL_SATELLITES, False)
+            )
+            options[CONF_ALLOWED_SATELLITES] = _satellite_registry_ids(
+                self.hass, options.get(CONF_ALLOWED_SATELLITES, [])
+            )
             device_control_enabled = options[CONF_ENABLE_DEVICE_CONTROL]
             options[CONF_ENABLE_DEVICE_CONTROL] = device_control_enabled
             options[CONF_LLM_HASS_API] = selected_llm_apis(options)
@@ -464,6 +485,7 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
                     CONF_MODEL: default_model,
                     CONF_AI_TASK_MODEL: task_default,
                 },
+                self.hass,
             ),
         )
 
@@ -486,9 +508,19 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
 
 
 def _options_schema(
-    model_options: list[SelectOptionDict], options: Mapping[str, Any]
+    model_options: list[SelectOptionDict],
+    options: Mapping[str, Any],
+    hass: Any,
 ) -> vol.Schema:
     """Build the conversation settings form for setup and later changes."""
+    selected_satellites = selected_satellite_entity_ids(
+        hass, list(options.get(CONF_ALLOWED_SATELLITES, []))
+    )
+    satellite_field_options = (
+        {"description": {"suggested_value": selected_satellites}}
+        if selected_satellites
+        else {"default": []}
+    )
     fields = {
         vol.Required(
             CONF_MODEL, default=options.get(CONF_MODEL, vol.UNDEFINED)
@@ -516,6 +548,16 @@ def _options_schema(
             ),
         ): BooleanSelector(),
         vol.Required(
+            CONF_ALLOW_ALL_SATELLITES,
+            default=bool(options.get(CONF_ALLOW_ALL_SATELLITES, False)),
+        ): BooleanSelector(),
+        vol.Optional(
+            CONF_ALLOWED_SATELLITES,
+            **satellite_field_options,
+        ): EntitySelector(
+            EntitySelectorConfig(domain="assist_satellite", multiple=True)
+        ),
+        vol.Required(
             CONF_ENABLE_SHARED_MEMORY,
             default=bool(options.get(CONF_ENABLE_SHARED_MEMORY, False)),
         ): BooleanSelector(),
@@ -534,6 +576,28 @@ def _options_schema(
         )
     ] = TextSelector()
     return vol.Schema(fields)
+
+
+def _satellite_registry_ids(hass: Any, entity_ids: Any) -> list[str]:
+    """Persist stable registry IDs, never renameable satellite entity IDs."""
+    if isinstance(entity_ids, str):
+        entity_ids = [entity_ids]
+    if not isinstance(entity_ids, (list, tuple)):
+        return []
+    if not entity_ids:
+        return []
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    return sorted(
+        {
+            entry.id
+            for entity_id in entity_ids
+            if isinstance(entity_id, str)
+            and (entry := registry.async_get(entity_id)) is not None
+            and entry.domain == "assist_satellite"
+        }
+    )
 
 
 def _model_label(model: Any) -> str:

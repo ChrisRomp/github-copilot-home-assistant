@@ -315,8 +315,9 @@ rewritten when forgetting.
 Memory-enabled conversation sessions raise the SDK large-tool-output threshold
 to 256,000 bytes so even a full, JSON-escaped Unicode inventory remains inline
 instead of becoming an unreadable file reference. This threshold also applies
-to other tool results in those sessions; disabled conversations and AI Tasks
-retain the SDK default. Native contracts verify all 50 maximum-length facts
+to other tool results in those sessions, and to satellite-history sessions so
+results up to the history output budget stay inline; other conversations and
+AI Tasks retain the SDK default. Native contracts verify all 50 maximum-length facts
 actually reach the model.
 
 `tests/test_memory.py` uses real HA Store/disk for limits, concurrency, private
@@ -326,6 +327,49 @@ Opt-in native contracts exercise actual outbound user/tool versus system roles,
 snapshot refresh, context reset and compaction through the cached runtime and a
 loopback fake model. No live GitHub requests or HA device actions are needed.
 Report unavailable native/HA contracts as unverified, not passing.
+
+### Satellite history
+
+The history grant is specific to the original conversation input: it requires
+`context.user_id is None`, a registered and enabled `assist_satellite`, and its
+stable registry ID in the entry options or allow-all mode. Do not infer identity
+from `device_id`, or pass the AI Task path through this authorization.
+
+Entity discovery and reads share one eligibility rule: enumerate current HA
+states, then apply `async_should_expose` with the `conversation` assistant.
+Recheck the satellite grant against the entry's current options before each
+tool call and after every Recorder read, and recheck exposure of every
+requested entity; discard the whole result if access or exposure changed while
+a query was running. Never call the exposure helper on arbitrary model-supplied
+IDs. Discovery labels are normalized to single-line text without control or
+format characters and are returned only as tool data.
+
+Recorder reads use the bounded per-entity `state_changes_during_period` API on
+Recorder's database executor, always ascending, because HA 2026.10 applies
+`descending` after the database limit. Point lookups search backward in growing
+windows (1 minute, 30 minutes, 12 hours, 7 days, then 31 days) and page forward
+only inside the first non-empty window, so typical sensors need one or two
+indexed queries and return the real observation time. Recorder's start-time
+state uses a synthetic timestamp, so it is only used after the windows are
+empty, to prove that nothing older is retained (`no_retained_state`). Any query
+or row budget exhaustion returns `incomplete` rather than guessing. A full page
+is incomplete even when the remaining turn budget, not the per-entity limit,
+set its size. A range with no changes includes the latest real observation at
+or before its start when found.
+
+Per-turn query, row, and output limits and a shared in-flight query semaphore
+bound work even when a caller is cancelled; the permit is released even if
+Recorder lookup fails before a job is submitted. Discovery and reads share the
+output budget, and the size check runs after continuation metadata is added.
+When the turn's budget is spent, results carry `turn_budget_exhausted` so the
+model answers from partial data instead of retrying in the same turn. The
+grant and exposure recheck runs after every Recorder query, including each
+point-lookup window. The request context includes HA's configured IANA time
+zone so relative times on past dates use that date's offset.
+Current Recorder exclusion is reported separately and must not hide retained
+rows. Unit tests live in `tests/test_history.py`; `tests/test_ha_contract.py`
+checks the Assist exposure namespace, device-inherited areas, and Recorder API
+behavior on supported versions.
 
 ### Trusted instructions and live context
 
