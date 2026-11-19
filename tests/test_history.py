@@ -842,6 +842,15 @@ async def test_impossible_timestamps_return_tool_errors(ha_boundary, monkeypatch
     assert point == {"error": "invalid_time"}
     assert span == {"error": "invalid_time_range"}
 
+    for early in ("0001-01-01T00:00:00+00:00", "1969-12-31T23:59:59+00:00"):
+        assert await _read(setup, {"entity_ids": [entity_id], "time": early}) == {
+            "error": "invalid_time"
+        }
+        assert await _read(
+            setup,
+            {"entity_ids": [entity_id], "start_time": early, "end_time": early},
+        ) == {"error": "invalid_time_range"}
+
 
 def test_output_trimming_keeps_final_size_within_budget(ha_boundary, monkeypatch):
     history = ha_boundary.load("history")

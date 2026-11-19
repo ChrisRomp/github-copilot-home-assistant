@@ -35,6 +35,7 @@ _ENTITY_ID_PATTERN = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 _MAX_QUERY_LENGTH = 120
 _MAX_STATE_LENGTH = 255
 _MAX_UNIT_LENGTH = 64
+_EARLIEST_TIME = datetime(1970, 1, 1, tzinfo=UTC)
 _RECORDER_ERRORS = (HomeAssistantError, KeyError, RuntimeError, SQLAlchemyError)
 
 _POINT_LOOKBACKS = (
@@ -213,14 +214,16 @@ def async_find_entities(
 
 
 def _parse_aware_time(value: str) -> datetime | None:
-    """Parse only explicit-offset timestamps to avoid ambiguous local times."""
+    """Parse explicit-offset timestamps that Recorder can actually contain."""
     try:
         parsed = dt_util.parse_datetime(value)
         if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
             return None
-        return parsed.astimezone(UTC)
+        parsed = parsed.astimezone(UTC)
     except (ValueError, OverflowError):
         return None
+    # Pre-epoch instants hold no Recorder data and could underflow lookbacks.
+    return parsed if parsed >= _EARLIEST_TIME else None
 
 
 def _state_record(state: Any) -> dict[str, Any]:

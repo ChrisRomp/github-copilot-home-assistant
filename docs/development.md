@@ -315,8 +315,9 @@ rewritten when forgetting.
 Memory-enabled conversation sessions raise the SDK large-tool-output threshold
 to 256,000 bytes so even a full, JSON-escaped Unicode inventory remains inline
 instead of becoming an unreadable file reference. This threshold also applies
-to other tool results in those sessions; disabled conversations and AI Tasks
-retain the SDK default. Native contracts verify all 50 maximum-length facts
+to other tool results in those sessions, and to satellite-history sessions so
+results up to the history output budget stay inline; other conversations and
+AI Tasks retain the SDK default. Native contracts verify all 50 maximum-length facts
 actually reach the model.
 
 `tests/test_memory.py` uses real HA Store/disk for limits, concurrency, private

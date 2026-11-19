@@ -3742,6 +3742,8 @@ async def test_history_tools_are_satellite_only_and_independent_of_device_contro
     await setup.backend.async_handle_message("agent", user_input, setup.chat)
 
     names = {tool.name for tool in observed_tools}
+    large_output = setup.client.create_session.await_args.kwargs["large_output"]
+    assert (large_output is not None) is history_tools_expected
     assert (HISTORY_DISCOVER_TOOL in names) is history_tools_expected
     assert (HISTORY_READ_TOOL in names) is history_tools_expected
     assert not any(name.startswith("ha__") for name in names)
@@ -4162,4 +4164,23 @@ async def test_expiry_continues_after_disconnect_and_delete_failures(
     assert "Unable to delete persisted" in caplog.text
     assert "private disconnect data" not in caplog.text
     assert "private delete data" not in caplog.text
+    await assert_clean(setup)
+
+
+async def test_revoked_satellite_history_blocks_send_on_history_session(setup):
+    user_input = SimpleNamespace(
+        text="What was the bedroom temperature?",
+        satellite_id="assist_satellite.bedroom",
+        as_llm_context=lambda _domain: SimpleNamespace(
+            context=SimpleNamespace(user_id=None)
+        ),
+    )
+    setup.module.satellite_history_status = Mock(
+        side_effect=["available", "satellite_not_allowed"]
+    )
+
+    with pytest.raises(setup.module.HomeAssistantError, match="history access"):
+        await setup.backend.async_handle_message("agent", user_input, setup.chat)
+
+    setup.session.send_and_wait.assert_not_awaited()
     await assert_clean(setup)

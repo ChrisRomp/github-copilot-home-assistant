@@ -896,6 +896,12 @@ class ConversationBackend:
                         prompt = render_reference(snapshot, user_input.text)
                         if record.memory_generation == memory_generation:
                             record.memory_revision = snapshot["revision"]
+                # The session may hold earlier history, so recheck the grant last.
+                if history_enabled and (
+                    satellite_history_status(self.hass, self.entry.options, user_input)
+                    != "available"
+                ):
+                    raise HomeAssistantError("Satellite history access changed.")
                 send_started = True
                 return await record.session.send_and_wait(
                     prompt,
@@ -1632,10 +1638,12 @@ class ConversationBackend:
                 streaming=True,
                 enable_session_store=False,
                 memory={"enabled": False},
-                # Keep the bounded full inventory inline, including escaped Unicode.
+                # Keep memory inventories and history results inline; the
+                # runtime would replace them with unreadable file references.
                 large_output=(
                     {"max_size_bytes": MEMORY_MAX_RESULT_BYTES}
-                    if not task_mode and self._memory_enabled
+                    if not task_mode
+                    and (self._memory_enabled or history_status == "available")
                     else None
                 ),
                 enable_skills=False,
