@@ -250,32 +250,33 @@ async def _async_query(
     from homeassistant.components.recorder.history import state_changes_during_period
 
     await query_slots.acquire()
-    job = asyncio.ensure_future(
-        recorder.get_instance(hass).async_add_executor_job(
-            partial(
-                state_changes_during_period,
-                hass,
-                start_time,
-                end_time,
-                entity_id,
-                False,
-                False,
-                limit,
-                include_start_time_state,
+    try:
+        job = asyncio.ensure_future(
+            recorder.get_instance(hass).async_add_executor_job(
+                partial(
+                    state_changes_during_period,
+                    hass,
+                    start_time,
+                    end_time,
+                    entity_id,
+                    False,
+                    False,
+                    limit,
+                    include_start_time_state,
+                )
             )
         )
-    )
-    try:
-        result = await asyncio.shield(job)
+        try:
+            result = await asyncio.shield(job)
+        except asyncio.CancelledError:
+            drain = asyncio.gather(job, return_exceptions=True)
+            while not drain.done():
+                try:
+                    await asyncio.shield(drain)
+                except asyncio.CancelledError:
+                    continue
+            raise
         return result.get(entity_id, [])
-    except asyncio.CancelledError:
-        drain = asyncio.gather(job, return_exceptions=True)
-        while not drain.done():
-            try:
-                await asyncio.shield(drain)
-            except asyncio.CancelledError:
-                continue
-        raise
     finally:
         query_slots.release()
 
@@ -286,12 +287,14 @@ async def _async_find_state_at_or_before(
     entity_id: str,
     point_time: datetime,
     budget: HistoryTurnBudget,
+    access_error: Callable[[], dict[str, Any] | None] = lambda: None,
 ) -> tuple[str, Any | None]:
     """Find the newest retained state at an instant, with its real timestamp.
 
     Returns ``("found", state)``, ``("absent", None)`` when Recorder retains no
-    state at or before the instant, or ``("incomplete", None)`` when the budget
-    or search limit ends the lookup first. Ascending pages work on every
+    state at or before the instant, ``("incomplete", None)`` when the budget
+    or search limit ends the lookup first, or ``("denied", error)`` when
+    ``access_error`` reports lost access after any query. Ascending pages work on every
     supported HA version; small windows first keep dense sensors cheap.
     """
     upper = point_time
@@ -317,6 +320,8 @@ async def _async_find_state_at_or_before(
                 limit=limit,
             )
             budget.rows += len(states)
+            if error := access_error():
+                return "denied", error
             in_window = [
                 state
                 for state in states
@@ -355,6 +360,8 @@ async def _async_find_state_at_or_before(
         include_start_time_state=True,
     )
     budget.rows += len(states)
+    if error := access_error():
+        return "denied", error
     return ("incomplete" if states else "absent"), None
 
 
@@ -405,6 +412,8 @@ def _bounded_output(
                 break
         else:
             return {"error": "output_budget_exceeded"}
+        # Trimmed output means this turn cannot return the remainder either.
+        result["turn_budget_exhausted"] = True
     budget.output_bytes += size
     return result
 
@@ -500,6 +509,9 @@ async def async_get_history(
     elif end_time - start_time > timedelta(days=HISTORY_MAX_RANGE):
         return {"error": "range_too_wide", "maximum_days": HISTORY_MAX_RANGE}
 
+    def access_error() -> dict[str, Any] | None:
+        return _access_error(hass, get_options, user_input, entity_ids)
+
     result: dict[str, Any] = {"complete": True, "entities": []}
     for entity_id in entity_ids:
         entity_result: dict[str, Any] = {
@@ -513,10 +525,12 @@ async def async_get_history(
             entity_result["requested_time"] = point_time.isoformat()
             try:
                 lookup, state = await _async_find_state_at_or_before(
-                    hass, query_slots, entity_id, point_time, budget
+                    hass, query_slots, entity_id, point_time, budget, access_error
                 )
             except _RECORDER_ERRORS:
                 return {"error": "recorder_unavailable"}
+            if lookup == "denied":
+                return state
             if state is not None:
                 entity_result["records"].append(_state_record(state))
                 entity_result["status"] = "found"
@@ -554,6 +568,8 @@ async def async_get_history(
                 except _RECORDER_ERRORS:
                     return {"error": "recorder_unavailable"}
                 budget.rows += len(states)
+                if error := access_error():
+                    return error
                 records = states[: min(HISTORY_MAX_ROWS_PER_ENTITY, query_limit)]
                 entity_result["records"] = [_state_record(state) for state in records]
                 # A full page may hide later rows, whichever limit produced it.
@@ -562,10 +578,17 @@ async def async_get_history(
                 elif not states:
                     try:
                         lookup, state = await _async_find_state_at_or_before(
-                            hass, query_slots, entity_id, start_time, budget
+                            hass,
+                            query_slots,
+                            entity_id,
+                            start_time,
+                            budget,
+                            access_error,
                         )
                     except _RECORDER_ERRORS:
                         return {"error": "recorder_unavailable"}
+                    if lookup == "denied":
+                        return state
                     if state is not None:
                         entity_result["state_at_start"] = _state_record(state)
                         entity_result["status"] = "no_changes_in_range"
@@ -575,9 +598,14 @@ async def async_get_history(
                         _mark_incomplete(result, entity_result)
 
         result["entities"].append(entity_result)
-        if error := _access_error(hass, get_options, user_input, entity_ids):
+        if error := access_error():
             return error
 
+    if not result["complete"] and (
+        budget.queries >= HISTORY_MAX_QUERIES_PER_TURN
+        or budget.rows >= HISTORY_MAX_ROWS_PER_TURN
+    ):
+        result["turn_budget_exhausted"] = True
     return _bounded_output(result, budget)
 
 

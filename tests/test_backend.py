@@ -2960,6 +2960,50 @@ def test_request_context_uses_home_assistant_time_helper(setup, monkeypatch):
     assert result["current_time"] == current_time.isoformat()
 
 
+def test_request_context_includes_configured_time_zone(setup, monkeypatch):
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setattr(
+        setup.module.dt_util,
+        "get_default_time_zone",
+        lambda: ZoneInfo("America/New_York"),
+    )
+
+    result = setup.backend._context_tool_result(
+        {"section": "request"}, setup.user, setup.chat
+    )
+
+    assert result["time_zone"] == "America/New_York"
+
+
+@pytest.mark.parametrize(
+    ("allowed", "allow_all", "expected"),
+    [
+        ([], False, "disabled"),
+        (["stable-bedroom-id"], False, "enabled for selected satellites"),
+        ([], True, "enabled for all registered satellites"),
+    ],
+)
+def test_capabilities_describe_satellite_history_setting(
+    setup, allowed, allow_all, expected
+):
+    from custom_components.github_copilot.const import (
+        CONF_ALLOW_ALL_SATELLITES,
+        CONF_ALLOWED_SATELLITES,
+    )
+
+    setup.entry.options.update(
+        {CONF_ALLOWED_SATELLITES: allowed, CONF_ALLOW_ALL_SATELLITES: allow_all}
+    )
+
+    prompt = setup.backend._conversation_system_prompt(None)
+
+    assert (
+        "Assist satellites allowed to read history, or Allow history from all "
+        f"Assist satellites: {expected}."
+    ) in prompt
+
+
 async def test_filtered_live_context_is_forwarded_without_broad_context_lookup(setup):
     setup.entry.options["enable_device_control"] = True
     api = SimpleNamespace(

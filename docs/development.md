@@ -357,8 +357,14 @@ set its size. A range with no changes includes the latest real observation at
 or before its start when found.
 
 Per-turn query, row, and output limits and a shared in-flight query semaphore
-bound work even when a caller is cancelled. Discovery and reads share the
+bound work even when a caller is cancelled; the permit is released even if
+Recorder lookup fails before a job is submitted. Discovery and reads share the
 output budget, and the size check runs after continuation metadata is added.
+When the turn's budget is spent, results carry `turn_budget_exhausted` so the
+model answers from partial data instead of retrying in the same turn. The
+grant and exposure recheck runs after every Recorder query, including each
+point-lookup window. The request context includes HA's configured IANA time
+zone so relative times on past dates use that date's offset.
 Current Recorder exclusion is reported separately and must not hide retained
 rows. Unit tests live in `tests/test_history.py`; `tests/test_ha_contract.py`
 checks the Assist exposure namespace, device-inherited areas, and Recorder API

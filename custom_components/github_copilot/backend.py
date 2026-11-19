@@ -59,6 +59,8 @@ from .const import (
     CONF_AI_TASK_MODEL,
     CONF_AI_TASK_MODEL_BILLING,
     CONF_AI_TASK_TIMEOUT,
+    CONF_ALLOW_ALL_SATELLITES,
+    CONF_ALLOWED_SATELLITES,
     CONF_AUTH_METHOD,
     CONF_ENABLE_DEVICE_CONTROL,
     CONF_ENABLE_HOME_ASSISTANT_API,
@@ -1973,6 +1975,13 @@ class ConversationBackend:
                 ),
                 administrator_tools=admin_state,
                 shared_memory="enabled" if self._memory_enabled else "disabled",
+                satellite_history=(
+                    "enabled for all registered satellites"
+                    if self.entry.options.get(CONF_ALLOW_ALL_SATELLITES)
+                    else "enabled for selected satellites"
+                    if self.entry.options.get(CONF_ALLOWED_SATELLITES)
+                    else "disabled"
+                ),
             ),
         ]
         if admin_notice:
@@ -2042,6 +2051,7 @@ class ConversationBackend:
         return {
             "source": "home_assistant_request",
             "current_time": dt_util.now().isoformat(),
+            "time_zone": str(dt_util.get_default_time_zone()),
             "context": (
                 getattr(user_input, "extra_system_prompt", None)
                 or getattr(chat_log, "extra_system_prompt", None)
@@ -2153,8 +2163,10 @@ class ConversationBackend:
                         "satellite. Use an explicit-offset ISO 8601 timestamp for "
                         "'time' to retrieve the latest retained value at or before "
                         "that instant. For relative dates or times, get the current "
-                        "time and timezone from the request section of "
+                        "time and time_zone from the request section of "
                         "github_copilot_get_context; do not invent dates or offsets. "
+                        "Use the offset that time_zone has on the target date, "
+                        "which can differ across daylight-saving changes. "
                         "Use 'start_time' and 'end_time' for a "
                         "range of at most 31 days. Without times, the default is "
                         "the last 24 hours. Results include actual recording times "
@@ -2165,7 +2177,10 @@ class ConversationBackend:
                         "results include requested and covered intervals; if a range "
                         "is incomplete, continue from its continuation_start_time "
                         "with the same end_time and deduplicate overlapping records "
-                        "by entity, timestamp, state, and unit. Do not present "
+                        "by entity, timestamp, state, and unit. If "
+                        "turn_budget_exhausted is true, do not call history tools "
+                        "again in this turn; answer from the partial result and "
+                        "say it is partial. Do not present "
                         "incomplete ranges as exact totals or averages. "
                         "recording_enabled_now describes current Recorder policy "
                         "only; it does not prove that older retained data is absent. "

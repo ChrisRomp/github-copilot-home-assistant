@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from custom_components.github_copilot.const import (
     CONF_ALLOW_ALL_SATELLITES,
     CONF_ALLOWED_SATELLITES,
@@ -480,7 +482,7 @@ def test_output_trimming_restarts_continuation_when_all_records_are_removed(
     ha_boundary, monkeypatch
 ):
     history = ha_boundary.load("history")
-    monkeypatch.setattr(history, "HISTORY_MAX_OUTPUT_BYTES_PER_TURN", 350)
+    monkeypatch.setattr(history, "HISTORY_MAX_OUTPUT_BYTES_PER_TURN", 400)
     result = {
         "complete": True,
         "entities": [
@@ -879,6 +881,7 @@ def test_output_trimming_keeps_final_size_within_budget(ha_boundary, monkeypatch
         assert history._size_bytes(output) <= limit
         assert budget.output_bytes == history._size_bytes(output)
         assert "continuation_start_time" in output["entities"][0]
+        assert output["turn_budget_exhausted"] is True
 
 
 def test_discovery_filters_exposure_and_domain_and_sanitizes_labels(
@@ -965,3 +968,65 @@ def test_selected_satellites_accept_registry_or_resubmitted_entity_ids(
         assert setup.history.selected_satellite_entity_ids(setup.hass, saved) == [
             "assist_satellite.bedroom"
         ]
+
+
+async def test_point_lookup_stops_querying_when_access_is_revoked(
+    ha_boundary, monkeypatch
+):
+    setup = history_setup(ha_boundary, monkeypatch)
+    entity_id = "sensor.bedroom_temperature"
+    current = {"options": setup.options}
+    query = Mock(return_value={})
+
+    def revoke(*args):
+        current["options"] = {**setup.options, CONF_ALLOWED_SATELLITES: []}
+        return query(*args)
+
+    _serve_states(setup, monkeypatch, [_current_state(entity_id)], query=revoke)
+
+    result = await _read(
+        setup,
+        {"entity_ids": [entity_id], "time": "2026-06-01T03:00:00+00:00"},
+        get_options=lambda: current["options"],
+    )
+
+    assert result == {"error": "history_access_revoked"}
+    assert query.call_count == 1
+
+
+async def test_query_slot_is_released_when_recorder_lookup_fails(
+    ha_boundary, monkeypatch
+):
+    setup = history_setup(ha_boundary, monkeypatch)
+    _serve_states(setup, monkeypatch, [])
+    sys.modules[
+        "homeassistant.components.recorder"
+    ].get_instance.side_effect = KeyError("recorder")
+    slots = asyncio.Semaphore(1)
+
+    for _ in range(2):
+        with pytest.raises(KeyError):
+            await setup.history._async_query(
+                setup.hass,
+                slots,
+                entity_id="sensor.bedroom_temperature",
+                start_time=datetime(2026, 6, 1, tzinfo=UTC),
+                end_time=datetime(2026, 6, 2, tzinfo=UTC),
+                limit=1,
+            )
+    assert not slots.locked()
+
+
+async def test_exhausted_turn_budget_is_reported_explicitly(ha_boundary, monkeypatch):
+    setup = history_setup(ha_boundary, monkeypatch)
+    entity_id = "sensor.bedroom_temperature"
+    _serve_states(setup, monkeypatch, [_current_state(entity_id)])
+    budget = setup.history.HistoryTurnBudget(
+        queries=setup.history.HISTORY_MAX_QUERIES_PER_TURN
+    )
+
+    result = await _read(setup, {"entity_ids": [entity_id], **RANGE}, budget)
+
+    assert result["complete"] is False
+    assert result["turn_budget_exhausted"] is True
+    assert result["entities"][0]["status"] == "incomplete"

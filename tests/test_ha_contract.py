@@ -436,11 +436,13 @@ async def test_real_entry_removal_reports_orphaned_memory(
 
 @pytest.mark.parametrize(
     ("time_zone", "offset_hours"),
-    [("Asia/Tokyo", 9), ("Pacific/Honolulu", -10)],
+    [("Asia/Tokyo", 9), ("Pacific/Honolulu", -10), ("America/New_York", None)],
 )
 async def test_request_time_uses_real_home_assistant_configured_zone(
     tmp_path, time_zone, offset_hours
 ):
+    from zoneinfo import ZoneInfo
+
     from homeassistant.components.conversation import ConversationInput
     from homeassistant.components.conversation.chat_log import ChatLog
     from homeassistant.core import Context, HomeAssistant
@@ -467,7 +469,17 @@ async def test_request_time_uses_real_home_assistant_configured_zone(
         )
         after = dt_util.utcnow()
         current_time = datetime.fromisoformat(result["current_time"])
-        assert current_time.utcoffset() == timedelta(hours=offset_hours)
+        zone = ZoneInfo(result["time_zone"])
+        assert result["time_zone"] == time_zone
+        if offset_hours is None:
+            assert current_time.utcoffset() == current_time.astimezone(zone).utcoffset()
+            # A historical date can use a different offset than the current one.
+            assert (
+                datetime(2026, 1, 15, 3, tzinfo=zone).utcoffset()
+                != datetime(2026, 7, 15, 3, tzinfo=zone).utcoffset()
+            )
+        else:
+            assert current_time.utcoffset() == timedelta(hours=offset_hours)
         assert before <= current_time <= after
     finally:
         dt_util.set_default_time_zone(previous_zone)
