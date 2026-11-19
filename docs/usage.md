@@ -58,9 +58,10 @@ reports recorded values, timestamps, requested and covered intervals, and
 whether a range is complete. Each call accepts up to four entities and a range
 of at most 31 days; per-turn query, row, and output limits can make results
 incomplete, including a point lookup when the bounded search cannot establish
-the latest state. An unchanged range includes its latest retained observation
-at or before the range start when one is found. Recorder's current inclusion
-setting is reported separately and does not prove older retained rows are
+the latest state. Point lookups report the actual time of the value they find,
+or that no value is retained. An unchanged range includes its latest retained
+observation at or before the range start when one is found. Recorder's current
+inclusion setting is reported separately and does not prove older retained rows are
 absent. Exposure is checked again when history is read, so removing an entity
 from Assist exposure prevents new reads. Disabling satellite access or removing
 an endpoint also prevents new reads; it does not erase results already delivered

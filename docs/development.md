@@ -335,24 +335,34 @@ stable registry ID in the entry options or allow-all mode. Do not infer identity
 from `device_id`, or pass the AI Task path through this authorization.
 
 Entity discovery and reads share one eligibility rule: enumerate current HA
-states, then apply `async_should_expose`. Recheck the satellite grant before
-each tool call and after Recorder reads; discard results if access or exposure
-changed while a query was running. Never call the exposure helper on arbitrary
-model-supplied IDs.
+states, then apply `async_should_expose` with the `conversation` assistant.
+Recheck the satellite grant against the entry's current options before each
+tool call and after every Recorder read, and recheck exposure of every
+requested entity; discard the whole result if access or exposure changed while
+a query was running. Never call the exposure helper on arbitrary model-supplied
+IDs. Discovery labels are normalized to single-line text without control or
+format characters and are returned only as tool data.
 
 Recorder reads use the bounded per-entity `state_changes_during_period` API on
-Recorder's database executor. Point lookups page chronological windows using
-the actual timestamps; this works on HA 2026.10, where `descending` is applied
-after the database limit, and 2026.11, where the database can order before
-limiting. If the query or row budget is exhausted before a latest state is
-established, return `incomplete` rather than guessing. A range with no changes
-includes the latest real observation at or before its start when found; do not
-fabricate a start-time timestamp. Per-turn query, row, and output limits and a
-shared in-flight query semaphore bound work even when a caller is cancelled.
+Recorder's database executor, always ascending, because HA 2026.10 applies
+`descending` after the database limit. Point lookups search backward in growing
+windows (1 minute, 30 minutes, 12 hours, 7 days, then 31 days) and page forward
+only inside the first non-empty window, so typical sensors need one or two
+indexed queries and return the real observation time. Recorder's start-time
+state uses a synthetic timestamp, so it is only used after the windows are
+empty, to prove that nothing older is retained (`no_retained_state`). Any query
+or row budget exhaustion returns `incomplete` rather than guessing. A full page
+is incomplete even when the remaining turn budget, not the per-entity limit,
+set its size. A range with no changes includes the latest real observation at
+or before its start when found.
+
+Per-turn query, row, and output limits and a shared in-flight query semaphore
+bound work even when a caller is cancelled. Discovery and reads share the
+output budget, and the size check runs after continuation metadata is added.
 Current Recorder exclusion is reported separately and must not hide retained
 rows. Unit tests live in `tests/test_history.py`; `tests/test_ha_contract.py`
-checks the Assist exposure namespace and Recorder API behavior on supported
-versions.
+checks the Assist exposure namespace, device-inherited areas, and Recorder API
+behavior on supported versions.
 
 ### Trusted instructions and live context
 

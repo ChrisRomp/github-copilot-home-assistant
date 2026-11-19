@@ -88,7 +88,7 @@ async def test_real_history_uses_conversation_exposure_without_other_assistant_e
         await hass.async_stop()
 
 
-async def test_real_recorder_finds_latest_state_after_more_than_one_hundred_changes(
+async def test_real_recorder_point_lookup_uses_one_bounded_query_for_dense_history(
     tmp_path,
 ):
     from homeassistant import loader
@@ -97,6 +97,7 @@ async def test_real_recorder_finds_latest_state_after_more_than_one_hundred_chan
     from homeassistant.helpers.recorder import async_initialize_recorder
     from homeassistant.setup import async_setup_component
 
+    from custom_components.github_copilot.const import HISTORY_MAX_ROWS_PER_TURN
     from custom_components.github_copilot.history import (
         HistoryTurnBudget,
         _async_find_state_at_or_before,
@@ -118,26 +119,105 @@ async def test_real_recorder_finds_latest_state_after_more_than_one_hundred_chan
             {"recorder": {"db_url": f"sqlite:///{tmp_path / 'history.db'}"}},
         )
         entity_id = "sensor.dense_temperature"
-        for index in range(150):
-            hass.states.async_set(entity_id, str(index))
+        hass.states.async_set(entity_id, "0")
+        first = hass.states.get(entity_id)
+        assert first is not None
+        for index in range(1, 150):
             await asyncio.sleep(0.001)
+            hass.states.async_set(entity_id, str(index))
+            if index == 75:
+                middle = hass.states.get(entity_id)
         await recorder.get_instance(hass).async_block_till_done()
         current = hass.states.get(entity_id)
         assert current is not None
+        slots = asyncio.Semaphore(2)
+
+        for point, expected, max_queries in (
+            (current.last_updated, current, 2),
+            (middle.last_updated + timedelta(microseconds=500), middle, 1),
+        ):
+            budget = HistoryTurnBudget()
+            status, state = await _async_find_state_at_or_before(
+                hass, slots, entity_id, point, budget
+            )
+            assert status == "found"
+            assert state.state == expected.state
+            assert state.last_updated == expected.last_updated
+            assert budget.queries <= max_queries
+            assert budget.rows <= HISTORY_MAX_ROWS_PER_TURN
 
         budget = HistoryTurnBudget()
-        state = await _async_find_state_at_or_before(
-            hass,
-            asyncio.Semaphore(2),
-            entity_id,
-            current.last_updated,
-            budget,
+        status, state = await _async_find_state_at_or_before(
+            hass, slots, entity_id, first.last_updated - timedelta(seconds=1), budget
+        )
+        assert (status, state) == ("absent", None)
+    finally:
+        await hass.async_stop()
+
+
+async def test_real_discovery_uses_device_area_for_exposed_entities(tmp_path):
+    from homeassistant.components.homeassistant.const import DATA_EXPOSED_ENTITIES
+    from homeassistant.components.homeassistant.exposed_entities import (
+        ExposedEntities,
+        async_expose_entity,
+    )
+    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import area_registry as ar
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.github_copilot.history import (
+        HistoryTurnBudget,
+        async_find_entities,
+    )
+
+    hass = HomeAssistant(str(tmp_path))
+    entry = Mock(
+        spec=ConfigEntry,
+        entry_id="device-entry",
+        domain="test",
+        title="Test",
+        disabled_by=None,
+        subentries={},
+    )
+    hass.config_entries = SimpleNamespace(
+        async_wait_initialized=AsyncMock(),
+        async_get_entry=Mock(return_value=entry),
+    )
+    try:
+        dr.async_setup(hass)
+        await dr.async_load(hass, load_empty=True)
+        await er.async_load(hass, load_empty=True)
+        await ar.async_load(hass, load_empty=True)
+        exposure = hass.data[DATA_EXPOSED_ENTITIES] = ExposedEntities(hass)
+        await exposure.async_initialize()
+        area = ar.async_get(hass).async_create("Guest Bedroom")
+        device = dr.async_get(hass).async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={("test", "thermostat")},
+        )
+        dr.async_get(hass).async_update_device(device.id, area_id=area.id)
+        registry_entry = er.async_get(hass).async_get_or_create(
+            "sensor", "test", "thermostat_temperature", device_id=device.id
+        )
+        assert registry_entry.area_id is None
+        hidden = er.async_get(hass).async_get_or_create(
+            "sensor", "test", "thermostat_hidden", device_id=device.id
+        )
+        hass.states.async_set(registry_entry.entity_id, "21")
+        hass.states.async_set(hidden.entity_id, "18")
+        async_expose_entity(hass, "conversation", registry_entry.entity_id, True)
+        async_expose_entity(hass, "conversation", hidden.entity_id, False)
+
+        result = async_find_entities(
+            hass, {"query": "guest bedroom", "domain": "sensor"}, HistoryTurnBudget()
         )
 
-        assert state is not None, f"Recorder query budget after lookup: {budget}"
-        assert state.state == "149"
-        assert state.last_updated == current.last_updated
-        assert budget.rows == 150
+        assert result["truncated"] is False
+        assert [
+            (entity["entity_id"], entity["area"]) for entity in result["entities"]
+        ] == [(registry_entry.entity_id, "Guest Bedroom")]
     finally:
         await hass.async_stop()
 

@@ -3703,6 +3703,9 @@ async def test_history_tools_are_satellite_only_and_independent_of_device_contro
     assert not any(name.startswith("ha__") for name in names)
     if history_tools_expected:
         history_call.assert_awaited_once()
+        get_options = history_call.await_args.args[1]
+        setup.entry.options = {**setup.entry.options, "replaced": True}
+        assert get_options() is setup.entry.options
         assert history_call.await_args.args[3:5] == (
             HISTORY_READ_TOOL,
             {"entity_ids": ["sensor.bedroom_temperature"]},

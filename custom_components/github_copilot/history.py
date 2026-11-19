@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import unicodedata
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -26,7 +28,6 @@ from .const import (
     HISTORY_MAX_RANGE,
     HISTORY_MAX_ROWS_PER_ENTITY,
     HISTORY_MAX_ROWS_PER_TURN,
-    HISTORY_POINT_LOOKBACK_DAYS,
     HISTORY_READ_TOOL,
 )
 
@@ -34,6 +35,17 @@ _ENTITY_ID_PATTERN = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 _MAX_QUERY_LENGTH = 120
 _MAX_STATE_LENGTH = 255
 _MAX_UNIT_LENGTH = 64
+_RECORDER_ERRORS = (HomeAssistantError, KeyError, RuntimeError, SQLAlchemyError)
+
+_POINT_LOOKBACKS = (
+    timedelta(minutes=1),
+    timedelta(minutes=30),
+    timedelta(hours=12),
+    timedelta(days=7),
+    timedelta(days=HISTORY_MAX_RANGE),
+)
+
+OptionsProvider = Callable[[], Mapping[str, Any]]
 
 DISCOVER_PARAMETERS = vol.Schema(
     {
@@ -62,17 +74,19 @@ class HistoryTurnBudget:
     output_bytes: int = 0
 
 
-def selected_satellite_entity_ids(hass: Any, registry_ids: list[str]) -> list[str]:
-    """Resolve saved stable registry IDs to current satellite entity IDs."""
-    if not registry_ids:
+def selected_satellite_entity_ids(hass: Any, satellite_ids: list[str]) -> list[str]:
+    """Resolve saved registry IDs, or resubmitted entity IDs, to entity IDs."""
+    if not satellite_ids:
         return []
     from homeassistant.helpers import entity_registry as er
 
+    wanted = {value for value in satellite_ids if isinstance(value, str)}
     registry = er.async_get(hass)
     return sorted(
         entry.entity_id
         for entry in registry.entities.values()
-        if entry.id in registry_ids and entry.domain == "assist_satellite"
+        if entry.domain == "assist_satellite"
+        and (entry.id in wanted or entry.entity_id in wanted)
     )
 
 
@@ -95,7 +109,7 @@ def satellite_registry_id(hass: Any, satellite_id: str | None) -> str | None:
 
 
 def satellite_history_status(
-    hass: Any, options: dict[str, Any], user_input: Any
+    hass: Any, options: Mapping[str, Any], user_input: Any
 ) -> str:
     """Return the capability reason without treating metadata as identity."""
     context = getattr(user_input, "context", None)
@@ -148,7 +162,18 @@ def _entity_area(hass: Any, entity_id: str) -> str:
     return area.name if area is not None else ""
 
 
-def async_find_entities(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+def _label(value: Any) -> str:
+    """Return a single-line, bounded label without control or format characters."""
+    text = "".join(
+        " " if unicodedata.category(char).startswith(("C", "Z")) else char
+        for char in str(value)
+    )
+    return " ".join(text.split())[:_MAX_QUERY_LENGTH]
+
+
+def async_find_entities(
+    hass: Any, arguments: dict[str, Any], budget: HistoryTurnBudget
+) -> dict[str, Any]:
     """Find current Assist-exposed entity IDs without returning their state."""
     args = DISCOVER_PARAMETERS(arguments)
     query_text = args["query"].strip()
@@ -161,8 +186,8 @@ def async_find_entities(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     for entity_id, state in _eligible_states(hass).items():
         if domain and state.domain != domain:
             continue
-        area = _entity_area(hass, entity_id)
-        name = str(getattr(state, "name", "") or entity_id)
+        area = _label(_entity_area(hass, entity_id))
+        name = _label(getattr(state, "name", "") or entity_id)
         searchable = f"{entity_id} {name} {area}".casefold()
         if all(token in searchable for token in query):
             if len(matches) == HISTORY_MAX_DISCOVERY_RESULTS:
@@ -171,23 +196,31 @@ def async_find_entities(hass: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             matches.append(
                 {
                     "entity_id": entity_id,
-                    "name": name[:_MAX_QUERY_LENGTH],
+                    "name": name,
                     "domain": state.domain,
-                    **({"area": area[:_MAX_QUERY_LENGTH]} if area else {}),
+                    **({"area": area} if area else {}),
                 }
             )
-    return {
-        "entities": matches,
-        "truncated": truncated,
-    }
+    result = {"entities": matches, "truncated": truncated}
+    remaining = HISTORY_MAX_OUTPUT_BYTES_PER_TURN - budget.output_bytes
+    while (size := _size_bytes(result)) > remaining and matches:
+        matches.pop()
+        result["truncated"] = True
+    if size > remaining:
+        return {"error": "output_budget_exceeded"}
+    budget.output_bytes += size
+    return result
 
 
 def _parse_aware_time(value: str) -> datetime | None:
     """Parse only explicit-offset timestamps to avoid ambiguous local times."""
-    parsed = dt_util.parse_datetime(value)
-    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+    try:
+        parsed = dt_util.parse_datetime(value)
+        if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
         return None
-    return parsed.astimezone(UTC)
 
 
 def _state_record(state: Any) -> dict[str, Any]:
@@ -209,8 +242,8 @@ async def _async_query(
     entity_id: str,
     start_time: datetime,
     end_time: datetime,
-    descending: bool,
     limit: int,
+    include_start_time_state: bool = False,
 ) -> list[Any]:
     """Run one SQL-limited Recorder query and retain its slot through cancellation."""
     from homeassistant.components import recorder
@@ -226,9 +259,9 @@ async def _async_query(
                 end_time,
                 entity_id,
                 False,
-                descending,
-                limit,
                 False,
+                limit,
+                include_start_time_state,
             )
         )
     )
@@ -253,64 +286,101 @@ async def _async_find_state_at_or_before(
     entity_id: str,
     point_time: datetime,
     budget: HistoryTurnBudget,
-) -> Any | None:
-    """Find the newest state by paging bounded windows in chronological order."""
-    cursor = point_time
-    while budget.queries < HISTORY_MAX_QUERIES_PER_TURN:
-        if budget.rows >= HISTORY_MAX_ROWS_PER_TURN:
-            return None
-        window_start = cursor - timedelta(days=HISTORY_POINT_LOOKBACK_DAYS)
-        page_start = window_start
-        latest_state = None
-        while budget.queries < HISTORY_MAX_QUERIES_PER_TURN:
-            if budget.rows >= HISTORY_MAX_ROWS_PER_TURN:
-                return None
-            query_limit = min(
+) -> tuple[str, Any | None]:
+    """Find the newest retained state at an instant, with its real timestamp.
+
+    Returns ``("found", state)``, ``("absent", None)`` when Recorder retains no
+    state at or before the instant, or ``("incomplete", None)`` when the budget
+    or search limit ends the lookup first. Ascending pages work on every
+    supported HA version; small windows first keep dense sensors cheap.
+    """
+    upper = point_time
+    lower = point_time
+    for lookback in _POINT_LOOKBACKS:
+        lower = point_time - lookback
+        page_start = lower
+        latest = None
+        while True:
+            limit = min(
                 HISTORY_MAX_ROWS_PER_ENTITY + 1,
                 HISTORY_MAX_ROWS_PER_TURN - budget.rows,
             )
-            if query_limit <= 0:
-                return None
+            if budget.queries >= HISTORY_MAX_QUERIES_PER_TURN or limit <= 0:
+                return "incomplete", None
             budget.queries += 1
-            query_start = (
-                page_start - timedelta(microseconds=1)
-                if page_start == window_start
-                else page_start
-            )
             states = await _async_query(
                 hass,
                 query_slots,
                 entity_id=entity_id,
-                start_time=query_start,
-                end_time=point_time + timedelta(microseconds=1),
-                descending=False,
-                limit=query_limit,
+                start_time=page_start,
+                end_time=upper + timedelta(microseconds=1),
+                limit=limit,
             )
             budget.rows += len(states)
-            states = [
+            in_window = [
                 state
                 for state in states
-                if page_start <= dt_util.as_utc(state.last_updated) <= point_time
+                if page_start < dt_util.as_utc(state.last_updated) <= upper
             ]
-            if not states:
-                if latest_state is not None:
-                    return latest_state
+            if in_window:
+                latest = max(
+                    in_window, key=lambda state: dt_util.as_utc(state.last_updated)
+                )
+            if len(states) < limit:
                 break
-            latest_state = max(
-                states, key=lambda state: dt_util.as_utc(state.last_updated)
-            )
-            if len(states) < query_limit:
-                return latest_state
-            next_page_start = dt_util.as_utc(latest_state.last_updated)
-            if next_page_start <= page_start:
-                return None
-            page_start = next_page_start
-        cursor = window_start - timedelta(microseconds=1)
-    return None
+            if latest is None:
+                return "incomplete", None
+            # Overlap one microsecond so equal timestamps at a boundary are kept.
+            next_start = dt_util.as_utc(latest.last_updated) - timedelta(microseconds=1)
+            if next_start <= page_start:
+                return "incomplete", None
+            page_start = next_start
+        if latest is not None:
+            return "found", latest
+        upper = lower
+
+    # Recorder's start-time state reports whether anything older is retained,
+    # but uses a synthetic timestamp, so it can only prove absence.
+    if budget.queries >= HISTORY_MAX_QUERIES_PER_TURN:
+        return "incomplete", None
+    budget.queries += 1
+    boundary = lower + timedelta(microseconds=1)
+    states = await _async_query(
+        hass,
+        query_slots,
+        entity_id=entity_id,
+        start_time=boundary,
+        end_time=boundary,
+        limit=1,
+        include_start_time_state=True,
+    )
+    budget.rows += len(states)
+    return ("incomplete" if states else "absent"), None
 
 
 def _size_bytes(value: dict[str, Any]) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def _apply_coverage(result: dict[str, Any]) -> None:
+    """Derive covered intervals and continuation points from returned records."""
+    for entity in result.get("entities", []):
+        if "requested_start" not in entity:
+            continue
+        records = entity["records"]
+        if entity["complete"]:
+            entity["covered_end"] = entity["requested_end"]
+            entity.pop("continuation_start_time", None)
+            continue
+        entity["covered_end"] = records[-1]["recorded_at"] if records else None
+        boundary = (
+            dt_util.parse_datetime(records[-1]["recorded_at"]) if records else None
+        )
+        entity["continuation_start_time"] = (
+            (boundary - timedelta(microseconds=1)).isoformat()
+            if boundary is not None
+            else entity["requested_start"]
+        )
 
 
 def _bounded_output(
@@ -321,44 +391,48 @@ def _bounded_output(
         HISTORY_MAX_OUTPUT_BYTES_PER_TURN - budget.output_bytes,
         HISTORY_MAX_OUTPUT_BYTES_PER_TURN,
     )
-    while _size_bytes(result) > max_bytes:
-        trimmed = False
+    while True:
+        _apply_coverage(result)
+        size = _size_bytes(result)
+        if size <= max_bytes:
+            break
         for entity in reversed(result.get("entities", [])):
-            records = entity.get("records", [])
-            if records:
-                records.pop()
+            if entity.get("records"):
+                entity["records"].pop()
                 entity["complete"] = False
                 entity["status"] = "incomplete"
                 result["complete"] = False
-                trimmed = True
                 break
-        if not trimmed:
-            return {"error": "output_budget_exceeded"}
-    for entity in result.get("entities", []):
-        if "requested_start" not in entity:
-            continue
-        records = entity["records"]
-        if entity["complete"]:
-            entity["covered_end"] = entity["requested_end"]
-            entity.pop("continuation_start_time", None)
         else:
-            entity["covered_end"] = records[-1]["recorded_at"] if records else None
-            if records:
-                boundary = dt_util.parse_datetime(records[-1]["recorded_at"])
-                if boundary is not None:
-                    entity["continuation_start_time"] = (
-                        boundary - timedelta(microseconds=1)
-                    ).isoformat()
-            else:
-                entity["continuation_start_time"] = entity["requested_start"]
-    size = _size_bytes(result)
+            return {"error": "output_budget_exceeded"}
     budget.output_bytes += size
     return result
 
 
+def _access_error(
+    hass: Any,
+    get_options: OptionsProvider,
+    user_input: Any,
+    entity_ids: list[str],
+) -> dict[str, Any] | None:
+    """Recheck the current grant and exposure of every requested entity."""
+    if satellite_history_status(hass, get_options(), user_input) != "available":
+        return {"error": "history_access_revoked"}
+    eligible = _eligible_states(hass)
+    if any(entity_id not in eligible for entity_id in entity_ids):
+        return {"error": "entity_not_available"}
+    return None
+
+
+def _mark_incomplete(result: dict[str, Any], entity_result: dict[str, Any]) -> None:
+    entity_result["status"] = "incomplete"
+    entity_result["complete"] = False
+    result["complete"] = False
+
+
 async def async_get_history(
     hass: Any,
-    options: dict[str, Any],
+    get_options: OptionsProvider,
     user_input: Any,
     arguments: dict[str, Any],
     budget: HistoryTurnBudget,
@@ -372,7 +446,7 @@ async def async_get_history(
         args.get(key) is not None for key in ("start_time", "end_time")
     ):
         return {"error": "invalid_time_range"}
-    if satellite_history_status(hass, options, user_input) != "available":
+    if satellite_history_status(hass, get_options(), user_input) != "available":
         return {"error": "history_access_revoked"}
     if "recorder" not in hass.config.components:
         return {"error": "recorder_unavailable"}
@@ -391,7 +465,7 @@ async def async_get_history(
             entity_id: recorder.is_entity_recorded(hass, entity_id)
             for entity_id in entity_ids
         }
-    except (HomeAssistantError, KeyError, RuntimeError, SQLAlchemyError):
+    except _RECORDER_ERRORS:
         return {"error": "recorder_unavailable"}
 
     now = dt_util.utcnow()
@@ -438,18 +512,18 @@ async def async_get_history(
         if point_time is not None:
             entity_result["requested_time"] = point_time.isoformat()
             try:
-                state = await _async_find_state_at_or_before(
+                lookup, state = await _async_find_state_at_or_before(
                     hass, query_slots, entity_id, point_time, budget
                 )
-            except (HomeAssistantError, KeyError, RuntimeError, SQLAlchemyError):
+            except _RECORDER_ERRORS:
                 return {"error": "recorder_unavailable"}
             if state is not None:
                 entity_result["records"].append(_state_record(state))
                 entity_result["status"] = "found"
+            elif lookup == "absent":
+                entity_result["status"] = "no_retained_state"
             else:
-                entity_result["status"] = "incomplete"
-                entity_result["complete"] = False
-                result["complete"] = False
+                _mark_incomplete(result, entity_result)
         else:
             assert start_time is not None and end_time is not None
             entity_result.update(
@@ -460,19 +534,14 @@ async def async_get_history(
                     "covered_end": end_time.isoformat(),
                 }
             )
-            if (
-                budget.queries >= HISTORY_MAX_QUERIES_PER_TURN
-                or budget.rows >= HISTORY_MAX_ROWS_PER_TURN
-            ):
-                entity_result["status"] = "incomplete"
-                entity_result["complete"] = False
-                result["complete"] = False
+            query_limit = min(
+                HISTORY_MAX_ROWS_PER_ENTITY + 1,
+                HISTORY_MAX_ROWS_PER_TURN - budget.rows,
+            )
+            if budget.queries >= HISTORY_MAX_QUERIES_PER_TURN or query_limit <= 0:
+                _mark_incomplete(result, entity_result)
             else:
                 budget.queries += 1
-                query_limit = min(
-                    HISTORY_MAX_ROWS_PER_ENTITY + 1,
-                    HISTORY_MAX_ROWS_PER_TURN - budget.rows,
-                )
                 try:
                     states = await _async_query(
                         hass,
@@ -480,77 +549,41 @@ async def async_get_history(
                         entity_id=entity_id,
                         start_time=start_time,
                         end_time=end_time,
-                        descending=False,
                         limit=query_limit,
                     )
-                except (HomeAssistantError, KeyError, RuntimeError, SQLAlchemyError):
+                except _RECORDER_ERRORS:
                     return {"error": "recorder_unavailable"}
                 budget.rows += len(states)
-                result_limit = min(
-                    HISTORY_MAX_ROWS_PER_ENTITY,
-                    max(0, HISTORY_MAX_ROWS_PER_TURN - (budget.rows - len(states))),
-                )
-                records = states[:result_limit]
+                records = states[: min(HISTORY_MAX_ROWS_PER_ENTITY, query_limit)]
                 entity_result["records"] = [_state_record(state) for state in records]
-                if (
-                    len(states) > HISTORY_MAX_ROWS_PER_ENTITY
-                    or len(states) > result_limit
-                ):
-                    entity_result["status"] = "incomplete"
-                    entity_result["complete"] = False
-                    entity_result["covered_end"] = (
-                        entity_result["records"][-1]["recorded_at"]
-                        if entity_result["records"]
-                        else None
-                    )
-                    if records:
-                        boundary = dt_util.as_utc(records[-1].last_updated)
-                        entity_result["continuation_start_time"] = (
-                            boundary - timedelta(microseconds=1)
-                        ).isoformat()
-                    result["complete"] = False
+                # A full page may hide later rows, whichever limit produced it.
+                if len(states) >= query_limit:
+                    _mark_incomplete(result, entity_result)
                 elif not states:
                     try:
-                        state = await _async_find_state_at_or_before(
-                            hass,
-                            query_slots,
-                            entity_id,
-                            start_time,
-                            budget,
+                        lookup, state = await _async_find_state_at_or_before(
+                            hass, query_slots, entity_id, start_time, budget
                         )
-                    except (
-                        HomeAssistantError,
-                        KeyError,
-                        RuntimeError,
-                        SQLAlchemyError,
-                    ):
+                    except _RECORDER_ERRORS:
                         return {"error": "recorder_unavailable"}
                     if state is not None:
                         entity_result["state_at_start"] = _state_record(state)
                         entity_result["status"] = "no_changes_in_range"
+                    elif lookup == "absent":
+                        entity_result["status"] = "no_retained_state"
                     else:
-                        entity_result["status"] = (
-                            "not_recorded"
-                            if not recording_status[entity_id]
-                            else "incomplete"
-                        )
-                        if entity_result["status"] == "incomplete":
-                            entity_result["complete"] = False
-                            result["complete"] = False
+                        _mark_incomplete(result, entity_result)
 
         result["entities"].append(entity_result)
-
-        if satellite_history_status(hass, options, user_input) != "available":
-            return {"error": "history_access_revoked"}
-        if entity_id not in _eligible_states(hass):
-            return {"error": "entity_not_available"}
+        if error := _access_error(hass, get_options, user_input, entity_ids):
+            return error
 
     return _bounded_output(result, budget)
 
 
 async def async_call_history_tool(
     hass: Any,
-    options: dict[str, Any],
+    get_options: OptionsProvider,
     user_input: Any,
     tool_name: str,
     arguments: dict[str, Any],
@@ -558,12 +591,12 @@ async def async_call_history_tool(
     query_slots: asyncio.Semaphore,
 ) -> dict[str, Any]:
     """Revalidate satellite access before dispatching a history tool."""
-    if satellite_history_status(hass, options, user_input) != "available":
+    if satellite_history_status(hass, get_options(), user_input) != "available":
         return {"error": "history_access_denied"}
     if tool_name == HISTORY_DISCOVER_TOOL:
-        return async_find_entities(hass, arguments)
+        return async_find_entities(hass, arguments, budget)
     if tool_name == HISTORY_READ_TOOL:
         return await async_get_history(
-            hass, options, user_input, arguments, budget, query_slots
+            hass, get_options, user_input, arguments, budget, query_slots
         )
     raise HomeAssistantError("Unknown satellite history tool.")

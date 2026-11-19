@@ -154,7 +154,7 @@ async def test_history_returns_only_exposed_current_entities_with_stored_times(
     setup.executor.async_add_executor_job = run_executor_job
     result = await setup.history.async_get_history(
         setup.hass,
-        setup.options,
+        lambda: setup.options,
         setup.user_input,
         {
             "entity_ids": [entity_id],
@@ -212,7 +212,7 @@ async def test_history_rejects_entities_not_currently_exposed(ha_boundary, monke
     monkeypatch.setitem(sys.modules, exposed_entities.__name__, exposed_entities)
     result = await setup.history.async_get_history(
         setup.hass,
-        setup.options,
+        lambda: setup.options,
         setup.user_input,
         {
             "entity_ids": ["sensor.deleted_temperature"],
@@ -281,7 +281,7 @@ async def test_point_history_uses_actual_prior_state_even_if_current_recording_i
 
     result = await setup.history.async_get_history(
         setup.hass,
-        setup.options,
+        lambda: setup.options,
         setup.user_input,
         {"entity_ids": [entity_id], "time": requested_time.isoformat()},
         setup.history.HistoryTurnBudget(),
@@ -297,12 +297,29 @@ async def test_point_history_uses_actual_prior_state_even_if_current_recording_i
     ]
     assert result["entities"][0]["status"] == "found"
     assert result["entities"][0]["recording_enabled_now"] is False
-    assert len(query_calls) == 1
-    assert query_calls[0][5:] == (
-        False,
-        setup.history.HISTORY_MAX_ROWS_PER_ENTITY + 1,
-        False,
-    )
+    limit = setup.history.HISTORY_MAX_ROWS_PER_ENTITY + 1
+    assert query_calls == [
+        (
+            setup.hass,
+            requested_time - timedelta(minutes=1),
+            requested_time + timedelta(microseconds=1),
+            entity_id,
+            False,
+            False,
+            limit,
+            False,
+        ),
+        (
+            setup.hass,
+            requested_time - timedelta(minutes=30),
+            requested_time - timedelta(minutes=1, microseconds=-1),
+            entity_id,
+            False,
+            False,
+            limit,
+            False,
+        ),
+    ]
 
 
 async def test_point_history_finds_latest_state_in_dense_sensor_window(
@@ -344,10 +361,16 @@ async def test_point_history_finds_latest_state_in_dense_sensor_window(
         limit,
         include_start_time_state,
     ):
+        prior = [state for state in states if state.last_updated < start_time]
+        start_state = (
+            [max(prior, key=lambda state: state.last_updated)]
+            if include_start_time_state and prior
+            else []
+        )
         matching = [
             state for state in states if start_time < state.last_updated < end_time
         ]
-        return {requested_entity_id: matching[:limit]}
+        return {requested_entity_id: start_state + matching[:limit]}
 
     recorder_history = ModuleType("homeassistant.components.recorder.history")
     recorder_history.state_changes_during_period = recorder_query
@@ -362,18 +385,21 @@ async def test_point_history_finds_latest_state_in_dense_sensor_window(
         "utcnow",
         lambda: requested_time + timedelta(days=1),
     )
+    budget = setup.history.HistoryTurnBudget()
     result = await setup.history.async_get_history(
         setup.hass,
-        setup.options,
+        lambda: setup.options,
         setup.user_input,
         {"entity_ids": [entity_id], "time": requested_time.isoformat()},
-        setup.history.HistoryTurnBudget(),
+        budget,
         asyncio.Semaphore(2),
     )
 
     entity_result = result["entities"][0]
     assert entity_result["status"] == "found"
     assert entity_result["records"][0]["state"] == "199"
+    # The one-minute window is empty; the next window holds 29 changes.
+    assert (budget.queries, budget.rows) == (2, 29)
     assert (
         entity_result["records"][0]["recorded_at"]
         == states[-1].last_updated.isoformat()
@@ -423,7 +449,7 @@ async def test_range_history_reports_truncation_and_overlap_boundary(
     setup.executor.async_add_executor_job = run_executor_job
     result = await setup.history.async_get_history(
         setup.hass,
-        setup.options,
+        lambda: setup.options,
         setup.user_input,
         {
             "entity_ids": [entity_id],
@@ -539,7 +565,7 @@ async def test_empty_range_returns_real_state_at_start_when_unchanged(
     )
     result = await setup.history.async_get_history(
         setup.hass,
-        setup.options,
+        lambda: setup.options,
         setup.user_input,
         {
             "entity_ids": [entity_id],
@@ -590,7 +616,7 @@ async def test_empty_range_reports_current_recording_exclusion(
     setup.executor.async_add_executor_job = run_executor_job
     result = await setup.history.async_get_history(
         setup.hass,
-        setup.options,
+        lambda: setup.options,
         setup.user_input,
         {
             "entity_ids": [entity_id],
@@ -601,8 +627,10 @@ async def test_empty_range_reports_current_recording_exclusion(
         asyncio.Semaphore(2),
     )
 
-    assert result["entities"][0]["status"] == "not_recorded"
-    assert result["entities"][0]["recording_enabled_now"] is False
+    entity = result["entities"][0]
+    assert entity["status"] == "no_retained_state"
+    assert entity["complete"] is True
+    assert entity["recording_enabled_now"] is False
 
 
 async def test_recorder_database_errors_return_unavailable(ha_boundary, monkeypatch):
@@ -630,7 +658,7 @@ async def test_recorder_database_errors_return_unavailable(ha_boundary, monkeypa
 
     result = await setup.history.async_get_history(
         setup.hass,
-        setup.options,
+        lambda: setup.options,
         setup.user_input,
         {
             "entity_ids": [entity_id],
@@ -642,3 +670,298 @@ async def test_recorder_database_errors_return_unavailable(ha_boundary, monkeypa
     )
 
     assert result == {"error": "recorder_unavailable"}
+
+
+def _current_state(entity_id, name="Bedroom temperature"):
+    return SimpleNamespace(
+        entity_id=entity_id,
+        domain=entity_id.split(".")[0],
+        name=name,
+        state="21",
+        last_updated=datetime(2026, 6, 3, tzinfo=UTC),
+        attributes={},
+    )
+
+
+def _serve_states(setup, monkeypatch, states, *, exposed=None, query=None):
+    """Install current states, Assist exposure, and a synchronous Recorder."""
+    setup.hass.states = SimpleNamespace(async_all=Mock(return_value=states))
+    exposed_entities = ModuleType(
+        "homeassistant.components.homeassistant.exposed_entities"
+    )
+    exposed_entities.async_should_expose = Mock(
+        side_effect=lambda _hass, _assistant, entity_id: (
+            exposed is None or entity_id in exposed
+        )
+    )
+    monkeypatch.setitem(sys.modules, exposed_entities.__name__, exposed_entities)
+    recorder_history = ModuleType("homeassistant.components.recorder.history")
+    recorder_history.state_changes_during_period = query or Mock(return_value={})
+    monkeypatch.setitem(sys.modules, recorder_history.__name__, recorder_history)
+
+    async def run_executor_job(function):
+        return function()
+
+    setup.executor.async_add_executor_job = run_executor_job
+
+
+async def _read(setup, arguments, budget=None, get_options=None):
+    return await setup.history.async_get_history(
+        setup.hass,
+        get_options or (lambda: setup.options),
+        setup.user_input,
+        arguments,
+        budget or setup.history.HistoryTurnBudget(),
+        asyncio.Semaphore(2),
+    )
+
+
+RANGE = {
+    "start_time": "2026-06-01T00:00:00+00:00",
+    "end_time": "2026-06-02T00:00:00+00:00",
+}
+
+
+async def test_inconclusive_empty_range_lookup_reports_incomplete(
+    ha_boundary, monkeypatch
+):
+    setup = history_setup(ha_boundary, monkeypatch)
+    entity_id = "sensor.bedroom_temperature"
+    _serve_states(setup, monkeypatch, [_current_state(entity_id)])
+    sys.modules[
+        "homeassistant.components.recorder"
+    ].is_entity_recorded.return_value = False
+    budget = setup.history.HistoryTurnBudget(
+        queries=setup.history.HISTORY_MAX_QUERIES_PER_TURN - 1
+    )
+
+    result = await _read(setup, {"entity_ids": [entity_id], **RANGE}, budget)
+
+    entity = result["entities"][0]
+    assert entity["status"] == "incomplete"
+    assert entity["complete"] is False
+    assert result["complete"] is False
+    assert entity["continuation_start_time"] == RANGE["start_time"]
+
+
+async def test_range_reports_full_page_under_reduced_turn_row_budget(
+    ha_boundary, monkeypatch
+):
+    setup = history_setup(ha_boundary, monkeypatch)
+    entity_id = "sensor.bedroom_temperature"
+    start = datetime(2026, 6, 1, tzinfo=UTC)
+    rows = [
+        SimpleNamespace(
+            state=str(index),
+            last_updated=start + timedelta(minutes=index + 1),
+            attributes={},
+        )
+        for index in range(50)
+    ]
+    query = Mock(return_value={entity_id: rows})
+    _serve_states(setup, monkeypatch, [_current_state(entity_id)], query=query)
+    budget = setup.history.HistoryTurnBudget(
+        rows=setup.history.HISTORY_MAX_ROWS_PER_TURN - 50
+    )
+
+    result = await _read(setup, {"entity_ids": [entity_id], **RANGE}, budget)
+
+    assert query.call_args.args[6] == 50
+    entity = result["entities"][0]
+    assert entity["status"] == "incomplete"
+    assert len(entity["records"]) == 50
+    assert "continuation_start_time" in entity
+
+
+async def test_multi_entity_result_is_discarded_if_earlier_entity_loses_exposure(
+    ha_boundary, monkeypatch
+):
+    setup = history_setup(ha_boundary, monkeypatch)
+    first, second = "sensor.first_temperature", "sensor.second_temperature"
+    exposed = {first, second}
+
+    def query(_hass, _start, _end, entity_id, *_args):
+        if entity_id == second:
+            exposed.discard(first)
+        return {}
+
+    _serve_states(
+        setup,
+        monkeypatch,
+        [_current_state(first), _current_state(second)],
+        exposed=exposed,
+        query=query,
+    )
+
+    result = await _read(setup, {"entity_ids": [first, second], **RANGE})
+
+    assert result == {"error": "entity_not_available"}
+
+
+async def test_history_rechecks_current_options_after_recorder_read(
+    ha_boundary, monkeypatch
+):
+    setup = history_setup(ha_boundary, monkeypatch)
+    entity_id = "sensor.bedroom_temperature"
+    current = {"options": setup.options}
+
+    def query(*_args):
+        current["options"] = {**setup.options, CONF_ALLOWED_SATELLITES: []}
+        return {}
+
+    _serve_states(setup, monkeypatch, [_current_state(entity_id)], query=query)
+
+    result = await _read(
+        setup,
+        {"entity_ids": [entity_id], **RANGE},
+        get_options=lambda: current["options"],
+    )
+
+    assert result == {"error": "history_access_revoked"}
+
+
+async def test_impossible_timestamps_return_tool_errors(ha_boundary, monkeypatch):
+    setup = history_setup(ha_boundary, monkeypatch)
+    entity_id = "sensor.bedroom_temperature"
+    _serve_states(setup, monkeypatch, [_current_state(entity_id)])
+
+    point = await _read(
+        setup, {"entity_ids": [entity_id], "time": "2026-02-29T03:00:00+00:00"}
+    )
+    span = await _read(
+        setup,
+        {
+            "entity_ids": [entity_id],
+            "start_time": "2026-02-29T00:00:00+00:00",
+            "end_time": RANGE["end_time"],
+        },
+    )
+
+    assert point == {"error": "invalid_time"}
+    assert span == {"error": "invalid_time_range"}
+
+
+def test_output_trimming_keeps_final_size_within_budget(ha_boundary, monkeypatch):
+    history = ha_boundary.load("history")
+
+    def build():
+        return {
+            "complete": True,
+            "entities": [
+                {
+                    "entity_id": "sensor.bedroom_temperature",
+                    "records": [
+                        {
+                            "state": str(index) * 20,
+                            "recorded_at": f"2026-06-01T12:{index:02d}:00+00:00",
+                        }
+                        for index in range(10)
+                    ],
+                    "complete": True,
+                    "status": "complete",
+                    "requested_start": RANGE["start_time"],
+                    "requested_end": RANGE["end_time"],
+                    "covered_start": RANGE["start_time"],
+                    "covered_end": RANGE["end_time"],
+                }
+            ],
+        }
+
+    full_size = history._size_bytes(
+        history._bounded_output(build(), history.HistoryTurnBudget())
+    )
+    for limit in range(full_size - 120, full_size):
+        monkeypatch.setattr(history, "HISTORY_MAX_OUTPUT_BYTES_PER_TURN", limit)
+        budget = history.HistoryTurnBudget()
+        output = history._bounded_output(build(), budget)
+        if "error" in output:
+            continue
+        assert history._size_bytes(output) <= limit
+        assert budget.output_bytes == history._size_bytes(output)
+        assert "continuation_start_time" in output["entities"][0]
+
+
+def test_discovery_filters_exposure_and_domain_and_sanitizes_labels(
+    ha_boundary, monkeypatch
+):
+    setup = history_setup(ha_boundary, monkeypatch)
+    states = [
+        _current_state("sensor.bedroom_temperature", "Bedroom\n\u202etemperature\x07"),
+        _current_state("sensor.bedroom_humidity", "Bedroom humidity"),
+        _current_state("binary_sensor.bedroom_window", "Bedroom window"),
+        _current_state("sensor.hidden_bedroom", "Bedroom hidden"),
+    ]
+    _serve_states(
+        setup,
+        monkeypatch,
+        states,
+        exposed={
+            "sensor.bedroom_temperature",
+            "sensor.bedroom_humidity",
+            "binary_sensor.bedroom_window",
+        },
+    )
+    monkeypatch.setattr(setup.history, "_entity_area", lambda _hass, _id: "Main\tfloor")
+    budget = setup.history.HistoryTurnBudget()
+
+    result = setup.history.async_find_entities(
+        setup.hass, {"query": "bedroom TEMP", "domain": "sensor"}, budget
+    )
+
+    assert result == {
+        "entities": [
+            {
+                "entity_id": "sensor.bedroom_temperature",
+                "name": "Bedroom temperature",
+                "domain": "sensor",
+                "area": "Main floor",
+            }
+        ],
+        "truncated": False,
+    }
+    assert budget.output_bytes == setup.history._size_bytes(result)
+
+
+def test_discovery_limits_results_and_shares_output_budget(ha_boundary, monkeypatch):
+    setup = history_setup(ha_boundary, monkeypatch)
+    limit = setup.history.HISTORY_MAX_DISCOVERY_RESULTS
+    states = [
+        _current_state(f"sensor.room_{index}", f"Room {index}")
+        for index in range(limit + 5)
+    ]
+    _serve_states(setup, monkeypatch, states)
+    monkeypatch.setattr(setup.history, "_entity_area", lambda _hass, _id: "")
+
+    full = setup.history.async_find_entities(
+        setup.hass, {"query": "room"}, setup.history.HistoryTurnBudget()
+    )
+    assert len(full["entities"]) == limit
+    assert full["truncated"] is True
+
+    nearly_spent = setup.history.HistoryTurnBudget(
+        output_bytes=setup.history.HISTORY_MAX_OUTPUT_BYTES_PER_TURN - 200
+    )
+    partial = setup.history.async_find_entities(
+        setup.hass, {"query": "room"}, nearly_spent
+    )
+    assert 0 < len(partial["entities"]) < limit
+    assert partial["truncated"] is True
+    assert nearly_spent.output_bytes <= setup.history.HISTORY_MAX_OUTPUT_BYTES_PER_TURN
+
+    spent = setup.history.HistoryTurnBudget(
+        output_bytes=setup.history.HISTORY_MAX_OUTPUT_BYTES_PER_TURN
+    )
+    assert setup.history.async_find_entities(setup.hass, {"query": "room"}, spent) == {
+        "error": "output_budget_exceeded"
+    }
+
+
+def test_selected_satellites_accept_registry_or_resubmitted_entity_ids(
+    ha_boundary, monkeypatch
+):
+    setup = history_setup(ha_boundary, monkeypatch)
+
+    for saved in (["stable-bedroom-id"], ["assist_satellite.bedroom"]):
+        assert setup.history.selected_satellite_entity_ids(setup.hass, saved) == [
+            "assist_satellite.bedroom"
+        ]
