@@ -78,6 +78,12 @@ Assistant, shared by everyone using that integration entry. It works without
 device or administrator tools and never applies to AI Tasks. See
 [shared memory](docs/usage.md#shared-memory) for limits and deletion.
 
+**Assist satellites allowed to read history** is also off by default. It lets
+selected voice satellites without a linked Home Assistant user read retained
+history for Assist-exposed entities, without granting device control or
+administrator tools. Selecting a satellite trusts the endpoint, not the speaker.
+See [voice satellite history](docs/usage.md#voice-satellite-history).
+
 An AI Task entity is created alongside the conversation entity without another
 sign-in. Use it in scripts and automations, or choose it as your preferred provider
 under **Settings > System > AI**. See the [AI Task usage guide](docs/usage.md#ai-tasks)

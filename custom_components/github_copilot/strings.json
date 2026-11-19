@@ -36,6 +36,8 @@
           "ai_task_timeout": "AI Task timeout (seconds)",
           "enable_device_control": "Allow control of Assist-exposed devices",
           "enable_home_assistant_api": "Allow Home Assistant administrator tools",
+          "allow_all_satellites": "Allow history from all Assist satellites",
+          "allowed_satellites": "Assist satellites allowed to read history",
           "enable_shared_memory": "Enable shared memory",
           "prompt": "Additional instructions"
         },
@@ -44,6 +46,8 @@
           "ai_task_model": "Initially uses the conversation model, then remains independently configurable.",
           "ai_task_timeout": "Applies to AI Tasks only. Assist keeps its 60-second timeout.",
           "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools.",
+          "allow_all_satellites": "Allows future registered Assist satellites too. This grants endpoint access, not speaker identity: software satellites may be used remotely or by automations. Only currently Assist-exposed entities are eligible. Recent state can be read even when device control is disabled.",
+          "allowed_satellites": "Choose registered satellite endpoints allowed to read retained state history for any entity currently exposed to Assist. Anyone or any integration that can send a no-user request through a selected endpoint can ask about that history. Newly exposed entities become eligible automatically.",
           "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
         }
@@ -82,6 +86,8 @@
           "ai_task_timeout": "AI Task timeout (seconds)",
           "enable_device_control": "Allow control of Assist-exposed devices",
           "enable_home_assistant_api": "Allow Home Assistant administrator tools",
+          "allow_all_satellites": "Allow history from all Assist satellites",
+          "allowed_satellites": "Assist satellites allowed to read history",
           "enable_shared_memory": "Enable shared memory",
           "prompt": "Additional instructions"
         },
@@ -90,6 +96,8 @@
           "ai_task_model": "Initially uses the conversation model, then remains independently configurable.",
           "ai_task_timeout": "Applies to AI Tasks only. Assist keeps its 60-second timeout.",
           "enable_device_control": "Allows both conversations and AI Tasks to use Assist-exposed tools.",
+          "allow_all_satellites": "Allows future registered Assist satellites too. This grants endpoint access, not speaker identity: software satellites may be used remotely or by automations. Only currently Assist-exposed entities are eligible. Recent state can be read even when device control is disabled.",
+          "allowed_satellites": "Choose registered satellite endpoints allowed to read retained state history for any entity currently exposed to Assist. Anyone or any integration that can send a no-user request through a selected endpoint can ask about that history. Newly exposed entities become eligible automatically.",
           "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
         }

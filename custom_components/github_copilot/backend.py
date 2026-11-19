@@ -71,6 +71,9 @@ from .const import (
     DEFAULT_AI_TASK_TIMEOUT,
     DEFAULT_SYSTEM_PROMPT,
     DOMAIN,
+    HISTORY_DISCOVER_TOOL,
+    HISTORY_READ_TOOL,
+    HISTORY_TOOLS,
     IMAGE_TOOL_NAME,
     ISSUE_MODEL_FALLBACK,
     ISSUE_MODEL_UNAVAILABLE,
@@ -95,10 +98,17 @@ from .const import (
     SESSION_IDLE_SECONDS,
     STARTUP_MODEL_RETRY_DELAYS,
 )
+from .history import (
+    DISCOVER_PARAMETERS,
+    HISTORY_PARAMETERS,
+    HistoryTurnBudget,
+    async_call_history_tool,
+    satellite_history_status,
+)
 from .llm_api import (
-    ADMIN_REQUIRED,
     ASSIST_API,
     HOME_ASSISTANT_API,
+    admin_notice_for_diagnostics,
     api_includes,
     async_available_llm_apis,
     async_require_admin,
@@ -239,6 +249,7 @@ class ConversationBackend:
         self._sessions: dict[str, _SessionRecord] = {}
         self._protected_session_ids: set[str] = set()
         self._turn_slots = asyncio.Semaphore(MAX_CONCURRENT_TURNS)
+        self._history_query_slots = asyncio.Semaphore(2)
         self._turn_tasks: set[asyncio.Task[Any]] = set()
         self._session_lock = asyncio.Lock()
         self._stop_lock = asyncio.Lock()
@@ -459,7 +470,7 @@ class ConversationBackend:
                 api_ids, request.admin_notice = await async_available_llm_apis(
                     self.hass, self.entry.options, request.context.context
                 )
-                if request.admin_notice != ADMIN_REQUIRED:
+                if HOME_ASSISTANT_API in (api_ids or []):
                     raise HomeAssistantError(
                         "Home Assistant denied access to administrator tools."
                     ) from err
@@ -468,13 +479,16 @@ class ConversationBackend:
                         self.hass, api_ids, request.context
                     )
         if request.admin_notice:
+            diagnostic_notice = admin_notice_for_diagnostics(request.admin_notice)
             log = _LOGGER.debug if self._admin_tools_warning_logged else _LOGGER.warning
             log(
                 "Home Assistant administrator tools are unavailable for this AI "
                 "Task; continuing with the remaining tools. %s",
-                request.admin_notice,
+                diagnostic_notice,
             )
             self._admin_tools_warning_logged = True
+        else:
+            diagnostic_notice = None
         if request.structure is not None:
             request.output_schema = prepare_output_schema(
                 request.structure, llm.selector_serializer
@@ -502,7 +516,7 @@ class ConversationBackend:
                 await self._async_drain_work(preparation)
                 raise
         text = await self._async_handle_message(
-            agent_id, request, chat_log, admin_notice=request.admin_notice
+            agent_id, request, chat_log, admin_notice=diagnostic_notice
         )
         if not text.strip():
             raise HomeAssistantError(
@@ -565,6 +579,14 @@ class ConversationBackend:
             ) from err
 
         context = user_input.context if is_task else user_input.as_llm_context(DOMAIN)
+        history_status = (
+            "authenticated_request"
+            if is_task
+            else satellite_history_status(self.hass, self.entry.options, user_input)
+        )
+        history_enabled = not is_task and history_status == "available"
+        history_budget = HistoryTurnBudget()
+        satellite_id = None if is_task else getattr(user_input, "satellite_id", None)
 
         async def require_active_admin() -> None:
             await async_require_admin(self.hass, context.context)
@@ -576,7 +598,11 @@ class ConversationBackend:
                 raise HomeAssistantError("Device control is disabled for this agent.")
 
         session_key = self._session_key(
-            chat_log.conversation_id, context, admin_api_active
+            chat_log.conversation_id,
+            context,
+            admin_api_active,
+            satellite_id=satellite_id,
+            history_access=history_enabled,
         )
         if self._memory_enabled and not is_task:
             session_key += ":shared-memory"
@@ -584,7 +610,12 @@ class ConversationBackend:
 
         async with (
             self._async_request_session(
-                session_key, api, instructions, user_input, admin_notice
+                session_key,
+                api,
+                instructions,
+                user_input,
+                admin_notice,
+                history_status,
             ) as record,
             record.lock,
         ):
@@ -625,7 +656,12 @@ class ConversationBackend:
                 return tool_request.result
 
             sdk_tools = self._build_tools(
-                ha_api, on_tool, tool_names, admin_notice, include_memory=not is_task
+                ha_api,
+                on_tool,
+                tool_names,
+                admin_notice,
+                include_memory=not is_task,
+                history_enabled=history_enabled,
             )
             loop = asyncio.get_running_loop()
             session_error: SessionErrorData | None = None
@@ -646,15 +682,14 @@ class ConversationBackend:
             send_task: asyncio.Task[Any] | None = None
             send_started = False
             streamed_content = ""
-            streamed_notice = False
+            assistant_content = ""
             completed = False
 
             async def stream():
                 """Interleave text deltas and serialized HA tool execution."""
-                nonlocal streamed_content, streamed_notice
+                nonlocal assistant_content, streamed_content
                 assert send_task is not None
                 assistant_started = False
-                assistant_content = ""
                 while True:
                     if self._closed:
                         raise asyncio.CancelledError
@@ -699,9 +734,15 @@ class ConversationBackend:
                     arguments = item.invocation.arguments
                     is_context = item.sdk_name == CONTEXT_TOOL_NAME
                     is_memory = item.sdk_name in MEMORY_TOOLS and not is_task
+                    is_history = item.sdk_name in HISTORY_TOOLS and not is_task
                     if (
                         ha_name is None
-                        or (ha_api is None and not is_context and not is_memory)
+                        or (
+                            ha_api is None
+                            and not is_context
+                            and not is_memory
+                            and not is_history
+                        )
                         or not isinstance(arguments, dict)
                     ):
                         if not item.result.done():
@@ -753,6 +794,20 @@ class ConversationBackend:
                                 await require_active_assist()
                             tool_result = self._context_tool_result(
                                 arguments, user_input, chat_log
+                            )
+                        elif is_history:
+                            if not history_enabled:
+                                raise HomeAssistantError(
+                                    "Satellite history is unavailable for this request."
+                                )
+                            tool_result = await async_call_history_tool(
+                                self.hass,
+                                self.entry.options,
+                                user_input,
+                                item.sdk_name,
+                                arguments,
+                                history_budget,
+                                self._history_query_slots,
                             )
                         else:
                             if api_contains_assist:
@@ -820,10 +875,6 @@ class ConversationBackend:
                             and record.memory_generation == memory_generation
                         ):
                             record.memory_revision = tool_result["snapshot"]["revision"]
-
-                if not is_task and admin_notice and assistant_content:
-                    yield {"content": f"\n\n{admin_notice}"}
-                    streamed_notice = True
 
             async def send_request():
                 nonlocal send_started
@@ -941,14 +992,9 @@ class ConversationBackend:
                     response is not None
                     and isinstance(response.data, AssistantMessageData)
                     and response.data.content
-                    and (
-                        not streamed_content
-                        or (admin_notice is not None and not streamed_notice)
-                    )
+                    and not assistant_content
                 ):
                     content = response.data.content
-                    if not is_task and admin_notice:
-                        content = f"{content}\n\n{admin_notice}"
                     async for _ in chat_log.async_add_delta_content_stream(
                         agent_id,
                         _single_delta(content),
@@ -1012,9 +1058,12 @@ class ConversationBackend:
         instructions: str,
         request: ConversationInput | DataTaskRequest,
         admin_notice: str | None,
+        history_status: str | None = None,
     ):
         if not isinstance(request, DataTaskRequest):
-            yield await self._async_get_session(key, api, instructions, admin_notice)
+            yield await self._async_get_session(
+                key, api, instructions, admin_notice, history_status
+            )
             return
         image_request = request if isinstance(request, ImageTaskRequest) else None
         assert request.model_id is not None or image_request is not None
@@ -1307,6 +1356,7 @@ class ConversationBackend:
         api: Any | None,
         instructions: str,
         admin_notice: str | None,
+        history_status: str | None,
     ) -> _SessionRecord:
         """Reuse an active session or create a bounded new one."""
         async with self._session_lock:
@@ -1338,19 +1388,32 @@ class ConversationBackend:
                 return await current(invocation)
 
             sdk_tools = self._build_tools(
-                api, handler, tools, admin_notice, include_memory=True
+                api,
+                handler,
+                tools,
+                admin_notice,
+                include_memory=True,
+                history_enabled=history_status == "available",
             )
             prompt_context = {"instructions": instructions}
             model_id = await self.async_resolve_model()
             try:
                 session = await self._async_create_sdk_session(
-                    model_id, sdk_tools, prompt_context, admin_notice=admin_notice
+                    model_id,
+                    sdk_tools,
+                    prompt_context,
+                    admin_notice=admin_notice,
+                    history_status=history_status,
                 )
             except Exception as err:
                 model_id = await self._async_recover_model(model_id, err)
                 try:
                     session = await self._async_create_sdk_session(
-                        model_id, sdk_tools, prompt_context, admin_notice=admin_notice
+                        model_id,
+                        sdk_tools,
+                        prompt_context,
+                        admin_notice=admin_notice,
+                        history_status=history_status,
                     )
                 except Exception as retry_err:
                     self._raise_sdk_error(model_id, retry_err)
@@ -1492,6 +1555,7 @@ class ConversationBackend:
         prompt_context: dict[str, str],
         *,
         admin_notice: str | None = None,
+        history_status: str | None = None,
         task_mode: bool = False,
         image_request: ImageTaskRequest | None = None,
         task_request: DataTaskRequest | None = None,
@@ -1543,7 +1607,9 @@ class ConversationBackend:
                             "action": "replace",
                             "content": AI_TASK_SYSTEM_PROMPT
                             if task_mode
-                            else self._conversation_system_prompt(admin_notice),
+                            else self._conversation_system_prompt(
+                                admin_notice, history_status
+                            ),
                         },
                     },
                 },
@@ -1858,7 +1924,12 @@ class ConversationBackend:
 
     @staticmethod
     def _session_key(
-        conversation_id: str, context: Any, admin_api_active: bool = False
+        conversation_id: str,
+        context: Any,
+        admin_api_active: bool = False,
+        *,
+        satellite_id: str | None = None,
+        history_access: bool = False,
     ) -> str:
         """Hash conversation and HA identity without persisting user identifiers."""
         if not conversation_id:
@@ -1868,6 +1939,8 @@ class ConversationBackend:
                 conversation_id,
                 str(getattr(getattr(context, "context", None), "user_id", "")),
                 str(getattr(context, "device_id", None) or ""),
+                str(satellite_id or ""),
+                str(history_access),
                 str(admin_api_active),
             )
         )
@@ -1877,7 +1950,9 @@ class ConversationBackend:
         """Return owner-authored text, never HA's mixed/rendered SystemContent."""
         return self.entry.options.get(CONF_PROMPT) or ""
 
-    def _conversation_system_prompt(self, admin_notice: str | None) -> str:
+    def _conversation_system_prompt(
+        self, admin_notice: str | None, history_status: str | None = None
+    ) -> str:
         """Explain configured capabilities without granting access to their tools."""
         admin_state = (
             "enabled"
@@ -1901,7 +1976,39 @@ class ConversationBackend:
             ),
         ]
         if admin_notice:
-            parts.append(admin_notice)
+            parts.append(
+                "Administrator tools are unavailable for this request. If that "
+                "prevents answering, explain the reason briefly and plainly: "
+                f"{admin_notice} Do not recommend changing settings unless the "
+                "user asks how to enable administrator tools."
+            )
+        history_guidance = {
+            "available": (
+                "A read-only state-history tool is available for entities currently "
+                "exposed to Assist. Use it for historical questions, including "
+                "when device control is disabled. It cannot perform actions or "
+                "access administrator data."
+            ),
+            "satellite_not_allowed": (
+                "This registered satellite does not have state-history access. "
+                "If the request needs history, say it is not enabled for this "
+                "device. Do not suggest signing in to the satellite."
+            ),
+            "recorder_unavailable": (
+                "Recorder history is unavailable, so no satellite history tool "
+                "is provided."
+            ),
+            "unrecognized_satellite": (
+                "This request has no authenticated user and no recognized Assist "
+                "satellite, so no satellite history tool is provided."
+            ),
+            "request_context_unavailable": (
+                "This request has no verified caller context, so no satellite "
+                "history tool is provided."
+            ),
+        }
+        if history_status in history_guidance:
+            parts.append(history_guidance[history_status])
         if self._memory_enabled:
             parts.append(MEMORY_POLICY)
         return "\n\n".join(parts)
@@ -1950,6 +2057,7 @@ class ConversationBackend:
         admin_notice: str | None = None,
         *,
         include_memory: bool = False,
+        history_enabled: bool = False,
     ) -> list[CopilotTool]:
         """Convert the selected Home Assistant APIs to SDK tool definitions."""
         tools: list[CopilotTool] = []
@@ -2023,6 +2131,59 @@ class ConversationBackend:
                         skip_permission=True,
                     )
                 )
+        if history_enabled:
+            history_tools = (
+                (
+                    HISTORY_DISCOVER_TOOL,
+                    DISCOVER_PARAMETERS,
+                    (
+                        "Find current Home Assistant entities by name, area, or "
+                        "domain. This returns names and IDs only, and only for "
+                        "entities currently exposed to Assist. Use it to resolve "
+                        "a user's description before requesting history."
+                    ),
+                ),
+                (
+                    HISTORY_READ_TOOL,
+                    HISTORY_PARAMETERS,
+                    (
+                        "Read retained Recorder state changes for one to four "
+                        "currently Assist-exposed entities on this allowed "
+                        "satellite. Use an explicit-offset ISO 8601 timestamp for "
+                        "'time' to retrieve the latest retained value at or before "
+                        "that instant. For relative dates or times, get the current "
+                        "time and timezone from the request section of "
+                        "github_copilot_get_context; do not invent dates or offsets. "
+                        "Use 'start_time' and 'end_time' for a "
+                        "range of at most 31 days. Without times, the default is "
+                        "the last 24 hours. Results include actual recording times "
+                        "and any stored unit. Point results include the requested "
+                        "instant separately from the actual observation time. Range "
+                        "results include requested and covered intervals; if a range "
+                        "is incomplete, continue from its continuation_start_time "
+                        "with the same end_time and deduplicate overlapping records "
+                        "by entity, timestamp, state, and unit. Do not present "
+                        "incomplete ranges as exact totals or averages. "
+                        "recording_enabled_now describes current Recorder policy "
+                        "only; it does not prove that older retained data is absent. "
+                        "This tool cannot control devices or access administrator "
+                        "tools."
+                    ),
+                ),
+            )
+            for name, parameters, description in history_tools:
+                names[name] = name
+                tools.append(
+                    CopilotTool(
+                        name=name,
+                        description=description,
+                        parameters=convert_tool_schema(
+                            parameters, custom_serializer=None
+                        ),
+                        handler=handler,
+                        skip_permission=True,
+                    )
+                )
         for ha_tool in api.tools if api is not None else ():
             try:
                 schema = convert_tool_schema(
@@ -2064,12 +2225,6 @@ class ConversationBackend:
                     "GetLiveContext tool with name/domain/area filters for current "
                     "entity information; fetch the broader API catalog only when "
                     "needed. 'assist_api' is unavailable when HA tools are off."
-                    + (
-                        " Administrator tools are unavailable for this request: "
-                        + admin_notice
-                        if admin_notice
-                        else ""
-                    )
                 ),
                 parameters=convert_tool_schema(
                     _CONTEXT_PARAMETERS, custom_serializer=None

@@ -1,6 +1,7 @@
 """Optional contracts against real HA, not the lightweight boundary doubles."""
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -18,6 +19,127 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("HA_COPILOT_HA_TESTS") != "1",
     reason="Requires the full pinned Home Assistant dependencies",
 )
+
+
+def test_real_ha_satellite_and_recorder_history_contract():
+    from homeassistant.components.conversation import ConversationInput
+    from homeassistant.components.recorder.history import state_changes_during_period
+    from homeassistant.core import Context
+
+    user = ConversationInput(
+        text="What was the temperature?",
+        context=Context(),
+        conversation_id="satellite-contract",
+        device_id=None,
+        satellite_id="assist_satellite.bedroom",
+        language="en",
+        agent_id="conversation.test",
+    )
+    assert user.context.user_id is None
+    assert user.satellite_id == "assist_satellite.bedroom"
+
+    parameters = inspect.signature(state_changes_during_period).parameters
+    assert {
+        "entity_id",
+        "descending",
+        "limit",
+        "include_start_time_state",
+    } <= parameters.keys()
+    assert not inspect.iscoroutinefunction(state_changes_during_period)
+
+
+async def test_real_history_uses_conversation_exposure_without_other_assistant_entries(
+    tmp_path,
+):
+    from homeassistant.components.homeassistant.const import DATA_EXPOSED_ENTITIES
+    from homeassistant.components.homeassistant.exposed_entities import (
+        ExposedEntities,
+        async_expose_entity,
+    )
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import area_registry as ar
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.github_copilot.history import _eligible_states
+
+    hass = HomeAssistant(str(tmp_path))
+    hass.config_entries = SimpleNamespace(async_wait_initialized=AsyncMock())
+    try:
+        dr.async_setup(hass)
+        await dr.async_load(hass, load_empty=True)
+        await er.async_load(hass, load_empty=True)
+        await ar.async_load(hass, load_empty=True)
+        exposure = hass.data[DATA_EXPOSED_ENTITIES] = ExposedEntities(hass)
+        await exposure.async_initialize()
+        hass.states.async_set("sensor.allowed_temperature", "21")
+        hass.states.async_set("sensor.hidden_temperature", "18")
+        async_expose_entity(hass, "conversation", "sensor.allowed_temperature", True)
+        async_expose_entity(hass, "conversation", "sensor.hidden_temperature", False)
+
+        assert set(_eligible_states(hass)) == {"sensor.allowed_temperature"}
+        allowed = exposure.entities["sensor.allowed_temperature"]
+        hidden = exposure.entities["sensor.hidden_temperature"]
+        assert "conversation" in allowed.assistants
+        assert "conversation" in hidden.assistants
+        assert "github_copilot" not in allowed.assistants
+        assert "github_copilot" not in hidden.assistants
+    finally:
+        await hass.async_stop()
+
+
+async def test_real_recorder_finds_latest_state_after_more_than_one_hundred_changes(
+    tmp_path,
+):
+    from homeassistant import loader
+    from homeassistant.components import recorder
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.recorder import async_initialize_recorder
+    from homeassistant.setup import async_setup_component
+
+    from custom_components.github_copilot.history import (
+        HistoryTurnBudget,
+        _async_find_state_at_or_before,
+    )
+
+    hass = HomeAssistant(str(tmp_path))
+    hass.config_entries = SimpleNamespace(
+        async_wait_initialized=AsyncMock(),
+        async_entries=Mock(return_value=[]),
+    )
+    hass.config.safe_mode = True
+    loader.async_setup(hass)
+    async_initialize_recorder(hass)
+    try:
+        await hass.async_start()
+        assert await async_setup_component(
+            hass,
+            "recorder",
+            {"recorder": {"db_url": f"sqlite:///{tmp_path / 'history.db'}"}},
+        )
+        entity_id = "sensor.dense_temperature"
+        for index in range(150):
+            hass.states.async_set(entity_id, str(index))
+            await asyncio.sleep(0.001)
+        await recorder.get_instance(hass).async_block_till_done()
+        current = hass.states.get(entity_id)
+        assert current is not None
+
+        budget = HistoryTurnBudget()
+        state = await _async_find_state_at_or_before(
+            hass,
+            asyncio.Semaphore(2),
+            entity_id,
+            current.last_updated,
+            budget,
+        )
+
+        assert state is not None, f"Recorder query budget after lookup: {budget}"
+        assert state.state == "149"
+        assert state.last_updated == current.last_updated
+        assert budget.rows == 150
+    finally:
+        await hass.async_stop()
 
 
 async def test_real_chat_memory_keeps_user_input_and_provenance_unchanged(tmp_path):
@@ -791,7 +913,7 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
         deltas.clear()
         chat.async_add_user_content(conversation.UserContent(content="Hello again."))
         result = await entity._async_handle_message(user_input, chat)
-        expected = f"{'Which room?' if question else 'Done.'}\n\n{ADMIN_REQUIRED}"
+        expected = "Which room?" if question else "Done."
         assert result.response.speech["plain"]["speech"] == expected
         assert result.continue_conversation is question
         assert "".join(delta.get("content") or "" for delta in deltas) == expected

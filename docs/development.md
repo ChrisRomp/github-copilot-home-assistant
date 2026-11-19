@@ -327,6 +327,33 @@ snapshot refresh, context reset and compaction through the cached runtime and a
 loopback fake model. No live GitHub requests or HA device actions are needed.
 Report unavailable native/HA contracts as unverified, not passing.
 
+### Satellite history
+
+The history grant is specific to the original conversation input: it requires
+`context.user_id is None`, a registered and enabled `assist_satellite`, and its
+stable registry ID in the entry options or allow-all mode. Do not infer identity
+from `device_id`, or pass the AI Task path through this authorization.
+
+Entity discovery and reads share one eligibility rule: enumerate current HA
+states, then apply `async_should_expose`. Recheck the satellite grant before
+each tool call and after Recorder reads; discard results if access or exposure
+changed while a query was running. Never call the exposure helper on arbitrary
+model-supplied IDs.
+
+Recorder reads use the bounded per-entity `state_changes_during_period` API on
+Recorder's database executor. Point lookups page chronological windows using
+the actual timestamps; this works on HA 2026.10, where `descending` is applied
+after the database limit, and 2026.11, where the database can order before
+limiting. If the query or row budget is exhausted before a latest state is
+established, return `incomplete` rather than guessing. A range with no changes
+includes the latest real observation at or before its start when found; do not
+fabricate a start-time timestamp. Per-turn query, row, and output limits and a
+shared in-flight query semaphore bound work even when a caller is cancelled.
+Current Recorder exclusion is reported separately and must not hide retained
+rows. Unit tests live in `tests/test_history.py`; `tests/test_ha_contract.py`
+checks the Assist exposure namespace and Recorder API behavior on supported
+versions.
+
 ### Trusted instructions and live context
 
 Only fixed integration rules, capability state derived from integration options

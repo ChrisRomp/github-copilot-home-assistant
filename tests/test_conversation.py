@@ -152,10 +152,21 @@ async def test_administrator_receives_only_selected_apis(
 @pytest.mark.parametrize(
     ("supported", "user_id", "user", "reason"),
     [
-        (True, "member", SimpleNamespace(is_admin=False), "administrator"),
-        (True, "deleted", None, "administrator"),
-        (True, None, None, "administrator"),
-        (False, "admin", SimpleNamespace(is_admin=True), "2026.11"),
+        (
+            True,
+            "member",
+            SimpleNamespace(is_admin=False),
+            "The Home Assistant user for this request is not an administrator.",
+        ),
+        (True, "deleted", None, "No Home Assistant user is linked to this request."),
+        (True, None, None, "No Home Assistant user is linked to this request."),
+        (
+            False,
+            "admin",
+            SimpleNamespace(is_admin=True),
+            "Home Assistant administrator tools are unavailable on this Home "
+            "Assistant version.",
+        ),
     ],
 )
 @pytest.mark.parametrize("device_control", [False, True])
@@ -187,7 +198,10 @@ async def test_unavailable_admin_tools_preserve_chat_and_explain(
         as_llm_context=Mock(return_value=context), extra_system_prompt=None
     )
     chat = SimpleNamespace(async_provide_llm_data=AsyncMock())
-    result = SimpleNamespace(response=SimpleNamespace(speech={}))
+    response = SimpleNamespace(
+        speech={"plain": {"speech": "The current temperature is 21 degrees."}}
+    )
+    result = SimpleNamespace(response=response)
     monkeypatch.setattr(
         module.conversation,
         "async_get_result_from_chat_log",
@@ -200,7 +214,10 @@ async def test_unavailable_admin_tools_preserve_chat_and_explain(
         context, ["assist"] if device_control else None, None, None
     )
     notice = backend.async_handle_message.await_args.kwargs["admin_notice"]
-    assert reason in notice
+    assert notice == reason
+    assert response.speech["plain"]["speech"] == (
+        "The current temperature is 21 degrees."
+    )
     assert auth.async_get_user.await_count == int(supported and user_id is not None)
 
 

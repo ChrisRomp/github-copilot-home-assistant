@@ -81,6 +81,8 @@ async def test_oauth_progress_reuses_one_poll_and_returns_model_form(
     assert submitted == {
         "model": "gpt-6-luna",
         "enable_device_control": False,
+        "allow_all_satellites": False,
+        "allowed_satellites": [],
         "enable_shared_memory": False,
         "ai_task_timeout": 180,
     }
@@ -91,6 +93,8 @@ async def test_oauth_progress_reuses_one_poll_and_returns_model_form(
         "ai_task_model": "gpt-6-luna",
         "ai_task_timeout": 180,
         "enable_device_control": False,
+        "allow_all_satellites": False,
+        "allowed_satellites": [],
         "enable_shared_memory": False,
         "llm_hass_api": None,
         "prompt": "",
@@ -137,6 +141,8 @@ async def test_initial_conversation_options_are_saved(
         "ai_task_model": "gpt-6-luna",
         "ai_task_timeout": 180,
         "enable_device_control": device_control_enabled,
+        "allow_all_satellites": False,
+        "allowed_satellites": [],
         "enable_shared_memory": False,
         "llm_hass_api": ["assist"] if device_control_enabled else None,
         "prompt": prompt if prompt is not None else "",
@@ -160,6 +166,8 @@ async def test_initial_options_require_an_available_model_and_default_control_of
         "model": "gpt-6-luna",
         "ai_task_timeout": 180,
         "enable_device_control": False,
+        "allow_all_satellites": False,
+        "allowed_satellites": [],
         "enable_shared_memory": False,
     }
     with pytest.raises(vol.Invalid):
@@ -227,6 +235,13 @@ def test_initial_options_have_matching_translations(filename):
     options = translations["options"]["step"]["init"]
     assert setup["data"] == options["data"]
     assert setup["data_description"] == options["data_description"]
+
+
+def test_source_strings_match_english_translation():
+    component = Path(__file__).parents[1] / "custom_components/github_copilot"
+    assert json.loads((component / "strings.json").read_text()) == json.loads(
+        (component / "translations/en.json").read_text()
+    )
 
 
 async def test_closing_oauth_flow_cancels_poll_and_never_saves(flow_setup, monkeypatch):

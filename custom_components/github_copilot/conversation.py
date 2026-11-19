@@ -18,7 +18,6 @@ from .const import (
     NAME,
 )
 from .llm_api import (
-    ADMIN_REQUIRED,
     HOME_ASSISTANT_API,
     async_available_llm_apis,
 )
@@ -87,7 +86,7 @@ class GitHubCopilotConversationEntity(conversation.ConversationEntity):
                 api_ids, admin_notice = await async_available_llm_apis(
                     self.hass, self.entry.options, llm_context.context
                 )
-                if admin_notice != ADMIN_REQUIRED:
+                if HOME_ASSISTANT_API in (api_ids or []):
                     raise HomeAssistantError(
                         "Home Assistant denied access to administrator tools."
                     ) from err
@@ -104,13 +103,4 @@ class GitHubCopilotConversationEntity(conversation.ConversationEntity):
         await runtime.backend.async_handle_message(
             self.entity_id, user_input, chat_log, admin_notice=admin_notice
         )
-        result = conversation.async_get_result_from_chat_log(user_input, chat_log)
-        if admin_notice:
-            speech = result.response.speech.get("plain", {}).get("speech", "")
-            suffix = f"\n\n{admin_notice}"
-            if speech.endswith(suffix):
-                # Preserve HA's follow-up detection based on the model's answer.
-                result.continue_conversation = (
-                    speech[: -len(suffix)].rstrip().endswith(("?", ";", "？"))
-                )
-        return result
+        return conversation.async_get_result_from_chat_log(user_input, chat_log)

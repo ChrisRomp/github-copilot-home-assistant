@@ -120,6 +120,9 @@ def ha_boundary(monkeypatch):
         "homeassistant.helpers.chat_session": {
             "current_session": ContextVar("current_session", default=None),
         },
+        "homeassistant.helpers.dispatcher": {
+            "async_dispatcher_send": Mock(),
+        },
         "homeassistant.helpers.json": {"json_dumps": json.dumps},
         "homeassistant.helpers.entity_platform": {
             "AddEntitiesCallback": Mock,
@@ -133,6 +136,8 @@ def ha_boundary(monkeypatch):
         "homeassistant.helpers.aiohttp_client": {"async_get_clientsession": Mock()},
         "homeassistant.helpers.selector": {
             "BooleanSelector": lambda: vol.Boolean(),
+            "EntitySelector": lambda config: vol.Any(str, [str]),
+            "EntitySelectorConfig": dict,
             "SelectOptionDict": dict,
             "SelectSelectorConfig": dict,
             "SelectSelector": lambda config: vol.In(

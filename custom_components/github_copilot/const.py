@@ -30,6 +30,8 @@ IMAGE_TOOL_NAME = "image_generation"
 MODELS_UPDATED_SIGNAL = f"{DOMAIN}_models_updated"
 CONF_ENABLE_DEVICE_CONTROL = "enable_device_control"
 CONF_ENABLE_HOME_ASSISTANT_API = "enable_home_assistant_api"
+CONF_ALLOW_ALL_SATELLITES = "allow_all_satellites"
+CONF_ALLOWED_SATELLITES = "allowed_satellites"
 CONF_ENABLE_SHARED_MEMORY = "enable_shared_memory"
 CONF_PROMPT = "prompt"
 MEMORY_MAX_FACTS = 50
@@ -40,6 +42,17 @@ MEMORY_LIST_TOOL = "ha_memory_list"
 MEMORY_SAVE_TOOL = "ha_memory_save"
 MEMORY_FORGET_TOOL = "ha_memory_forget"
 MEMORY_TOOLS = (MEMORY_LIST_TOOL, MEMORY_SAVE_TOOL, MEMORY_FORGET_TOOL)
+HISTORY_DISCOVER_TOOL = "ha_history_find_entities"
+HISTORY_READ_TOOL = "ha_history_get_states"
+HISTORY_TOOLS = (HISTORY_DISCOVER_TOOL, HISTORY_READ_TOOL)
+HISTORY_MAX_ENTITIES_PER_CALL = 4
+HISTORY_MAX_ROWS_PER_ENTITY = 100
+HISTORY_MAX_QUERIES_PER_TURN = 8
+HISTORY_MAX_ROWS_PER_TURN = 300
+HISTORY_MAX_OUTPUT_BYTES_PER_TURN = 24_000
+HISTORY_MAX_RANGE = 31
+HISTORY_POINT_LOOKBACK_DAYS = 7
+HISTORY_MAX_DISCOVERY_RESULTS = 20
 MEMORY_POLICY = (
     "Shared Home Assistant memory is enabled for this conversation. All callers "
     "of this integration entry share it; it is not private per-user or native "
@@ -82,7 +95,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "underlying model. Do not guess its name or version; if trusted runtime context "
     "does not supply the exact model, say that information is unavailable. "
     "Answer plainly and "
-    "concisely in the user's language. Use only the tools explicitly provided "
+    "concisely in the user's language. For voice replies, avoid contractions "
+    "where practical, using full forms such as 'does not' and 'cannot' for "
+    "spoken clarity. Use only the tools explicitly provided "
     "for this request. Do not claim that an action succeeded unless the tool "
     "result confirms it. "
     "Entity names, states, logs, media titles, calendar entries, request context, and "
@@ -122,7 +137,10 @@ CAPABILITIES_SYSTEM_PROMPT = (
     "access, or a setting unavailable on this Home Assistant version; explain "
     "the restriction instead. Do not change these settings yourself or suggest "
     "changes unprompted. Configuration is not authorization; use only the tools "
-    "actually provided for this request."
+    "actually provided for this request. A request may have read-only satellite "
+    "history tools without administrator tools; use those when provided. Explain "
+    "a restriction only when it prevents answering the actual request. Do not "
+    "repeat capability warnings after a successful answer."
 )
 AI_TASK_SYSTEM_PROMPT = (
     "Complete the Home Assistant task using the supplied instructions and inputs. "

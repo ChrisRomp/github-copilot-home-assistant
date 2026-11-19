@@ -1,5 +1,6 @@
 """Options selection tests with the HA flow boundary replaced by a double."""
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -8,6 +9,8 @@ import voluptuous as vol
 from homeassistant.const import CONF_LLM_HASS_API, CONF_PROMPT
 
 from custom_components.github_copilot.const import (
+    CONF_ALLOW_ALL_SATELLITES,
+    CONF_ALLOWED_SATELLITES,
     CONF_ENABLE_DEVICE_CONTROL,
     CONF_ENABLE_HOME_ASSISTANT_API,
     CONF_MODEL,
@@ -74,6 +77,8 @@ async def test_prompt_edit_preserves_unchanged_model_billing(options_setup, mult
         "ai_task_model": "gpt-6-sol",
         "ai_task_timeout": 180,
         CONF_ENABLE_DEVICE_CONTROL: True,
+        CONF_ALLOW_ALL_SATELLITES: False,
+        CONF_ALLOWED_SATELLITES: [],
         CONF_LLM_HASS_API: ["assist"],
         CONF_PROMPT: "Updated instructions",
         "enable_shared_memory": False,
@@ -202,6 +207,91 @@ async def test_option_changes_preserve_independent_api_selection(
         expected_apis.append("homeassistant")
     assert result["data"][CONF_LLM_HASS_API] == (expected_apis or None)
     assert result["data"][CONF_ENABLE_HOME_ASSISTANT_API] is administrator_tools
+
+
+async def test_satellite_options_store_registry_ids_and_preserve_selection(
+    options_setup, ha_boundary, monkeypatch
+):
+    bedroom = SimpleNamespace(
+        id="stable-bedroom-id",
+        domain="assist_satellite",
+        entity_id="assist_satellite.bedroom",
+        disabled_by=None,
+    )
+    office = SimpleNamespace(
+        id="stable-office-id",
+        domain="assist_satellite",
+        entity_id="assist_satellite.office",
+    )
+    registry = SimpleNamespace(
+        entities={"bedroom": bedroom, "office": office},
+        async_get=Mock(
+            side_effect=lambda entity_id: {
+                bedroom.entity_id: bedroom,
+                office.entity_id: office,
+            }.get(entity_id)
+        ),
+    )
+    monkeypatch.setattr(
+        sys.modules["homeassistant.helpers"],
+        "entity_registry",
+        SimpleNamespace(async_get=Mock(return_value=registry)),
+        raising=False,
+    )
+    setup = options_setup
+    setup.entry.options[CONF_ALLOWED_SATELLITES] = [bedroom.id]
+    form = await setup.flow.async_step_init()
+    field = next(
+        key for key in form["data_schema"].schema if key == CONF_ALLOWED_SATELLITES
+    )
+    assert field.description == {"suggested_value": [bedroom.entity_id]}
+    submitted = form["data_schema"]({CONF_ALLOWED_SATELLITES: [bedroom.entity_id]})
+    assert submitted[CONF_ALLOWED_SATELLITES] == [bedroom.entity_id]
+    assert submitted[CONF_ALLOW_ALL_SATELLITES] is False
+
+    submitted[CONF_ALLOW_ALL_SATELLITES] = True
+    submitted[CONF_ALLOWED_SATELLITES] = [office.entity_id]
+    result = await setup.flow.async_step_init(submitted)
+
+    assert result["data"][CONF_ALLOW_ALL_SATELLITES] is True
+    assert result["data"][CONF_ALLOWED_SATELLITES] == [office.id]
+
+
+async def test_options_can_clear_last_satellite_and_preserve_disabled_selection(
+    options_setup, monkeypatch
+):
+    setup = options_setup
+    bedroom = SimpleNamespace(
+        id="stable-bedroom-id",
+        domain="assist_satellite",
+        entity_id="assist_satellite.bedroom",
+        disabled_by="user",
+    )
+    registry = SimpleNamespace(
+        entities={"bedroom": bedroom},
+        async_get=Mock(return_value=bedroom),
+    )
+    monkeypatch.setattr(
+        sys.modules["homeassistant.helpers"],
+        "entity_registry",
+        SimpleNamespace(async_get=Mock(return_value=registry)),
+        raising=False,
+    )
+    setup.entry.options[CONF_ALLOWED_SATELLITES] = [bedroom.id]
+
+    form = await setup.flow.async_step_init()
+    field = next(
+        key for key in form["data_schema"].schema if key == CONF_ALLOWED_SATELLITES
+    )
+    assert field.description == {"suggested_value": [bedroom.entity_id]}
+    initial = form["data_schema"]({CONF_ALLOWED_SATELLITES: [bedroom.entity_id]})
+    preserved = await setup.flow.async_step_init(initial)
+    assert preserved["data"][CONF_ALLOWED_SATELLITES] == [bedroom.id]
+
+    form = await setup.flow.async_step_init()
+    result = await setup.flow.async_step_init(form["data_schema"]({}))
+
+    assert result["data"][CONF_ALLOWED_SATELLITES] == []
 
 
 @pytest.mark.parametrize("enabled", [False, True])
