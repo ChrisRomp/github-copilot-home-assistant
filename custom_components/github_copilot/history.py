@@ -163,13 +163,13 @@ def _entity_area(hass: Any, entity_id: str) -> str:
     return area.name if area is not None else ""
 
 
-def _label(value: Any) -> str:
+def _label(value: Any, max_length: int = _MAX_QUERY_LENGTH) -> str:
     """Return a single-line, bounded label without control or format characters."""
     text = "".join(
         " " if unicodedata.category(char).startswith(("C", "Z")) else char
         for char in str(value)
     )
-    return " ".join(text.split())[:_MAX_QUERY_LENGTH]
+    return " ".join(text.split())[:max_length]
 
 
 def async_find_entities(
@@ -229,7 +229,7 @@ def _parse_aware_time(value: str) -> datetime | None:
 def _state_record(state: Any) -> dict[str, Any]:
     """Return a compact historical state and only its stored unit attribute."""
     record: dict[str, Any] = {
-        "state": str(state.state)[:_MAX_STATE_LENGTH],
+        "state": _label(state.state, _MAX_STATE_LENGTH),
         "recorded_at": dt_util.as_local(state.last_updated).isoformat(),
     }
     unit = getattr(state, "attributes", {}).get("unit_of_measurement")
