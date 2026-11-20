@@ -763,15 +763,21 @@ def run_copilot_ops(
                     or version in state["commented"]
                 ):
                     continue
-                copilot_api.request(
-                    "POST",
-                    f"/issues/{pr}/comments",
-                    {
-                        "body": f"@copilot Home Assistant `{version}` also fails with "
-                        f"the same tests ({run_url}). Make sure the fix also passes "
-                        f"on `{version}`. Details are in #{number}."
-                    },
+                marker = copilot_notification_marker(number, version)
+                comments = copilot_api.paginate(
+                    f"/issues/{pr}/comments", {}, max_pages=MAX_TIMELINE_PAGES
                 )
+                if not any(marker in comment.get("body", "") for comment in comments):
+                    copilot_api.request(
+                        "POST",
+                        f"/issues/{pr}/comments",
+                        {
+                            "body": f"@copilot Home Assistant `{version}` also fails "
+                            f"with the same tests ({run_url}). Make sure the fix also "
+                            f"passes on `{version}`. Details are in #{number}.\n\n"
+                            f"{marker}"
+                        },
+                    )
                 state["commented"].append(version)
                 print(f"Asked Copilot to cover {version} on pull request #{pr}.")
             issues_api.request(
@@ -786,6 +792,10 @@ def run_copilot_ops(
                 f"::warning::Copilot operation for issue #{number} failed ({status})."
             )
     return failures
+
+
+def copilot_notification_marker(issue: int, version: str) -> str:
+    return f"<!-- ha-compat-notification:{issue}:{version} -->"
 
 
 # Install
@@ -887,6 +897,15 @@ def _repo_context() -> tuple[str, str, str]:
     return repo, run_url, workflow_url
 
 
+def _is_current_default_branch_run(api: Any, sha: str, branch: str) -> bool:
+    ref = urllib.parse.quote(branch, safe="/")
+    response = api.request("GET", f"/git/ref/heads/{ref}")
+    head_sha = (response.get("object") or {}).get("sha")
+    if not isinstance(head_sha, str) or not SHA_RE.fullmatch(head_sha):
+        raise ValueError("GitHub returned an invalid default-branch SHA")
+    return sha == head_sha
+
+
 def cmd_discover(args: argparse.Namespace) -> None:
     releases = _fetch_json(urllib.request.Request(PYPI_URL))["releases"]
     try:
@@ -933,6 +952,15 @@ def cmd_result(args: argparse.Namespace) -> None:
 def cmd_report(args: argparse.Namespace) -> None:
     repo, run_url, workflow_url = _repo_context()
     api = GitHub(os.environ["GITHUB_TOKEN"], repo)
+    current_sha = os.environ["GITHUB_SHA"]
+    default_branch = os.environ["DEFAULT_BRANCH"]
+    if not _is_current_default_branch_run(api, current_sha, default_branch):
+        Path(args.plan_out).write_text("[]")
+        print(
+            "::notice::Skipping stale release-watch results; the default branch "
+            "has advanced."
+        )
+        return
     results = []
     for path in sorted(Path(args.results).glob("*.json")):
         result = None

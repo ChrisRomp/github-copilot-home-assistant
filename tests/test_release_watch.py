@@ -7,6 +7,8 @@ import json
 import re
 import sys
 from pathlib import Path
+from subprocess import CalledProcessError
+from types import SimpleNamespace
 
 import pytest
 
@@ -152,6 +154,8 @@ class FakeGitHub:
         self.timelines: dict[int, list] = {}
         self.calls: list[tuple] = []
         self.fail_paths: set[str] = set()
+        self.fail_patch_paths: set[str] = set()
+        self.comments: dict[int, list[dict]] = {}
         self.ignore_assignees = False
         self.next_number = 100
 
@@ -159,6 +163,11 @@ class FakeGitHub:
         self.calls.append((method, path, body))
         if path in self.fail_paths:
             raise watch.GitHubError(403)
+        if method == "PATCH" and path in self.fail_patch_paths:
+            self.fail_patch_paths.remove(path)
+            raise watch.GitHubError(500)
+        if path == "/git/ref/heads/main" and method == "GET":
+            return {"object": {"sha": self.head_sha}}
         if method == "POST" and path == "/issues":
             self.next_number += 1
             issue = {
@@ -175,6 +184,14 @@ class FakeGitHub:
             if self.ignore_assignees:
                 return {"assignees": []}
             return {"assignees": [{"login": "Copilot"}]}
+        match = re.fullmatch(r"/issues/(\d+)/comments", path)
+        if match:
+            number = int(match.group(1))
+            if method == "GET":
+                return self.comments.get(number, [])
+            if method == "POST":
+                self.comments.setdefault(number, []).append(body)
+                return body
         match = re.fullmatch(r"/issues/(\d+)", path)
         if match:
             issue = self.issues[int(match.group(1))]
@@ -187,6 +204,9 @@ class FakeGitHub:
         match = re.fullmatch(r"/issues/(\d+)/timeline", path)
         if match:
             return self.timelines.get(int(match.group(1)), [])
+        match = re.fullmatch(r"/issues/(\d+)/comments", path)
+        if match:
+            return self.comments.get(int(match.group(1)), [])
         return list(self.issues.values())
 
 
@@ -291,6 +311,28 @@ def test_same_failure_on_later_beta_updates_issue_and_comments_on_copilot_pr():
     assert reporter.copilot_ops == []
 
 
+def test_copilot_comment_retry_does_not_duplicate_post():
+    api = FakeGitHub()
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b0"))
+    assert _run_copilot(api, reporter.copilot_ops) == 0
+    _copilot_pr(api, 101, 7)
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b1"))
+    op = reporter.copilot_ops[0]
+    copilot = FakeGitHub()
+
+    api.fail_patch_paths.add("/issues/101")
+    assert _run_copilot(api, [op], copilot) == 1
+    assert len(copilot.comments[7]) == 1
+    marker = watch.copilot_notification_marker(101, "2026.12.0b1")
+    assert marker in copilot.comments[7][0]["body"]
+
+    assert _run_copilot(api, [op], copilot) == 0
+    assert len(copilot.comments[7]) == 1
+    assert "2026.12.0b1" in _state(api, 101)["commented"]
+
+
 def test_different_failure_opens_separate_issue():
     api = FakeGitHub()
     _reporter(api).process(_result("2026.12.0b0"))
@@ -377,6 +419,104 @@ def test_truncated_listing_stops_issue_decisions():
     assert len(Pages(5).paginate("/issues", {}, max_pages=2)) == 5
     with pytest.raises(watch.TruncatedError):
         watch.load_issues(Pages(100))
+
+
+def test_report_skips_stale_default_branch_result(tmp_path, monkeypatch, capsys):
+    api = FakeGitHub()
+    api.head_sha = SHA2
+    monkeypatch.setattr(watch, "GitHub", lambda *_: api)
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    monkeypatch.setenv("GITHUB_SHA", SHA)
+    monkeypatch.setenv("DEFAULT_BRANCH", "main")
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "result.json").write_text(
+        json.dumps(_result("2026.12.0b0", outcome="success"))
+    )
+    plan = tmp_path / "plan.json"
+
+    watch.main(["report", "--results", str(results), "--plan-out", str(plan)])
+
+    assert json.loads(plan.read_text()) == []
+    assert not api.issues
+    assert "Skipping stale release-watch results" in capsys.readouterr().out
+
+
+def _mock_install(monkeypatch, *, failed_checks=0):
+    pip_calls = []
+    run_calls = []
+    sleeps = []
+    check_attempts = 0
+
+    def run(command, **kwargs):
+        nonlocal check_attempts
+        run_calls.append(command)
+        if (
+            len(command) > 2
+            and command[1] == "-c"
+            and command[2] == watch.CONTRACT_SNIPPET
+        ):
+            return SimpleNamespace(stdout='["ha-component==1"]')
+        if command[1:] == ["-m", "pip", "check"]:
+            check_attempts += 1
+            if check_attempts <= failed_checks:
+                raise CalledProcessError(1, command)
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(watch, "_pip", lambda *args: pip_calls.append(args))
+    monkeypatch.setattr(watch.subprocess, "run", run)
+    monkeypatch.setattr(watch.time, "sleep", sleeps.append)
+    return pip_calls, run_calls, sleeps
+
+
+def test_install_supported_mode_uses_dev_extra_and_component_requirements(
+    monkeypatch,
+):
+    pip_calls, run_calls, sleeps = _mock_install(monkeypatch)
+
+    watch.install("supported", "2026.11.0")
+
+    assert pip_calls == [
+        ("-e", f"{watch.REPO_ROOT}[dev]", "homeassistant==2026.11.0"),
+        ("ha-component==1",),
+    ]
+    assert any(
+        command[1] == "-c"
+        and command[2] == watch.CONTRACT_SNIPPET
+        and command[3:] == list(watch.CONTRACT_COMPONENTS)
+        for command in run_calls
+    )
+    assert not any(command[1:] == ["-m", "pip", "check"] for command in run_calls)
+    assert sleeps == []
+
+
+def test_install_watch_mode_keeps_dev_dependencies_and_checks_retries(monkeypatch):
+    pip_calls, run_calls, sleeps = _mock_install(monkeypatch, failed_checks=1)
+
+    watch.install("watch", "2026.12.0b1")
+
+    assert pip_calls[0][0] == "homeassistant==2026.12.0b1"
+    assert "homeassistant>=2026.10.0,<2026.12.0" not in pip_calls[0]
+    assert "github-copilot-sdk==1.0.31" in pip_calls[0]
+    assert any(requirement.startswith("pytest") for requirement in pip_calls[0])
+    assert pip_calls[1] == ("--no-deps", "-e", str(watch.REPO_ROOT))
+    assert pip_calls[2] == ("ha-component==1",)
+    assert pip_calls[3:] == pip_calls[:3]
+    assert sum(command[1:] == ["-m", "pip", "check"] for command in run_calls) == 2
+    assert sleeps == [30]
+
+
+@pytest.mark.parametrize("failed_checks", [1, 2])
+def test_install_watch_mode_fails_after_one_retry(monkeypatch, failed_checks):
+    _mock_install(monkeypatch, failed_checks=failed_checks)
+
+    if failed_checks == 1:
+        watch.install("watch", "2026.12.0b1")
+    else:
+        with pytest.raises(SystemExit, match="Dependency install failed"):
+            watch.install("watch", "2026.12.0b1")
 
 
 def test_passing_versions_close_fixed_and_superseded_issues():
