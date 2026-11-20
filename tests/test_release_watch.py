@@ -232,9 +232,9 @@ def _reporter(api, copilot=True):
     return watch.Reporter(api, RUN, WORKFLOW, watch.load_issues(api), copilot)
 
 
-def _run_copilot(api, ops, copilot=None):
+def _run_copilot(api, ops, copilot=None, *, run_url=RUN):
     copilot = copilot or FakeGitHub()
-    return watch.run_copilot_ops(ops, copilot, api, "o/r", "main", RUN, WORKFLOW)
+    return watch.run_copilot_ops(ops, copilot, api, "o/r", "main", run_url)
 
 
 def _state(api, number):
@@ -388,13 +388,18 @@ def test_report_retries_notifications_after_release_advances(
     assert _state(api, 101)["commented"] == ["2026.12.0b0"]
     copilot.fail_paths.clear()
 
+    monkeypatch.setenv("GITHUB_RUN_ID", "2")
+    retry_run = "https://github.com/o/r/actions/runs/2"
     latest = _result("2026.12.0b2", outcome=next_outcome, tests=next_tests)
     ops = report(latest)
     assert [op["version"] for op in ops if op["op"] == "comment"] == expected_versions
-    assert _run_copilot(api, ops, copilot) == 0
+    before_delivery = watch.MARKER_RE.sub("", api.issues[101]["body"], count=1)
+    assert _run_copilot(api, ops, copilot, run_url=retry_run) == 0
+    assert watch.MARKER_RE.sub("", api.issues[101]["body"], count=1) == before_delivery
     comments = copilot.comments.get(7, [])
     assert len(comments) == len(expected_versions)
     for comment, version in zip(comments, expected_versions, strict=True):
+        assert retry_run in comment["body"]
         assert watch.copilot_notification_marker(101, version) in comment["body"]
         assert version in _state(api, 101)["commented"]
     assert report(latest) == []
@@ -662,7 +667,7 @@ def test_copilot_ops_record_success_and_retry_failures():
     copilot = FakeGitHub()
     copilot.fail_paths.add("/issues/101/assignees")
 
-    args = ("o/r", "main", RUN, WORKFLOW)
+    args = ("o/r", "main", RUN)
     assert watch.run_copilot_ops(reporter.copilot_ops, copilot, api, *args) == 1
     assert _state(api, 101)["assigned"] is False
 

@@ -425,13 +425,17 @@ def validate_result(data: Any) -> dict[str, Any] | None:
 # Issue rendering
 
 
-def render_body(state: dict[str, Any], run_url: str, workflow_url: str) -> str:
+def _render_marker(state: dict[str, Any]) -> str:
     stored = {k: v for k, v in state.items() if k != "line"}
+    return f"<!-- ha-compat:state {json.dumps(stored, sort_keys=True)} -->"
+
+
+def render_body(state: dict[str, Any], run_url: str, workflow_url: str) -> str:
     latest = max(state["versions"], key=parse_version)
     versions = ", ".join(f"`{v}`" for v in sorted(state["versions"], key=parse_version))
     phase = PHASE_LABELS[state["phase"]]
     lines = [
-        f"<!-- ha-compat:state {json.dumps(stored, sort_keys=True)} -->",
+        _render_marker(state),
         "## Home Assistant compatibility failure",
         "",
         f"The [HA release watch]({workflow_url}) found that this integration fails "
@@ -752,6 +756,12 @@ class Reporter:
         self.api.request("POST", f"/issues/{number}/comments", {"body": body})
 
 
+def _save_copilot_state(api: Any, issue: dict[str, Any], state: dict[str, Any]) -> None:
+    # A notification retry need not be the run that diagnosed the failure.
+    body = MARKER_RE.sub(lambda _: _render_marker(state), issue["body"], count=1)
+    api.request("PATCH", f"/issues/{issue['number']}", {"body": body})
+
+
 def run_copilot_ops(
     ops: list[dict[str, Any]],
     copilot_api: Any,
@@ -759,7 +769,6 @@ def run_copilot_ops(
     repo: str,
     base_branch: str,
     run_url: str,
-    workflow_url: str,
 ) -> int:
     """Run queued Copilot operations and return how many failed.
 
@@ -785,11 +794,7 @@ def run_copilot_ops(
                     # the POST. Recovery must not infer that from a later body.
                     if state["commented"] != state["versions"]:
                         state["commented"] = list(state["versions"])
-                        issues_api.request(
-                            "PATCH",
-                            f"/issues/{number}",
-                            {"body": render_body(state, run_url, workflow_url)},
-                        )
+                        _save_copilot_state(issues_api, issue, state)
                     response = copilot_api.request(
                         "POST",
                         f"/issues/{number}/assignees",
@@ -838,11 +843,7 @@ def run_copilot_ops(
                     )
                 state["commented"].append(version)
                 print(f"Asked Copilot to cover {version} on pull request #{pr}.")
-            issues_api.request(
-                "PATCH",
-                f"/issues/{number}",
-                {"body": render_body(state, run_url, workflow_url)},
-            )
+            _save_copilot_state(issues_api, issue, state)
         except (GitHubError, urllib.error.URLError, TimeoutError) as err:
             failures += 1
             status = getattr(err, "status", "network")
@@ -1053,7 +1054,7 @@ def cmd_report(args: argparse.Namespace) -> None:
 
 
 def cmd_copilot(args: argparse.Namespace) -> None:
-    repo, run_url, workflow_url = _repo_context()
+    repo, run_url, _ = _repo_context()
     ops = json.loads(Path(args.plan).read_text())
     if not isinstance(ops, list):
         raise SystemExit("Invalid Copilot plan.")
@@ -1070,7 +1071,6 @@ def cmd_copilot(args: argparse.Namespace) -> None:
         repo,
         args.base_branch,
         run_url,
-        workflow_url,
     )
     if failures:
         print(

@@ -79,6 +79,8 @@ fails the same way while Copilot's pull request is open, the watch comments
 `@copilot` on that pull request once per version. Pending notifications for
 open issues are retried on later report runs, even if the latest release has
 changed; a version does not need to be retested to retry its notification.
+The issue keeps its link to the run that reported the failure; the PR comment
+links to the run that delivered the notification.
 If Copilot's pull request was closed without a fix, the watch opens a new
 issue and assigns it again. Without the secret, or when assignment fails,
 issues still open and assignment retries on the next failing run.
