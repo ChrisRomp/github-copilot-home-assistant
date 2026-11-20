@@ -92,9 +92,10 @@ stale issue referenced by its replacement.
 
 `GITHUB_TOKEN` cannot assign Copilot, so the secret must be a fine-grained
 personal access token limited to this repository, with read and write access
-to actions, contents, issues, and pull requests. Only the workflow's final
-Copilot step receives it; jobs that install and run tests have read-only
-repository access. Renew the token before it expires.
+to actions, contents, issues, and pull requests, as required by
+[GitHub's Copilot assignment API](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/use-cloud-agent-via-the-api#using-the-issues-api).
+Only the workflow's final Copilot step receives it; jobs that install and run
+tests have read-only repository access. Renew the token before it expires.
 
 GitHub disables scheduled workflows after 60 days without repository activity.
 Re-enable the workflow from the Actions tab if that happens.
