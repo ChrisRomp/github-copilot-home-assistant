@@ -440,11 +440,22 @@ name. Assist and administrator rechecks do not apply to MCP tools.
   names reduced to safe characters and 64 characters each, and an untrusted-data
   label. Only the remote description after it is cut to `MCP_MAX_DESCRIPTION`.
   Descriptions enter SDK tool definitions, never system instructions.
-- Per request, at most `MCP_MAX_TOOLS` tools are provided. A tool is skipped when
-  its schema does not convert to an object, is larger than
-  `MCP_MAX_SCHEMA_BYTES`, or would take the MCP definitions over
-  `MCP_MAX_DEFINITION_BYTES`. Each skipped tool is warned about once per entry
-  runtime; `set_tools` sends the definitions on every turn.
+- A tool is skipped when its schema does not convert to an object, is larger
+  than `MCP_MAX_SCHEMA_BYTES`, would take the MCP definitions over
+  `MCP_MAX_DEFINITION_BYTES`, or is past `MCP_MAX_TOOLS`. These caps bound local
+  work; `set_tools` sends the definitions to the runtime on every turn. Each
+  skipped tool is warned about once per entry runtime.
+- Tool search: sessions other than image tasks pass
+  `tool_search={"enabled": True, "defer_threshold": 1}`. Integration tools use
+  `defer="never"`. When the MCP tools for a request exceed `MCP_EAGER_TOOLS` or
+  `MCP_EAGER_DEFINITION_BYTES`, every MCP tool uses `defer="auto"`. Otherwise
+  they use `"never"`. The pinned runtime (1.0.109) adds `tool_search_tool`
+  only while a tool is deferred, even under the `custom:*` filter. It returns
+  matching definitions on search and adds a user-role reminder that lists the
+  deferred SDK tool names (not descriptions). Deferral works with per-turn
+  `set_tools`. Without `tool_search`, this runtime does not defer custom tools.
+  The native contract `test_native_large_mcp_tool_sets_load_through_tool_search`
+  verifies this; rerun it on SDK upgrades.
 - `MCP_MAX_RESULT_BYTES` bounds the final serialized result, including the
   re-escaped preview of an oversized result (`status: incomplete`). It stays
   below the SDK's 20,480-byte large-output default, so results stay inline. The

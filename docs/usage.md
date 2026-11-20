@@ -134,9 +134,15 @@ server and is not a guarantee, so select only servers that you trust.
 The integration checks the settings again before each tool call. If you remove a
 server or its write permission, or the MCP integration unloads, new calls fail.
 A server's tool list can change while Home Assistant runs; each new request uses
-the current list. At most 64 MCP tools are provided for each request. Tools with
-very large parameter definitions are skipped, and a warning is logged. Tool
-results larger than 16 KB are cut short and marked as incomplete.
+the current list.
+
+A server with many tools, such as ha-mcp, does not make every request larger.
+When the selected servers provide more than 16 tools, Copilot first searches for
+the tools it needs and loads only those. This can add one short step to a
+request. Smaller servers are loaded in full. Tools with very large parameter
+definitions are skipped, and a warning is logged. Up to 512 MCP tools are
+supported. Tool results larger than 16 KB are cut short and marked as
+incomplete.
 
 Tool descriptions and results come from the remote server. Copilot is told to
 treat them as untrusted data, not as instructions, but this cannot remove all

@@ -16,6 +16,8 @@ from homeassistant.helpers import llm
 from .const import (
     CONF_MCP_SERVERS,
     CONF_MCP_WRITE_SERVERS,
+    MCP_EAGER_DEFINITION_BYTES,
+    MCP_EAGER_TOOLS,
     MCP_MAX_DEFINITION_BYTES,
     MCP_MAX_DESCRIPTION,
     MCP_MAX_RESULT_BYTES,
@@ -52,6 +54,7 @@ class McpToolBinding:
     read_only: bool
     description: str
     parameters: dict[str, Any]
+    definition_bytes: int
 
 
 def is_mcp_api(api: Any) -> bool:
@@ -137,7 +140,7 @@ async def async_mcp_bindings(
     apis = registered_mcp_apis(hass)
     bindings: list[McpToolBinding] = []
     names: set[str] = set()
-    unavailable = skipped_write = over_limit = 0
+    unavailable = skipped_write = 0
     definition_bytes = 0
     rejected: set[str] = set()
     for api_id in selected:
@@ -160,7 +163,7 @@ async def async_mcp_bindings(
             if sdk_name in names:
                 continue
             if len(bindings) >= MCP_MAX_TOOLS:
-                over_limit += 1
+                rejected.add(sdk_name)
                 continue
             try:
                 parameters = convert_tool_schema(
@@ -195,6 +198,7 @@ async def async_mcp_bindings(
                     read_only=read_only,
                     description=description,
                     parameters=parameters,
+                    definition_bytes=size,
                 )
             )
     if warned is not None and not rejected <= warned:
@@ -202,18 +206,26 @@ async def async_mcp_bindings(
             warned.clear()
         warned |= rejected
         _LOGGER.warning(
-            "Skipped %d remote MCP tools with unsupported or oversized "
-            "parameter schemas",
+            "Skipped %d remote MCP tools that are unsupported or exceed the "
+            "integration's limits",
             len(rejected),
         )
-    if unavailable or skipped_write or over_limit:
+    if unavailable or skipped_write:
         _LOGGER.debug(
-            "MCP tools: unavailable_servers=%d write_tools_skipped=%d over_limit=%d",
+            "MCP tools: unavailable_servers=%d write_tools_skipped=%d",
             unavailable,
             skipped_write,
-            over_limit,
         )
     return bindings
+
+
+def mcp_tools_deferred(bindings: list[McpToolBinding]) -> bool:
+    """Defer a large MCP tool set; the model loads tools through tool search."""
+    return (
+        len(bindings) > MCP_EAGER_TOOLS
+        or sum(binding.definition_bytes for binding in bindings)
+        > MCP_EAGER_DEFINITION_BYTES
+    )
 
 
 def _bounded(data: dict[str, Any]) -> dict[str, Any]:

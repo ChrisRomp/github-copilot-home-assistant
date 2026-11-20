@@ -938,3 +938,177 @@ async def test_native_structured_tasks_use_disposable_sessions(
         await backend.async_stop()
         await client.stop()
         await runner.cleanup()
+
+
+@pytest.mark.parametrize("tool_count", [3, 40])
+async def test_native_large_mcp_tool_sets_load_through_tool_search(
+    ha_boundary, tmp_path, monkeypatch, tool_count
+):
+    path = (
+        get_cache_dir(CLI_VERSION)
+        / "prebuilds"
+        / get_runtime_platform()
+        / "copilot-runtime"
+    )
+    if not path.is_file():
+        pytest.skip("Native SDK runtime is not already cached")
+    requests = []
+
+    def names(payload):
+        return [tool["function"]["name"] for tool in payload.get("tools", [])]
+
+    def call(name, arguments):
+        return {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": f"call-{len(requests)}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments)},
+                }
+            ],
+        }
+
+    async def complete(request):
+        payload = await request.json()
+        requests.append(payload)
+        guide = next((n for n in names(payload) if n.endswith("_skill_guide")), None)
+        called = any(
+            message["role"] == "tool" and "GUIDE_TEXT" in str(message.get("content"))
+            for message in payload["messages"]
+        )
+        if guide and not called:
+            delta, finish_reason = call(guide, {}), "tool_calls"
+        elif "tool_search_tool" in names(payload) and not called:
+            delta = call("tool_search_tool", {"query": "best practices guide"})
+            finish_reason = "tool_calls"
+        else:
+            delta, finish_reason = {"role": "assistant", "content": "Done"}, "stop"
+        events = [
+            {
+                "id": "test",
+                "object": "chat.completion.chunk",
+                "model": "gpt-4.1",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+            },
+            {
+                "id": "test",
+                "object": "chat.completion.chunk",
+                "model": "gpt-4.1",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+            },
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        return web.Response(
+            text=body + "data: [DONE]\n\n", content_type="text/event-stream"
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", complete)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    client = CopilotClient(
+        connection=RuntimeConnection.for_stdio(path=str(path)),
+        use_logged_in_user=False,
+        base_directory=str(tmp_path / "runtime"),
+        mode="empty",
+        log_level="error",
+    )
+    module = ha_boundary.load("backend")
+
+    def tool(name, description):
+        return SimpleNamespace(
+            name=name,
+            description=description,
+            parameters=vol.Schema({}),
+            annotations=SimpleNamespace(read_only=True),
+        )
+
+    class ModelContextProtocolAPI:
+        id = "mcp-ha"
+        name = "HA MCP"
+
+        async def async_get_api_instance(self, llm_context):
+            return instance
+
+    ModelContextProtocolAPI.__module__ = "homeassistant.components.mcp"
+    instance = SimpleNamespace(
+        tools=[
+            tool(f"light_{index}", f"Control light group {index}")
+            for index in range(tool_count - 1)
+        ]
+        + [tool("skill_guide", "Read the best practices guide before automations")],
+        custom_serializer=None,
+        async_call_tool=AsyncMock(
+            return_value=SimpleNamespace(data={"text": "GUIDE_TEXT"}, error=False)
+        ),
+    )
+    api = ModelContextProtocolAPI()
+    monkeypatch.setattr(module.llm, "async_get_apis", lambda hass: [api], raising=False)
+
+    async def create_session(**kwargs):
+        kwargs.pop("github_token")
+        kwargs.pop("github_token_provider")
+        kwargs["provider"] = {
+            "type": "openai",
+            "wire_api": "completions",
+            "base_url": f"http://127.0.0.1:{port}/v1",
+            "api_key": "local-test-not-a-credential",
+        }
+        return await client.create_session(**kwargs)
+
+    entry = SimpleNamespace(
+        entry_id="entry",
+        data={},
+        options={"model": "gpt-4.1", "mcp_servers": ["mcp-ha"]},
+    )
+    backend = module.ConversationBackend(
+        SimpleNamespace(),
+        entry,
+        SimpleNamespace(
+            create_session=create_session, delete_session=client.delete_session
+        ),
+        AsyncMock(),
+        AsyncMock(return_value=[SimpleNamespace(id="gpt-4.1")]),
+        access_token_getter=AsyncMock(return_value="not-used"),
+    )
+
+    class ChatLog:
+        conversation_id = "mcp"
+        content = []
+        llm_api = None
+
+        async def async_add_delta_content_stream(self, agent_id, stream):
+            async for delta in stream:
+                yield delta
+
+    user = SimpleNamespace(
+        text="Create an automation.",
+        as_llm_context=lambda _: SimpleNamespace(
+            context=SimpleNamespace(user_id="test")
+        ),
+    )
+    try:
+        await client.start()
+        await backend.async_handle_message("agent", user, ChatLog())
+        first = names(requests[0])
+        assert CONTEXT_TOOL_NAME in first
+        if tool_count > 16:
+            assert "tool_search_tool" in first
+            assert not any(name.startswith("mcp_") for name in first)
+            assert any(name.endswith("_skill_guide") for name in names(requests[1]))
+        else:
+            assert "tool_search_tool" not in first
+            assert sum(name.startswith("mcp_") for name in first) == tool_count
+        instance.async_call_tool.assert_awaited_once()
+        assert instance.async_call_tool.await_args.args[0].tool_name == "skill_guide"
+        assert requests[-1]["messages"][-1]["role"] == "tool"
+        assert "GUIDE_TEXT" in json.dumps(requests[-1]["messages"][-1])
+    finally:
+        await backend.async_stop()
+        await client.stop()
+        await runner.cleanup()

@@ -121,6 +121,7 @@ from .mcp_tools import (
     McpToolBinding,
     async_call_mcp_tool,
     async_mcp_bindings,
+    mcp_tools_deferred,
     selected_mcp_servers,
 )
 from .memory import MemoryManager, render_reference
@@ -1649,6 +1650,12 @@ class ConversationBackend:
                 },
                 organization_custom_instructions=prompt_context["instructions"],
                 tools=sdk_tools,
+                # Adds tool_search_tool only while some tool is deferred.
+                tool_search=(
+                    {"enabled": True, "defer_threshold": 1}
+                    if image_request is None
+                    else None
+                ),
                 available_tools=(
                     [f"builtin:{IMAGE_TOOL_NAME}"]
                     if image_request is not None
@@ -2302,6 +2309,14 @@ class ConversationBackend:
                 skip_permission=True,
             )
         )
+        # Only a large MCP tool set is deferred; integration tools always load.
+        deferred = (
+            {binding.sdk_name for binding in mcp_tools}
+            if mcp_tools and mcp_tools_deferred(mcp_tools)
+            else set()
+        )
+        for tool in tools:
+            tool.defer = "auto" if tool.name in deferred else "never"
         return tools
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, create_autospec
@@ -4461,4 +4462,48 @@ async def test_mcp_reauth_failure_returns_fixed_notice(setup, monkeypatch):
         "error_text": "The MCP server needs to be signed in again in Home Assistant.",
     }
     assert results["read"].result_type == "failure"
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize(("count", "deferred"), [(0, False), (3, False), (40, True)])
+async def test_large_mcp_tool_sets_are_deferred_and_integration_tools_load(
+    setup, monkeypatch, count, deferred
+):
+    notes = mcp_api(tools=[mcp_tool(f"t{i}", read_only=True) for i in range(count)])
+    register_apis(setup, monkeypatch, notes)
+    if count:
+        setup.entry.options.update(mcp_servers=["mcp-notes"])
+
+    observed, _ = await call_tools(setup, [], lambda: turn(setup))
+
+    mcp = [tool for tool in observed if tool.name.startswith("mcp_")]
+    assert len(mcp) == count
+    assert all(tool.defer == ("auto" if deferred else "never") for tool in mcp)
+    assert all(
+        tool.defer == "never" for tool in observed if not tool.name.startswith("mcp_")
+    )
+    assert setup.client.create_session.await_args.kwargs["tool_search"] == {
+        "enabled": True,
+        "defer_threshold": 1,
+    }
+    await assert_clean(setup)
+
+
+async def test_mcp_tools_over_safety_cap_warn_once(setup, monkeypatch, caplog):
+    monkeypatch.setattr(
+        sys.modules["custom_components.github_copilot.mcp_tools"], "MCP_MAX_TOOLS", 2
+    )
+    notes = mcp_api(tools=[mcp_tool(f"t{i}", read_only=True) for i in range(3)])
+    register_apis(setup, monkeypatch, notes)
+    setup.entry.options.update(mcp_servers=["mcp-notes"])
+
+    for _ in range(2):
+        observed, _ = await call_tools(setup, [], lambda: turn(setup))
+        assert len([tool for tool in observed if tool.name.startswith("mcp_")]) == 2
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "remote MCP tools" in record.message
+    ]
+    assert len(warnings) == 1
     await assert_clean(setup)
