@@ -574,7 +574,7 @@ def _options_schema(
             CONF_PROMPT,
             description={"suggested_value": options.get(CONF_PROMPT, "")},
         )
-    ] = TextSelector()
+    ] = TextSelector(TextSelectorConfig(multiline=True))
     return vol.Schema(fields)
 
 

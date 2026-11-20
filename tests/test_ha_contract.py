@@ -1056,3 +1056,50 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
     finally:
         await backend.async_stop()
         await hass.async_stop()
+
+
+async def test_real_flows_use_multiline_additional_instructions(tmp_path):
+    from homeassistant.const import CONF_PROMPT
+    from homeassistant.core import HomeAssistant
+
+    from custom_components.github_copilot.config_flow import (
+        GitHubCopilotConfigFlow,
+        GitHubCopilotOptionsFlow,
+    )
+    from custom_components.github_copilot.const import DOMAIN
+
+    models = [SimpleNamespace(id="gpt-4.1")]
+    hass = HomeAssistant(str(tmp_path))
+    entry = SimpleNamespace(
+        entry_id="entry",
+        data={},
+        options={"model": "gpt-4.1", CONF_PROMPT: "Line one.\nLine two."},
+    )
+    hass.data[DOMAIN] = {
+        entry.entry_id: SimpleNamespace(
+            is_started=True, async_list_models=AsyncMock(return_value=models)
+        )
+    }
+    setup_flow = GitHubCopilotConfigFlow()
+    setup_flow._models = models
+    options_flow = GitHubCopilotOptionsFlow(entry)
+    try:
+        for flow, step in (
+            (setup_flow, setup_flow.async_step_model),
+            (options_flow, options_flow.async_step_init),
+        ):
+            flow.hass = hass
+            flow.handler = DOMAIN
+            flow.flow_id = "flow"
+            flow.context = {}
+            form = await step()
+            key, selector = next(
+                (key, value)
+                for key, value in form["data_schema"].schema.items()
+                if key == CONF_PROMPT
+            )
+            assert selector.serialize()["selector"]["text"]["multiline"] is True
+            assert selector("Line one.\nLine two.") == "Line one.\nLine two."
+        assert key.description["suggested_value"] == "Line one.\nLine two."
+    finally:
+        await hass.async_stop()
