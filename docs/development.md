@@ -76,10 +76,13 @@ When the optional `COPILOT_ASSIGN_TOKEN` repository secret is set, the watch
 assigns Copilot cloud agent to new test failures. Install failures, which
 usually mean a dependency conflict, are not assigned. When a later version
 fails the same way while Copilot's pull request is open, the watch comments
-`@copilot` on that pull request once per version. If Copilot's pull request was
-closed without a fix, the watch opens a new issue and assigns it again. Without
-the secret, or when assignment fails, issues still open and assignment retries
-on the next failing run. The watch records which versions were listed at
+`@copilot` on that pull request once per version. Pending notifications for
+open issues are retried on later report runs, even if the latest release has
+changed; a version does not need to be retested to retry its notification.
+If Copilot's pull request was closed without a fix, the watch opens a new
+issue and assigns it again. Without the secret, or when assignment fails,
+issues still open and assignment retries on the next failing run.
+The watch records which versions were listed at
 assignment time. If GitHub accepts the assignment but the final issue update
 fails, a later failure can still notify Copilot's open PR about a new version.
 If replacing an issue is interrupted, a later matching failure closes the

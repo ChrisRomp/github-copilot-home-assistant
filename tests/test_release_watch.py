@@ -297,10 +297,12 @@ def test_same_failure_on_later_beta_updates_issue_and_comments_on_copilot_pr():
     # Retesting the version Copilot was assigned for does not mention it.
     reporter = _reporter(api)
     reporter.process(_result("2026.12.0b0"))
+    reporter.queue_pending_notifications()
     assert reporter.copilot_ops == []
 
     reporter = _reporter(api)
     reporter.process(_result("2026.12.0b1"))
+    reporter.queue_pending_notifications()
     assert len(api.issues) == 1
     assert _state(api, 101)["versions"] == ["2026.12.0b0", "2026.12.0b1"]
     assert reporter.copilot_ops == [
@@ -314,6 +316,7 @@ def test_same_failure_on_later_beta_updates_issue_and_comments_on_copilot_pr():
     # Each version is mentioned once.
     reporter = _reporter(api)
     reporter.process(_result("2026.12.0b1"))
+    reporter.queue_pending_notifications()
     assert reporter.copilot_ops == []
 
 
@@ -325,6 +328,7 @@ def test_copilot_comment_retry_does_not_duplicate_post():
     _copilot_pr(api, 101, 7)
     reporter = _reporter(api)
     reporter.process(_result("2026.12.0b1"))
+    reporter.queue_pending_notifications()
     op = reporter.copilot_ops[0]
     copilot = FakeGitHub()
 
@@ -337,6 +341,63 @@ def test_copilot_comment_retry_does_not_duplicate_post():
     assert _run_copilot(api, [op], copilot) == 0
     assert len(copilot.comments[7]) == 1
     assert "2026.12.0b1" in _state(api, 101)["commented"]
+
+
+@pytest.mark.parametrize(
+    ("next_tests", "next_outcome", "expected_versions"),
+    [
+        (
+            ("tests.t::test_a",),
+            "failure",
+            ["2026.12.0b1", "2026.12.0b2"],
+        ),
+        (("tests.t::test_b",), "failure", ["2026.12.0b1"]),
+        ((), "success", []),
+    ],
+    ids=["same-failure", "different-failure", "fixed"],
+)
+def test_report_retries_notifications_after_release_advances(
+    tmp_path, monkeypatch, next_tests, next_outcome, expected_versions
+):
+    api = FakeGitHub()
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b0"))
+    assert _run_copilot(api, reporter.copilot_ops) == 0
+    _copilot_pr(api, 101, 7)
+    api.head_sha = SHA
+    monkeypatch.setattr(watch, "GitHub", lambda *_: api)
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    monkeypatch.setenv("GITHUB_SHA", SHA)
+    monkeypatch.setenv("DEFAULT_BRANCH", "main")
+    results = tmp_path / "results"
+    results.mkdir()
+    plan = tmp_path / "plan.json"
+
+    def report(result):
+        (results / "result.json").write_text(json.dumps(result))
+        watch.main(
+            ["report", "--results", str(results), "--plan-out", str(plan), "--copilot"]
+        )
+        return json.loads(plan.read_text())
+
+    copilot = FakeGitHub()
+    copilot.fail_paths.add("/issues/7/comments")
+    assert _run_copilot(api, report(_result("2026.12.0b1")), copilot) == 1
+    assert _state(api, 101)["commented"] == ["2026.12.0b0"]
+    copilot.fail_paths.clear()
+
+    latest = _result("2026.12.0b2", outcome=next_outcome, tests=next_tests)
+    ops = report(latest)
+    assert [op["version"] for op in ops if op["op"] == "comment"] == expected_versions
+    assert _run_copilot(api, ops, copilot) == 0
+    comments = copilot.comments.get(7, [])
+    assert len(comments) == len(expected_versions)
+    for comment, version in zip(comments, expected_versions, strict=True):
+        assert watch.copilot_notification_marker(101, version) in comment["body"]
+        assert version in _state(api, 101)["commented"]
+    assert report(latest) == []
 
 
 def test_assignment_recovery_notifies_open_pr_about_new_beta():
@@ -357,6 +418,7 @@ def test_assignment_recovery_notifies_open_pr_about_new_beta():
     _copilot_pr(api, 101, 7)
     reporter = _reporter(api)
     reporter.process(_result("2026.12.0b1"))
+    reporter.queue_pending_notifications()
     assert _state(api, 101)["commented"] == ["2026.12.0b0"]
     assert reporter.copilot_ops == [
         {"op": "comment", "issue": 101, "pr": 7, "version": "2026.12.0b1"}
@@ -417,6 +479,7 @@ def test_external_copilot_pr_does_not_affect_issue(state):
 
     reporter = _reporter(api)
     reporter.process(_result("2026.12.0b1"))
+    reporter.queue_pending_notifications()
     assert list(api.issues) == [101]
     assert api.issues[101]["state"] == "open"
     assert reporter.copilot_ops == []

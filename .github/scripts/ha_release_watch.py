@@ -586,6 +586,36 @@ class Reporter:
         elif result["outcome"] == "failure":
             self._record_failure(result)
 
+    def queue_pending_notifications(self) -> None:
+        """Queue undelivered versions after processing this run's results."""
+        if not self.copilot_enabled:
+            return
+        for issue in self.issues:
+            state = issue.state
+            if (
+                not issue.open
+                or not state["assigned"]
+                or state["phase"] not in ("lint", "test")
+            ):
+                continue
+            pending = [v for v in state["versions"] if v not in state["commented"]]
+            if not pending:
+                continue
+            open_pr = next(
+                (number for number, is_open in self.copilot_prs(issue) if is_open),
+                None,
+            )
+            if open_pr is not None:
+                self.copilot_ops.extend(
+                    {
+                        "op": "comment",
+                        "issue": issue.number,
+                        "pr": open_pr,
+                        "version": version,
+                    }
+                    for version in pending
+                )
+
     def _close_passing(self, result: dict[str, Any]) -> None:
         version = result["version"]
         key = parse_version(version)
@@ -652,15 +682,6 @@ class Reporter:
             return
         if not state["assigned"]:
             self.copilot_ops.append({"op": "assign", "issue": match.number})
-        elif open_pr and result["version"] not in state["commented"]:
-            self.copilot_ops.append(
-                {
-                    "op": "comment",
-                    "issue": match.number,
-                    "pr": open_pr,
-                    "version": result["version"],
-                }
-            )
 
     def _create(
         self,
@@ -808,9 +829,10 @@ def run_copilot_ops(
                         "POST",
                         f"/issues/{pr}/comments",
                         {
-                            "body": f"@copilot Home Assistant `{version}` also fails "
-                            f"with the same tests ({run_url}). Make sure the fix also "
-                            f"passes on `{version}`. Details are in #{number}.\n\n"
+                            "body": f"@copilot Home Assistant `{version}` is also "
+                            f"recorded as affected by the failure in #{number}. "
+                            f"Make sure the fix also passes on `{version}`. "
+                            f"Notification run: {run_url}.\n\n"
                             f"{marker}"
                         },
                     )
@@ -1020,6 +1042,7 @@ def cmd_report(args: argparse.Namespace) -> None:
             reporter.ensure_label()
         for result in results:
             reporter.process(result)
+        reporter.queue_pending_notifications()
     except TruncatedError:
         raise SystemExit(
             "Stopped reporting: a GitHub listing exceeded its page budget, so issue "
