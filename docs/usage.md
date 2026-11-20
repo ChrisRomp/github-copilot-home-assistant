@@ -141,7 +141,8 @@ results larger than 16 KB are cut short and marked as incomplete.
 Tool descriptions and results come from the remote server. Copilot is told to
 treat them as untrusted data, not as instructions, but this cannot remove all
 risk. If a server needs you to sign in again, Copilot reports that the server
-needs to be signed in again; reauthenticate the server in Home Assistant. See [conversation data and privacy](#conversation-data-and-privacy).
+needs to be signed in again; reauthenticate the server in Home Assistant. See
+[conversation data and privacy](#conversation-data-and-privacy).
 
 ## AI Tasks
 

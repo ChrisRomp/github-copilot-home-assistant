@@ -224,18 +224,19 @@ def _bounded(data: dict[str, Any]) -> dict[str, Any]:
         text = json.dumps(data, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return {"error": "result_serialization_failed", "error_text": CALL_FAILED}
+    # Only fixed values go in the envelope; remote text stays in the preview.
     envelope: dict[str, Any] = {"status": "incomplete", "reason": "result_too_large"}
     if "error" in data:
-        envelope["error"] = data["error"]
+        envelope["error"] = "mcp_tool_error"
     limit = MCP_MAX_RESULT_BYTES
-    while True:
-        preview = text[:limit]
-        result = {**envelope, "preview": preview}
+    while limit > 0:
+        result = {**envelope, "preview": text[:limit]}
         size = _json_size(result)
         if size <= MCP_MAX_RESULT_BYTES:
             return result
         # Shrink in proportion to the overflow; escaping can multiply the size.
-        limit = max(0, min(limit - 1, limit * MCP_MAX_RESULT_BYTES // size - 64))
+        limit = min(limit - 1, limit * MCP_MAX_RESULT_BYTES // size - 64)
+    return envelope
 
 
 async def async_call_mcp_tool(

@@ -97,7 +97,9 @@ HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py  # cached SDK runtim
   `translations/en.json`; a test enforces this.
 - **SDK upgrades:** Update the pin in both files. Then reverify the native
   runtime contracts, image resource profile, and session-ownership gates before
-  advancing them in `const.py`. Never auto-merge SDK updates.
+  advancing them in `const.py`. Also confirm that `MCP_MAX_RESULT_BYTES` stays
+  below the SDK's large-output default (20,480 bytes in the current pin). Never
+  auto-merge SDK updates.
 - **Tests:** `tests/conftest.py` supplies lightweight HA boundary doubles for
   unit tests. Behavior that depends on real HA objects belongs in the gated
   `tests/test_ha_contract.py` or `tests/test_ai_task.py`. Tests must never

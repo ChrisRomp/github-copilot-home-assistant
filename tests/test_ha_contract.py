@@ -1095,14 +1095,13 @@ async def test_real_mcp_client_tools_are_discovered_gated_and_called(
         )
 
     calls = []
+    responses = [{"content": [{"type": "text", "text": "hit"}], "isError": False}]
 
     @asynccontextmanager
     async def fake_client(hass, url, token_manager):
         async def call_tool(name, arguments):
             calls.append((name, arguments))
-            return CallToolResult.model_validate(
-                {"content": [{"type": "text", "text": "hit"}], "isError": False}
-            )
+            return CallToolResult.model_validate(responses[-1])
 
         yield SimpleNamespace(call_tool=call_tool), None
 
@@ -1143,6 +1142,17 @@ async def test_real_mcp_client_tools_are_discovered_gated_and_called(
         assert calls == [("search", {"query": "milk"})]
         assert result["content"][0]["text"] == "hit"
         assert "error" not in result
+
+        # HA 2026.10 keeps unknown result fields; 2026.11 drops them.
+        responses.append({"content": [], "isError": True, "error": "e" * 20_000})
+        result = await asyncio.wait_for(
+            async_call_mcp_tool(
+                hass, lambda: options, bindings[0], {"query": "milk"}, "call"
+            ),
+            5,
+        )
+        assert result["error"] == "mcp_tool_error"
+        assert len(json.dumps(result).encode()) <= 16_000
 
         options["mcp_write_servers"] = ["mcp-notes"]
         bindings = await async_mcp_bindings(hass, options, context)

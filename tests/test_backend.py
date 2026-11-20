@@ -4367,6 +4367,8 @@ SDK_INLINE_OUTPUT_BYTES = 20_480
         ({"text": "x" * 25_000}, False),
         ({"text": '\\"' * 25_000}, False),
         ({"text": "\x01é" * 20_000}, True),
+        # HA 2026.10 keeps unknown result fields, so a server can send this.
+        ({"error": "e" * 20_000, "content": []}, True),
     ],
 )
 async def test_mcp_results_stay_inline_after_framing(
@@ -4393,7 +4395,7 @@ async def test_mcp_results_stay_inline_after_framing(
     payload = json.loads(text.split("\n\n", 1)[1])
     assert payload["status"] == "incomplete"
     assert payload["preview"]
-    assert ("error" in payload) is error
+    assert payload.get("error") == ("mcp_tool_error" if error else None)
     assert results["read"].result_type == ("failure" if error else "success")
     await assert_clean(setup)
 
