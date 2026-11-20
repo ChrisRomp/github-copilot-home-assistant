@@ -623,6 +623,7 @@ class Reporter:
             return
         match = max(candidates, key=lambda issue: issue.number)
 
+        self._close_previous_issue(match)
         state = match.state
         if not state["assigned"] and match.assignees & COPILOT_LOGINS:
             # The assignment can succeed even if saving its marker failed.
@@ -703,6 +704,20 @@ class Reporter:
         if self.copilot_enabled and assignable:
             self.copilot_ops.append({"op": "assign", "issue": tracked.number})
         return tracked
+
+    def _close_previous_issue(self, replacement: Tracked) -> None:
+        previous = replacement.state.get("previous")
+        original = next(
+            (issue for issue in self.issues if issue.number == previous), None
+        )
+        if (
+            original is not None
+            and original.open
+            and original.state["line"] == replacement.state["line"]
+            and original.state["sig"] == replacement.state["sig"]
+        ):
+            self._close(original, "not_planned")
+            print(f"Closed replaced issue #{original.number}.")
 
     def _close(self, issue: Tracked, reason: str) -> None:
         self.api.request(

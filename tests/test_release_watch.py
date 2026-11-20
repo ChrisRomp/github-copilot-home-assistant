@@ -387,6 +387,26 @@ def test_closed_copilot_pr_starts_new_issue():
     assert reporter.copilot_ops == [{"op": "assign", "issue": 102}]
 
 
+def test_interrupted_replacement_closes_previous_issue_on_next_failure():
+    api = FakeGitHub()
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b0"))
+    assert _run_copilot(api, reporter.copilot_ops) == 0
+    _copilot_pr(api, 101, 7, state="closed")
+    api.fail_patch_paths.add("/issues/101")
+
+    with pytest.raises(watch.GitHubError):
+        _reporter(api).process(_result("2026.12.0b1"))
+    assert api.issues[101]["state"] == "open"
+    assert _state(api, 102)["previous"] == 101
+
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b1"))
+    assert api.issues[101]["state"] == "closed"
+    assert api.issues[101]["state_reason"] == "not_planned"
+    assert sorted(api.issues) == [101, 102]
+
+
 @pytest.mark.parametrize("state", ["open", "closed"])
 def test_external_copilot_pr_does_not_affect_issue(state):
     api = FakeGitHub()

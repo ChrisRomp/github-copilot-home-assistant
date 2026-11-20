@@ -82,6 +82,8 @@ the secret, or when assignment fails, issues still open and assignment retries
 on the next failing run. The watch records which versions were listed at
 assignment time. If GitHub accepts the assignment but the final issue update
 fails, a later failure can still notify Copilot's open PR about a new version.
+If replacing an issue is interrupted, a later matching failure closes the
+stale issue referenced by its replacement.
 
 `GITHUB_TOKEN` cannot assign Copilot, so the secret must be a fine-grained
 personal access token limited to this repository, with read and write access
