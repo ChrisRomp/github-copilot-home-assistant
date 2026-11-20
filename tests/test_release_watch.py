@@ -606,3 +606,18 @@ def test_report_distinguishes_failures_beyond_artifact_display_limit(tmp_path):
         assert result["failing_total"] == len(common) + 1
         _reporter(api).process(result)
     assert sorted(api.issues) == [101, 102]
+
+
+@pytest.mark.parametrize(("method", "expected_calls"), [("POST", 1), ("PATCH", 3)])
+def test_github_does_not_retry_post_after_timeout(monkeypatch, method, expected_calls):
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append(request.get_method())
+        raise TimeoutError
+
+    monkeypatch.setattr(watch.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(watch.time, "sleep", lambda _: None)
+    with pytest.raises(TimeoutError):
+        watch.GitHub("token", "o/r").request(method, "/issues", {"title": "x"})
+    assert calls == [method] * expected_calls

@@ -232,7 +232,9 @@ class GitHub:
                 "Content-Type": "application/json",
             },
         )
-        return _fetch_json(request)
+        # A POST whose response is lost may already have created its issue or
+        # comment. Do not retry it here; the next run rechecks state first.
+        return _fetch_json(request, attempts=1 if method == "POST" else 3)
 
     def paginate(
         self, path: str, params: dict[str, Any], max_pages: int
