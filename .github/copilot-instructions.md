@@ -68,6 +68,9 @@ HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py  # cached SDK runtim
 
 ## Key conventions
 
+- **Code review:** Post actionable findings as inline review comments on the
+  relevant changed lines. A summary comment may recap them, but must not replace
+  them.
 - **Permissions are separate opt-ins, rechecked on every tool call.**
   - Device control is limited to Assist-exposed entities.
   - Admin tools require the current caller to be an HA administrator.
