@@ -436,12 +436,20 @@ name. Assist and administrator rechecks do not apply to MCP tools.
   object is still registered.
 - SDK names are `mcp_<api hash>_<tool>`, limited to `[A-Za-z0-9_-]` and 64
   characters, with a name hash suffix when sanitized.
-- Remote descriptions are whitespace-normalized, labelled as untrusted, and
-  limited to `MCP_MAX_DESCRIPTION`. They enter SDK tool definitions, never system
-  instructions. Per request, at most `MCP_MAX_TOOLS` tools are provided. Tools
-  with unsupported schemas are skipped and counted in the log.
-- Results larger than `MCP_MAX_RESULT_BYTES` return `status: incomplete` with a
-  preview. Call exceptions map to fixed categories (`reauth_required`,
+- Descriptions start with fixed text: the access label, the server and tool
+  names reduced to safe characters and 64 characters each, and an untrusted-data
+  label. Only the remote description after it is cut to `MCP_MAX_DESCRIPTION`.
+  Descriptions enter SDK tool definitions, never system instructions.
+- Per request, at most `MCP_MAX_TOOLS` tools are provided. A tool is skipped when
+  its schema does not convert to an object, is larger than
+  `MCP_MAX_SCHEMA_BYTES`, or would take the MCP definitions over
+  `MCP_MAX_DEFINITION_BYTES`. Each skipped tool is warned about once per entry
+  runtime; `set_tools` sends the definitions on every turn.
+- `MCP_MAX_RESULT_BYTES` bounds the final serialized result, including the
+  re-escaped preview of an oversized result (`status: incomplete`). It stays
+  below the SDK's 20,480-byte large-output default, so results stay inline. The
+  runtime would otherwise replace them with temp-file references that the model
+  cannot read. Call exceptions map to fixed categories (`reauth_required`,
   `mcp_call_failed`) because MCP error text can contain server URLs.
 - Cached sessions receive a new tool list through `set_tools` on each turn, so a
   changed server tool list does not need a new session key.

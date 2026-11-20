@@ -53,7 +53,7 @@
           "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities.",
           "mcp_servers": "Servers set up with the Model Context Protocol integration. Conversations from any caller, including Assist satellites without a signed-in user, and AI Tasks can use their read-only tools. Tool descriptions and results come from the remote server and are treated as untrusted data.",
-          "mcp_write_servers": "Also provide tools that the server does not mark as read-only. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee."
+          "mcp_write_servers": "Also provide tools that a server does not mark as read-only. The server must also be selected above. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee."
         }
       }
     },
@@ -107,7 +107,7 @@
           "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
           "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities.",
           "mcp_servers": "Servers set up with the Model Context Protocol integration. Conversations from any caller, including Assist satellites without a signed-in user, and AI Tasks can use their read-only tools. Tool descriptions and results come from the remote server and are treated as untrusted data.",
-          "mcp_write_servers": "Also provide tools that the server does not mark as read-only. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee."
+          "mcp_write_servers": "Also provide tools that a server does not mark as read-only. The server must also be selected above. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee."
         }
       }
     },

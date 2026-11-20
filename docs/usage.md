@@ -120,6 +120,8 @@ calendar, or search service. To let Copilot use a server's tools:
 2. Go to **Settings > Devices & services > GitHub Copilot > Configure**.
 3. Select the server in **MCP servers available to Copilot**.
 4. Optional: select the server in **MCP servers allowed to use write tools**.
+   A server must also be selected in step 3; otherwise its write permission is
+   not saved.
 
 Copilot does not get MCP tools automatically, and it does not use HA's other
 LLM API settings for them. The settings apply to conversations from any caller,
@@ -132,13 +134,14 @@ server and is not a guarantee, so select only servers that you trust.
 The integration checks the settings again before each tool call. If you remove a
 server or its write permission, or the MCP integration unloads, new calls fail.
 A server's tool list can change while Home Assistant runs; each new request uses
-the current list. At most 64 MCP tools are provided for each request. Tool
-results larger than 32 KB are cut short and marked as incomplete.
+the current list. At most 64 MCP tools are provided for each request. Tools with
+very large parameter definitions are skipped, and a warning is logged. Tool
+results larger than 16 KB are cut short and marked as incomplete.
 
-Tool descriptions and results come from the remote server. Copilot treats them as
-untrusted data, not as instructions. If a server needs you to sign in again,
-Copilot reports that it is unavailable; reauthenticate the server in Home
-Assistant. See [conversation data and privacy](#conversation-data-and-privacy).
+Tool descriptions and results come from the remote server. Copilot is told to
+treat them as untrusted data, not as instructions, but this cannot remove all
+risk. If a server needs you to sign in again, Copilot reports that the server
+needs to be signed in again; reauthenticate the server in Home Assistant. See [conversation data and privacy](#conversation-data-and-privacy).
 
 ## AI Tasks
 
