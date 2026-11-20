@@ -104,6 +104,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
         self._oauth_task: asyncio.Task[dict[str, Any]] | None = None
         self._oauth_lock = asyncio.Lock()
         self._removed = False
+        self._mcp_form_entries: dict[str, str] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -215,18 +216,11 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._removed:
             return self.async_abort(reason="oauth_failed")
         if user_input is not None:
-            if (
-                user_input.get(CONF_ENABLE_HOME_ASSISTANT_API)
-                and not home_assistant_api_supported()
-            ):
+            if errors := _form_errors(self.hass, user_input, self._mcp_form_entries):
                 return self.async_show_form(
                     step_id="model",
-                    data_schema=_options_schema(
-                        self._model_options(), user_input, self.hass
-                    ),
-                    errors={
-                        CONF_ENABLE_HOME_ASSISTANT_API: "home_assistant_api_unavailable"
-                    },
+                    data_schema=self._redisplay_schema(user_input),
+                    errors=errors,
                 )
             self._credentials[CONF_MODEL_BILLING] = model_billing(
                 user_input[CONF_MODEL], self._models
@@ -258,7 +252,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
                 options[CONF_ENABLE_HOME_ASSISTANT_API] = user_input[
                     CONF_ENABLE_HOME_ASSISTANT_API
                 ]
-            _apply_mcp_options(self.hass, options, user_input, {})
+            _apply_mcp_options(self.hass, options, user_input, self._mcp_form_entries)
             options[CONF_LLM_HASS_API] = selected_llm_apis(options)
             return self.async_create_entry(
                 title=NAME,
@@ -268,7 +262,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="model",
-            data_schema=_options_schema(self._model_options(), {}, self.hass),
+            data_schema=self._form_schema({}),
         )
 
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> dict[str, Any]:
@@ -332,6 +326,17 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
             )
         return await self.async_step_model()
 
+    def _form_schema(self, values: Mapping[str, Any]) -> vol.Schema:
+        """Build the form and remember the MCP entries it represents."""
+        self._mcp_form_entries = _mcp_form_entries(self.hass, values)
+        return _options_schema(self._model_options(), values, self.hass)
+
+    def _redisplay_schema(self, user_input: Mapping[str, Any]) -> vol.Schema:
+        """Show submitted values again, judged against the form's own entries."""
+        return self._form_schema(
+            {**user_input, CONF_MCP_SERVER_ENTRIES: self._mcp_form_entries}
+        )
+
     def _model_options(self) -> list[SelectOptionDict]:
         """Convert SDK model records to Home Assistant selector options."""
         return [
@@ -369,6 +374,7 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._entry = config_entry
         self._models: list[Any] = []
+        self._mcp_form_entries: dict[str, str] = {}
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -376,18 +382,11 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
         """Show editable integration options."""
         if user_input is not None:
             options = dict(user_input)
-            if (
-                options.get(CONF_ENABLE_HOME_ASSISTANT_API)
-                and not home_assistant_api_supported()
-            ):
+            if errors := _form_errors(self.hass, options, self._mcp_form_entries):
                 return self.async_show_form(
                     step_id="init",
-                    data_schema=_options_schema(
-                        self._model_options(), options, self.hass
-                    ),
-                    errors={
-                        CONF_ENABLE_HOME_ASSISTANT_API: "home_assistant_api_unavailable"
-                    },
+                    data_schema=self._redisplay_schema(options),
+                    errors=errors,
                 )
             options.setdefault(
                 CONF_AI_TASK_MODEL,
@@ -403,7 +402,9 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             )
             device_control_enabled = options[CONF_ENABLE_DEVICE_CONTROL]
             options[CONF_ENABLE_DEVICE_CONTROL] = device_control_enabled
-            _apply_mcp_options(self.hass, options, dict(options), self._entry.options)
+            _apply_mcp_options(
+                self.hass, options, dict(options), self._mcp_form_entries
+            )
             options[CONF_LLM_HASS_API] = selected_llm_apis(options)
             selected_model = options[CONF_MODEL]
             billing = model_billing(selected_model, self._models)
@@ -489,14 +490,12 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             step_id="init",
             errors=errors,
             description_placeholders=placeholders,
-            data_schema=_options_schema(
-                self._model_options(),
+            data_schema=self._form_schema(
                 {
                     **self._entry.options,
                     CONF_MODEL: default_model,
                     CONF_AI_TASK_MODEL: task_default,
-                },
-                self.hass,
+                }
             ),
         )
 
@@ -509,6 +508,17 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             self.hass, self._entry, OAUTH_CLIENT_ID
         ).async_get_access_token()
         return await async_probe_models(token, flow_id=uuid.uuid4().hex, hass=self.hass)
+
+    def _form_schema(self, values: Mapping[str, Any]) -> vol.Schema:
+        """Build the form and remember the MCP entries it represents."""
+        self._mcp_form_entries = _mcp_form_entries(self.hass, values)
+        return _options_schema(self._model_options(), values, self.hass)
+
+    def _redisplay_schema(self, user_input: Mapping[str, Any]) -> vol.Schema:
+        """Show submitted values again, judged against the form's own entries."""
+        return self._form_schema(
+            {**user_input, CONF_MCP_SERVER_ENTRIES: self._mcp_form_entries}
+        )
 
     def _model_options(self) -> list[SelectOptionDict]:
         """Convert SDK models to HA selector options."""
@@ -631,16 +641,60 @@ def _mcp_server_options(
     return choices
 
 
+def _mcp_form_entries(hass: Any, values: Mapping[str, Any]) -> dict[str, str]:
+    """Map each server choice in a form to the MCP entry it stands for.
+
+    A loaded server stands for its current entry; one that is not loaded keeps
+    the entry it was saved with.
+    """
+    apis = registered_mcp_apis(hass)
+    saved = mcp_server_entries(values)
+    entries = {}
+    for choice in _mcp_server_options(hass, values):
+        server = choice["value"]
+        entry_id = mcp_entry_id(apis[server]) if server in apis else saved.get(server)
+        if entry_id is not None:
+            entries[server] = entry_id
+    return entries
+
+
+def _form_errors(
+    hass: Any, user_input: Mapping[str, Any], form_entries: Mapping[str, str]
+) -> dict[str, str]:
+    """Report every submit problem at once, so none is hidden by another."""
+    errors = {}
+    if (
+        user_input.get(CONF_ENABLE_HOME_ASSISTANT_API)
+        and not home_assistant_api_supported()
+    ):
+        errors[CONF_ENABLE_HOME_ASSISTANT_API] = "home_assistant_api_unavailable"
+    if _mcp_servers_changed(hass, user_input, form_entries):
+        errors["base"] = "mcp_server_changed"
+    return errors
+
+
+def _mcp_servers_changed(
+    hass: Any, user_input: Mapping[str, Any], form_entries: Mapping[str, str]
+) -> bool:
+    """Detect a selected server whose MCP entry changed after the form opened."""
+    apis = registered_mcp_apis(hass)
+    return any(
+        server in apis and mcp_entry_id(apis[server]) != form_entries.get(server)
+        for server in user_input.get(CONF_MCP_SERVERS) or []
+        if isinstance(server, str)
+    )
+
+
 def _apply_mcp_options(
     hass: Any,
     options: dict[str, Any],
     user_input: Mapping[str, Any],
-    previous: Mapping[str, Any],
+    form_entries: Mapping[str, str],
 ) -> None:
-    """Store non-empty selections bound to the MCP config entry chosen now.
+    """Store non-empty selections bound to the MCP entries the form showed.
 
     Write grants need a selected server. A server that is not loaded keeps the
-    entry it was bound to before, so a temporary unload keeps its grants.
+    entry the form showed for it, so a temporary unload keeps its grants.
     """
     servers = [
         server
@@ -653,11 +707,10 @@ def _apply_mcp_options(
         if server in servers
     ]
     apis = registered_mcp_apis(hass)
-    saved_entries = mcp_server_entries(previous)
     entries = {}
     for server in servers:
         entry_id = (
-            mcp_entry_id(apis[server]) if server in apis else saved_entries.get(server)
+            mcp_entry_id(apis[server]) if server in apis else form_entries.get(server)
         )
         if entry_id is not None:
             entries[server] = entry_id

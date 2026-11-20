@@ -76,7 +76,8 @@
     },
     "error": {
       "invalid_pat": "Use a fine-grained PAT with Copilot Requests permission. Classic PATs are not supported.",
-      "home_assistant_api_unavailable": "Administrator tools require Home Assistant 2026.11 or newer. Turn them off or update Home Assistant."
+      "home_assistant_api_unavailable": "Administrator tools require Home Assistant 2026.11 or newer. Turn them off or update Home Assistant.",
+      "mcp_server_changed": "An MCP server was removed and set up again while this form was open. Select it again, then save."
     }
   },
   "options": {
@@ -121,7 +122,8 @@
       "home_assistant_api_unavailable": "Administrator tools require Home Assistant 2026.11 or newer. Turn them off or update Home Assistant.",
       "task_model_unavailable": "The saved AI Task model is unavailable. An available choice is shown; select a model and save.",
       "model_unavailable": "The previously selected model {model} is no longer available. Choose another model and save.",
-      "model_unavailable_fallback": "The previously selected model {model} is no longer available. Conversations are using {fallback}, which is preselected. Choose a model and save."
+      "model_unavailable_fallback": "The previously selected model {model} is no longer available. Conversations are using {fallback}, which is preselected. Choose a model and save.",
+      "mcp_server_changed": "An MCP server was removed and set up again while this form was open. Select it again, then save."
     }
   },
   "issues": {

@@ -468,3 +468,96 @@ async def test_mcp_servers_bind_entries_keep_unloaded_and_reselect_replaced(
     }
     with pytest.raises(vol.Invalid):
         form["data_schema"]({"mcp_servers": ["mcp-unknown"]})
+
+
+def _mcp_api(api_id, entry_id):
+    class ModelContextProtocolAPI:
+        name = api_id
+
+    ModelContextProtocolAPI.__module__ = "homeassistant.components.mcp"
+    api = ModelContextProtocolAPI()
+    api.id = api_id
+    api.coordinator = SimpleNamespace(config_entry=SimpleNamespace(entry_id=entry_id))
+    return api
+
+
+def _suggested(form, key):
+    return next(
+        marker.description["suggested_value"]
+        for marker in form["data_schema"].schema
+        if str(marker) == key
+    )
+
+
+async def test_mcp_entry_replaced_while_form_is_open_must_be_reselected(
+    options_setup, monkeypatch
+):
+    llm = sys.modules["homeassistant.helpers.llm"]
+    apis = [_mcp_api("mcp-notes", "entry-old"), _mcp_api("mcp-offline", "entry-x")]
+    monkeypatch.setattr(llm, "async_get_apis", lambda hass: list(apis), raising=False)
+    setup = options_setup
+    setup.entry.options.update(
+        mcp_servers=["mcp-notes", "mcp-offline"],
+        mcp_write_servers=["mcp-notes", "mcp-offline"],
+        mcp_server_entries={"mcp-notes": "entry-old", "mcp-offline": "entry-off"},
+    )
+    apis.pop()  # mcp-offline is not loaded when the form opens.
+    form = await setup.flow.async_step_init()
+    assert _suggested(form, "mcp_servers") == ["mcp-notes", "mcp-offline"]
+    submitted = form["data_schema"](
+        {
+            "mcp_servers": ["mcp-notes", "mcp-offline"],
+            "mcp_write_servers": ["mcp-notes", "mcp-offline"],
+        }
+    )
+    # Both add-on entries are removed and set up again before Submit.
+    apis[:] = [_mcp_api("mcp-notes", "entry-new"), _mcp_api("mcp-offline", "entry-y")]
+
+    result = await setup.flow.async_step_init(submitted)
+
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "mcp_server_changed"}
+    assert _suggested(result, "mcp_servers") == []
+    setup.flow.hass.config_entries.async_update_entry.assert_not_called()
+    resubmitted = result["data_schema"]({"mcp_servers": ["mcp-notes"]})
+    saved = await setup.flow.async_step_init(resubmitted)
+    assert saved["data"]["mcp_server_entries"] == {"mcp-notes": "entry-new"}
+
+
+async def test_mcp_selections_survive_redisplay_after_admin_error(
+    options_setup, monkeypatch
+):
+    llm = sys.modules["homeassistant.helpers.llm"]
+    apis = [_mcp_api("mcp-notes", "entry-notes")]
+    monkeypatch.setattr(llm, "async_get_apis", lambda hass: apis, raising=False)
+    setup = options_setup
+    setup.entry.options.update(
+        mcp_servers=["mcp-notes"],
+        mcp_write_servers=["mcp-notes"],
+        mcp_server_entries={"mcp-notes": "entry-notes"},
+        enable_home_assistant_api=True,
+    )
+    form = await setup.flow.async_step_init()
+    submitted = form["data_schema"](
+        {
+            "mcp_servers": ["mcp-notes"],
+            "mcp_write_servers": ["mcp-notes"],
+            "enable_home_assistant_api": True,
+        }
+    )
+
+    result = await setup.flow.async_step_init(submitted)
+
+    assert result["errors"] == {
+        "enable_home_assistant_api": "home_assistant_api_unavailable"
+    }
+    assert _suggested(result, "mcp_servers") == ["mcp-notes"]
+    assert _suggested(result, "mcp_write_servers") == ["mcp-notes"]
+
+    # A replacement found during the same submit is reported, not just dropped.
+    apis[:] = [_mcp_api("mcp-notes", "entry-new")]
+    result = await setup.flow.async_step_init(submitted)
+    assert result["errors"] == {
+        "enable_home_assistant_api": "home_assistant_api_unavailable",
+        "base": "mcp_server_changed",
+    }

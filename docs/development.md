@@ -434,7 +434,11 @@ name. Assist and administrator rechecks do not apply to MCP tools.
   that add-on's MCP entry is removed and set up again. A server whose entry
   changed is unavailable and is not preselected until the owner selects it
   again. Saved servers that are not loaded stay selectable, keep their entry, and
-  are skipped at runtime.
+  are skipped at runtime. Each setup and options form records the entry that
+  each server choice stands for when it is shown. If a selected server's entry
+  changes before Submit, the form is shown again with `mcp_server_changed` and
+  nothing is saved. A form shown again after an error keeps the submitted
+  selections that still match the recorded entries.
 - Access: any conversation caller and AI Tasks. Tools are exposed only when
   `annotations.read_only` is true, unless the server has a write grant.
 - Every call rechecks the selection, the write grant, the entry binding, and
