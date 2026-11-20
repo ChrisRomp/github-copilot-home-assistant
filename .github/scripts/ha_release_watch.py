@@ -109,10 +109,10 @@ def python_for(requires_python: str | None) -> str:
     upper: tuple[int, int, int] | None = None
     clauses = (c.strip() for c in (requires_python or "").split(","))
     for clause in filter(None, clauses):
-        match = re.fullmatch(r"(>=|>|<=|<|!=)\s*(\d+(?:\.\d+){0,2})(\.\*)?", clause)
+        match = re.fullmatch(r"(>=|>|<=|<)\s*(\d+(?:\.\d+){0,2})", clause)
         if not match:
-            raise ValueError("unsupported requires_python clause")
-        operator, text, _ = match.groups()
+            raise ValueError(f"unsupported requires_python clause: {clause!r}")
+        operator, text = match.groups()
         bound = _python_tuple(text)
         if operator == ">=":
             lower = max(lower, bound)
@@ -204,8 +204,8 @@ def _fetch_json(request: urllib.request.Request, attempts: int = 3) -> Any:
 class GitHub:
     def __init__(self, token: str, repo: str) -> None:
         self.token = token
-        self.repo = repo
-        self.api_url = os.environ.get("GITHUB_API_URL") or "https://api.github.com"
+        api_url = os.environ.get("GITHUB_API_URL") or "https://api.github.com"
+        self.repo_url = f"{api_url}/repos/{repo}"
 
     def request(
         self,
@@ -214,7 +214,7 @@ class GitHub:
         body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        url = f"{self.api_url}/repos/{self.repo}{path}"
+        url = f"{self.repo_url}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
         request = urllib.request.Request(
@@ -368,6 +368,11 @@ def sanitize_test_id(test_id: str) -> str:
     return TEST_ID_UNSAFE.sub("_", test_id)[:MAX_TEST_ID]
 
 
+def signature(phase: str | None, tests: list[str]) -> str:
+    payload = json.dumps([phase, sorted(set(tests))])
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
 def validate_result(data: Any) -> dict[str, Any] | None:
     """Return a validated result, or ``None`` when it is not trustworthy data."""
     if not isinstance(data, dict):
@@ -383,7 +388,10 @@ def validate_result(data: Any) -> dict[str, Any] | None:
     if not isinstance(python, str) or not PYTHON_RE.fullmatch(python):
         return None
     phase = data.get("phase")
-    if data["outcome"] == "failure" and phase not in PHASES:
+    sig = data.get("sig")
+    if data["outcome"] == "failure" and (
+        phase not in PHASES or not isinstance(sig, str) or not SIG_RE.fullmatch(sig)
+    ):
         return None
     tests = data.get("failing_tests", [])
     if not isinstance(tests, list) or not all(isinstance(t, str) for t in tests):
@@ -400,14 +408,10 @@ def validate_result(data: Any) -> dict[str, Any] | None:
         "python": python,
         "outcome": data["outcome"],
         "phase": phase if phase in PHASES else None,
+        "sig": sig if data["outcome"] == "failure" else None,
         "failing_tests": clean,
         "failing_total": max(total, len(clean)),
     }
-
-
-def signature(result: dict[str, Any]) -> str:
-    payload = json.dumps([result["phase"], result["failing_tests"]])
-    return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
 # Issue rendering
@@ -534,6 +538,8 @@ class Reporter:
             if (
                 event.get("event") == "cross-referenced"
                 and "pull_request" in source
+                and (source.get("repository_url") or "").lower()
+                == self.api.repo_url.lower()
                 and (source.get("user") or {}).get("login") in COPILOT_LOGINS
             ):
                 prs[int(source["number"])] = source.get("state") == "open"
@@ -551,9 +557,10 @@ class Reporter:
         for issue in self.issues:
             if not issue.open or issue.state["line"] != result["line"]:
                 continue
-            if version in issue.state["versions"]:
+            newest = max(parse_version(v) for v in issue.state["versions"])
+            if key == newest:
                 note, reason = "Closing as fixed.", "completed"
-            elif key > max(parse_version(v) for v in issue.state["versions"]):
+            elif key > newest:
                 note = f"Closing as superseded: the newer `{version}` passes."
                 reason = "not_planned"
             else:
@@ -567,7 +574,7 @@ class Reporter:
             print(f"Closed issue #{issue.number} ({reason}).")
 
     def _record_failure(self, result: dict[str, Any]) -> None:
-        sig = signature(result)
+        sig = result["sig"]
         candidates = [
             issue
             for issue in self.issues
@@ -887,12 +894,14 @@ def cmd_result(args: argparse.Namespace) -> None:
         "python": args.python,
         "outcome": args.outcome,
         "phase": phase if args.outcome == "failure" else None,
+        "sig": signature(phase, tests) if args.outcome == "failure" else None,
         "failing_tests": tests[:MAX_FAILING_TESTS],
         "failing_total": len(tests),
     }
-    if validate_result(data) is None:
+    result = validate_result(data)
+    if result is None:
         raise SystemExit("Result data failed validation.")
-    Path(args.out).write_text(json.dumps(data))
+    Path(args.out).write_text(json.dumps(result))
     print(f"Recorded {args.outcome} for {args.version}.")
 
 

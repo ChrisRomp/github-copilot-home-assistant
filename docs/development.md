@@ -47,7 +47,8 @@ release candidate when that beta is for a newer month, such as `2026.12.0b0`
 before 2026.12.0 ships. Older month lines are covered only by the CI matrix.
 A release that already passed on the current default-branch commit is skipped
 unless it has an open failure issue. Run the workflow manually to test one
-exact version or to force a retest.
+exact version or to force a retest. Manual runs on other branches can test changes
+without updating compatibility issues or contacting Copilot.
 
 The watch installs in watch mode, which bypasses the development HA range so
 betas outside the supported range can be tested, and then runs `pip check`. It
@@ -64,10 +65,10 @@ them stays a deliberate change.
 
 Failures open issues labeled `ha-compat`. An issue groups failures by month
 line and failure signature, which is the failing step plus the failing test IDs.
-A later version that fails the same way updates the existing issue. A passing
-version closes its issue as fixed, and closes older issues in the same month
-line as superseded. Each issue body carries a hidden state marker that the
-workflow validates before use; do not edit it by hand.
+A later version that fails the same way updates the existing issue. The issue
+closes as fixed when its newest affected version passes, or as superseded when
+a newer version in the same month passes. Each issue body carries a hidden
+state marker that the workflow validates before use; do not edit it by hand.
 
 When the optional `COPILOT_ASSIGN_TOKEN` repository secret is set, the watch
 assigns Copilot cloud agent to new test failures. Install failures, which

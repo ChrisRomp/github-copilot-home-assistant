@@ -96,6 +96,9 @@ def test_python_for_intersects_with_project_minimum():
         watch.python_for("<3.14")
     with pytest.raises(ValueError):
         watch.python_for("~=3.14")
+    for clause in ("!=3.14.*", "!=3.14.2"):
+        with pytest.raises(ValueError, match="unsupported requires_python clause"):
+            watch.python_for(f">=3.14.2,{clause}")
 
 
 def test_validate_result_rejects_and_sanitizes():
@@ -105,6 +108,7 @@ def test_validate_result_rejects_and_sanitizes():
         "python": "3.14",
         "outcome": "failure",
         "phase": "test",
+        "sig": "abcdef012345",
         "failing_tests": ["tests.test_x::test_a[`$(id)`]"],
         "failing_total": 1,
     }
@@ -116,6 +120,7 @@ def test_validate_result_rejects_and_sanitizes():
         ("sha", "abc"),
         ("outcome", "maybe"),
         ("phase", "deploy"),
+        ("sig", "invalid"),
         ("python", "3.14; x"),
     ):
         assert watch.validate_result({**base, key: value}) is None
@@ -139,6 +144,8 @@ def test_failing_tests_reads_junit(tmp_path):
 
 class FakeGitHub:
     """In-memory stand-in for the GitHub issues API."""
+
+    repo_url = "https://api.github.com/repos/o/r"
 
     def __init__(self):
         self.issues: dict[int, dict] = {}
@@ -191,6 +198,9 @@ def _result(version, outcome="failure", tests=("tests.t::test_a",), phase="test"
             "python": "3.14",
             "outcome": outcome,
             "phase": phase if outcome == "failure" else None,
+            "sig": watch.signature(phase, list(tests))
+            if outcome == "failure"
+            else None,
             "failing_tests": list(tests) if outcome == "failure" else [],
         }
     )
@@ -209,13 +219,14 @@ def _state(api, number):
     return watch.parse_marker(api.issues[number]["body"])
 
 
-def _copilot_pr(api, issue, pr, state="open"):
+def _copilot_pr(api, issue, pr, state="open", repo="o/r"):
     api.timelines[issue] = [
         {
             "event": "cross-referenced",
             "source": {
                 "issue": {
                     "number": pr,
+                    "repository_url": f"https://api.github.com/repos/{repo}",
                     "state": state,
                     "pull_request": {},
                     "user": {"login": "Copilot"},
@@ -299,6 +310,31 @@ def test_closed_copilot_pr_starts_new_issue():
     assert reporter.copilot_ops == [{"op": "assign", "issue": 102}]
 
 
+@pytest.mark.parametrize("state", ["open", "closed"])
+def test_external_copilot_pr_does_not_affect_issue(state):
+    api = FakeGitHub()
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b0"))
+    assert _run_copilot(api, reporter.copilot_ops) == 0
+    _copilot_pr(api, 101, 7, state=state, repo="fork/r")
+
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b1"))
+    assert list(api.issues) == [101]
+    assert api.issues[101]["state"] == "open"
+    assert reporter.copilot_ops == []
+
+
+def test_older_passing_version_cannot_close_grouped_issue():
+    api = FakeGitHub()
+    _reporter(api).process(_result("2026.12.0b9"))
+    _reporter(api).process(_result("2026.12.0b10"))
+    _reporter(api).process(_result("2026.12.0b9", outcome="success"))
+    assert api.issues[101]["state"] == "open"
+    _reporter(api).process(_result("2026.12.0b10", outcome="success"))
+    assert api.issues[101]["state_reason"] == "completed"
+
+
 def test_passing_versions_close_fixed_and_superseded_issues():
     api = FakeGitHub()
     _reporter(api).process(_result("2026.12.0b0"))
@@ -349,26 +385,40 @@ def test_copilot_ops_record_success_and_retry_failures():
     assert len(copilot.calls) == calls
 
 
-def test_result_command_writes_validated_artifact(tmp_path):
+def test_report_distinguishes_failures_beyond_artifact_display_limit(tmp_path):
     (tmp_path / "phase").write_text("test\n")
     out = tmp_path / "result.json"
-    watch.main(
-        [
-            "result",
-            "--version",
-            "2026.12.0b0",
-            "--sha",
-            SHA2,
-            "--python",
-            "3.14",
-            "--outcome",
-            "failure",
-            "--phase-file",
-            str(tmp_path / "phase"),
-            "--junit",
-            str(tmp_path / "missing.xml"),
-            "--out",
-            str(out),
-        ]
-    )
-    assert json.loads(out.read_text())["phase"] == "test"
+    junit = tmp_path / "junit.xml"
+    api = FakeGitHub()
+    common = [f"test_{i:02}" for i in range(watch.MAX_FAILING_TESTS)]
+    for version in ("2026.12.0b0", "2026.12.0b1"):
+        cases = "".join(
+            f'<testcase name="{name}"><failure/></testcase>'
+            for name in [*common, f"test_z_{version}"]
+        )
+        junit.write_text(f"<testsuite>{cases}</testsuite>")
+        watch.main(
+            [
+                "result",
+                "--version",
+                version,
+                "--sha",
+                SHA2,
+                "--python",
+                "3.14",
+                "--outcome",
+                "failure",
+                "--phase-file",
+                str(tmp_path / "phase"),
+                "--junit",
+                str(junit),
+                "--out",
+                str(out),
+            ]
+        )
+        result = watch.validate_result(json.loads(out.read_text()))
+        assert result["phase"] == "test"
+        assert result["failing_tests"] == common
+        assert result["failing_total"] == len(common) + 1
+        _reporter(api).process(result)
+    assert sorted(api.issues) == [101, 102]
