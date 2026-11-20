@@ -14,12 +14,14 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import llm
 
 from .const import (
+    CONF_MCP_SERVER_ENTRIES,
     CONF_MCP_SERVERS,
     CONF_MCP_WRITE_SERVERS,
     MCP_EAGER_DEFINITION_BYTES,
     MCP_EAGER_TOOLS,
     MCP_MAX_DEFINITION_BYTES,
     MCP_MAX_DESCRIPTION,
+    MCP_MAX_INSPECTED_TOOLS,
     MCP_MAX_RESULT_BYTES,
     MCP_MAX_SCHEMA_BYTES,
     MCP_MAX_TOOLS,
@@ -37,6 +39,9 @@ SERVER_UNAVAILABLE = "This MCP server is unavailable in Home Assistant."
 WRITE_DISABLED = "Write tools are disabled for this MCP server."
 CALL_FAILED = "The MCP server could not complete this request."
 REAUTH_REQUIRED = "The MCP server needs to be signed in again in Home Assistant."
+MAY_HAVE_COMPLETED = (
+    " The action may already have completed. Check its result before you repeat it."
+)
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_-]")
 _UNSAFE_LABEL = re.compile(r"[^\w -]")
 _MAX_LABEL = 64
@@ -74,6 +79,34 @@ def registered_mcp_apis(hass: HomeAssistant) -> dict[str, Any]:
     return {api.id: api for api in get_apis(hass) if is_mcp_api(api)}
 
 
+def mcp_entry_id(api: Any) -> str | None:
+    """Return the MCP config entry that registered this API."""
+    entry = getattr(getattr(api, "coordinator", None), "config_entry", None)
+    entry_id = getattr(entry, "entry_id", None)
+    return entry_id if isinstance(entry_id, str) else None
+
+
+def mcp_server_entries(options: Mapping[str, Any]) -> dict[str, str]:
+    entries = options.get(CONF_MCP_SERVER_ENTRIES)
+    if not isinstance(entries, Mapping):
+        return {}
+    return {
+        api_id: entry_id
+        for api_id, entry_id in entries.items()
+        if isinstance(api_id, str) and isinstance(entry_id, str)
+    }
+
+
+def mcp_api_granted(api: Any, options: Mapping[str, Any]) -> bool:
+    """Grants belong to the config entry the owner selected, not only the API ID.
+
+    An add-on slug ID is reused when the add-on's MCP entry is removed and set
+    up again; that new entry must be selected again.
+    """
+    entry_id = mcp_entry_id(api)
+    return entry_id is not None and mcp_server_entries(options).get(api.id) == entry_id
+
+
 def selected_mcp_servers(options: Mapping[str, Any]) -> list[str]:
     servers = options.get(CONF_MCP_SERVERS) or []
     return [server for server in servers if isinstance(server, str)]
@@ -89,16 +122,17 @@ def write_mcp_servers(options: Mapping[str, Any]) -> set[str]:
 
 
 def _short_hash(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()[:6]
+    return hashlib.sha256(value.encode()).hexdigest()[:8]
 
 
 def mcp_sdk_name(api_id: str, tool_name: str) -> str:
-    """Build a bounded SDK tool name that stays unique across servers."""
-    safe = _UNSAFE_NAME.sub("_", tool_name)[:40]
-    name = f"mcp_{_short_hash(api_id)}_{safe}"
-    if safe != tool_name:
-        name += f"_{_short_hash(tool_name)}"
-    return name
+    """Build a bounded SDK name: `mcp_<server hash>_<tool hash>_<readable name>`.
+
+    Both digests are always present, so sanitizing or truncating the readable
+    part cannot make two different tools share a name.
+    """
+    safe = _UNSAFE_NAME.sub("_", tool_name)[:42]
+    return f"mcp_{_short_hash(api_id)}_{_short_hash(tool_name)}_{safe}"
 
 
 def _label(value: Any) -> str:
@@ -142,10 +176,11 @@ async def async_mcp_bindings(
     names: set[str] = set()
     unavailable = skipped_write = 0
     definition_bytes = 0
+    inspected = 0
     rejected: set[str] = set()
     for api_id in selected:
         api = apis.get(api_id)
-        if api is None:
+        if api is None or not mcp_api_granted(api, options):
             unavailable += 1
             continue
         try:
@@ -154,15 +189,17 @@ async def async_mcp_bindings(
             unavailable += 1
             continue
         for tool in instance.tools:
+            inspected += 1
+            if inspected > MCP_MAX_INSPECTED_TOOLS:
+                rejected.add(f"inspection-limit:{api_id}")
+                break
             annotations = getattr(tool, "annotations", None)
             read_only = bool(getattr(annotations, "read_only", False))
             if not read_only and api_id not in writable:
                 skipped_write += 1
                 continue
-            sdk_name = mcp_sdk_name(api_id, tool.name)
-            if sdk_name in names:
-                continue
-            if len(bindings) >= MCP_MAX_TOOLS:
+            sdk_name = mcp_sdk_name(api_id, str(tool.name))
+            if sdk_name in names or len(bindings) >= MCP_MAX_TOOLS:
                 rejected.add(sdk_name)
                 continue
             try:
@@ -264,7 +301,9 @@ async def async_call_mcp_tool(
         raise HomeAssistantError(SERVER_DISABLED)
     if not binding.read_only and binding.api_id not in write_mcp_servers(options):
         raise HomeAssistantError(WRITE_DISABLED)
-    if registered_mcp_apis(hass).get(binding.api_id) is not binding.api:
+    if registered_mcp_apis(hass).get(
+        binding.api_id
+    ) is not binding.api or not mcp_api_granted(binding.api, options):
         raise HomeAssistantError(SERVER_UNAVAILABLE)
     try:
         result = await binding.instance.async_call_tool(
@@ -281,14 +320,20 @@ async def async_call_mcp_tool(
             "MCP tool call failed: category=%s",
             "reauth_required" if reauth else type(err).__name__,
         )
+        # A write may have been applied before the connection or auth failed.
         return {
             "error": "reauth_required" if reauth else "mcp_call_failed",
-            "error_text": REAUTH_REQUIRED if reauth else CALL_FAILED,
+            "error_text": (REAUTH_REQUIRED if reauth else CALL_FAILED)
+            + ("" if binding.read_only else MAY_HAVE_COMPLETED),
         }
     data = getattr(result, "data", result)
     failed = bool(getattr(result, "error", False))
     if not isinstance(data, dict):
         data = {"result": data}
-    if failed and "error" not in data:
-        data = {"error": "mcp_tool_error", **data}
+    # The top-level error key is the failure signal; a remote "error" field on
+    # a successful HA 2026.10 result must not turn into one.
+    if failed:
+        data = {"error": "mcp_tool_error", "result": data}
+    elif "error" in data:
+        data = {"result": data}
     return _bounded(data)

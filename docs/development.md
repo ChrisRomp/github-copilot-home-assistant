@@ -428,23 +428,36 @@ gets one `APIInstance` per selected server for each request. It keeps a
 name. Assist and administrator rechecks do not apply to MCP tools.
 
 - Options: `mcp_servers` and `mcp_write_servers` store API IDs, only when not
-  empty. Write grants require a selected server. Saved servers that are not loaded
-  stay selectable and are skipped at runtime.
+  empty. Write grants require a selected server. `mcp_server_entries` binds each
+  selected API ID to the MCP config entry (`api.coordinator.config_entry`) that
+  was registered when the owner saved it. An add-on (app) slug ID is reused when
+  that add-on's MCP entry is removed and set up again. A server whose entry
+  changed is unavailable and is not preselected until the owner selects it
+  again. Saved servers that are not loaded stay selectable, keep their entry, and
+  are skipped at runtime.
 - Access: any conversation caller and AI Tasks. Tools are exposed only when
   `annotations.read_only` is true, unless the server has a write grant.
-- Every call rechecks the selection, the write grant, and that the same API
-  object is still registered.
-- SDK names are `mcp_<api hash>_<tool>`, limited to `[A-Za-z0-9_-]` and 64
-  characters, with a name hash suffix when sanitized.
+- Every call rechecks the selection, the write grant, the entry binding, and
+  that the same API object is still registered. The read-only label of a tool is
+  taken once per request. A server can mislabel a tool at any time, so a recheck
+  of the label would not protect against the server itself.
+- SDK names are `mcp_<8-hex API ID hash>_<8-hex tool name hash>_<name>`. The
+  readable name is limited to `[A-Za-z0-9_-]` and 42 characters, so the name is
+  at most 64 characters. Both digests are always present, so sanitizing or
+  truncating the readable part cannot merge two tools. A duplicate name is
+  skipped with the other rejected tools.
 - Descriptions start with fixed text: the access label, the server and tool
   names reduced to safe characters and 64 characters each, and an untrusted-data
   label. Only the remote description after it is cut to `MCP_MAX_DESCRIPTION`.
   Descriptions enter SDK tool definitions, never system instructions.
 - A tool is skipped when its schema does not convert to an object, is larger
   than `MCP_MAX_SCHEMA_BYTES`, would take the MCP definitions over
-  `MCP_MAX_DEFINITION_BYTES`, or is past `MCP_MAX_TOOLS`. These caps bound local
-  work; `set_tools` sends the definitions to the runtime on every turn. Each
-  skipped tool is warned about once per entry runtime.
+  `MCP_MAX_DEFINITION_BYTES`, or is past `MCP_MAX_TOOLS`. At most
+  `MCP_MAX_INSPECTED_TOOLS` tools are examined per request, including tools that
+  are later skipped or not allowed, and scanning stops there. These caps bound
+  local work; `set_tools` sends the definitions to the runtime on every turn.
+  Each skipped tool, and each server that reaches the inspection limit, is warned
+  about once per entry runtime.
 - Tool search: sessions other than image tasks pass
   `tool_search={"enabled": True, "defer_threshold": 1}`. Integration tools use
   `defer="never"`. When the MCP tools for a request exceed `MCP_EAGER_TOOLS` or
@@ -461,7 +474,14 @@ name. Assist and administrator rechecks do not apply to MCP tools.
   below the SDK's 20,480-byte large-output default, so results stay inline. The
   runtime would otherwise replace them with temp-file references that the model
   cannot read. Call exceptions map to fixed categories (`reauth_required`,
-  `mcp_call_failed`) because MCP error text can contain server URLs.
+  `mcp_call_failed`) because MCP error text can contain server URLs. For a tool
+  that is not read-only, the notice also says that the action may already have
+  completed, because a write can succeed before the connection or
+  authentication fails.
+- A top-level `error` key is the failure signal for the backend. Only HA's
+  `ToolResult.error` flag sets it (`{"error": "mcp_tool_error", "result": ...}`).
+  On HA 2026.10, `CallToolResult` keeps unknown fields, so a successful result
+  that carries a remote `error` field is returned as `{"result": ...}`.
 - Cached sessions receive a new tool list through `set_tools` on each turn, so a
   changed server tool list does not need a new session key.
 

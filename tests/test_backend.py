@@ -4205,12 +4205,24 @@ def mcp_api(api_id="mcp-notes", name="Notes", tools=(), **call_kwargs):
     api = ModelContextProtocolAPI()
     api.id = api_id
     api.name = name
+    api.coordinator = SimpleNamespace(
+        config_entry=SimpleNamespace(entry_id=f"entry-{api_id}")
+    )
     api.instance = SimpleNamespace(
         tools=list(tools),
         custom_serializer=None,
         async_call_tool=AsyncMock(**call_kwargs),
     )
     return api
+
+
+def select_mcp(setup, *servers, write=()):
+    """Save MCP options the way the options flow does, bound to each entry."""
+    setup.entry.options.update(
+        mcp_servers=list(servers),
+        mcp_write_servers=list(write),
+        mcp_server_entries={server: f"entry-{server}" for server in servers},
+    )
 
 
 def register_apis(setup, monkeypatch, *apis):
@@ -4257,7 +4269,7 @@ async def test_mcp_tools_route_to_owning_server_with_write_opt_in(
     impostor = mcp_api(api_id="mcp-impostor", tools=[mcp_tool("leak", read_only=True)])
     type(impostor).__module__ = "custom_components.impostor"
     register_apis(setup, monkeypatch, notes, impostor)
-    setup.entry.options.update(mcp_servers=["mcp-notes", "mcp-impostor"])
+    select_mcp(setup, "mcp-notes", "mcp-impostor")
 
     async def run():
         if task:
@@ -4302,9 +4314,7 @@ async def test_mcp_call_rechecks_grants_and_hides_remote_errors(setup, monkeypat
         ],
     )
     register_apis(setup, monkeypatch, notes)
-    setup.entry.options.update(
-        mcp_servers=["mcp-notes"], mcp_write_servers=["mcp-notes"]
-    )
+    select_mcp(setup, "mcp-notes", write=["mcp-notes"])
 
     async def call_tool(tool_input):
         if tool_input.tool_name == "search":
@@ -4346,12 +4356,14 @@ async def test_mcp_call_rechecks_grants_and_hides_remote_errors(setup, monkeypat
 def test_mcp_sdk_names_are_bounded_safe_and_unique(setup):
     from custom_components.github_copilot.mcp_tools import mcp_sdk_name
 
-    names = {
-        mcp_sdk_name(api_id, tool)
-        for api_id in ("mcp-a", "mcp-b")
-        for tool in ("search", "search.v2", "search_v2", "x" * 200)
-    }
-    assert len(names) == 8
+    pairs = [
+        (api_id, tool)
+        for api_id in ("mcp-a", "mcp-b", "mcp-server-3588", "mcp-server-7663")
+        for tool in ("search", "search.v2", "search_v2", "x" * 200, "x" * 201)
+    ]
+    pairs.append(("mcp-a", "search_v2_" + mcp_sdk_name("mcp-a", "search.v2")[-9:]))
+    names = {mcp_sdk_name(api_id, tool) for api_id, tool in pairs}
+    assert len(names) == len(pairs)
     assert all(len(name) <= 64 for name in names)
     assert all(name.replace("_", "").replace("-", "").isalnum() for name in names)
 
@@ -4378,7 +4390,7 @@ async def test_mcp_results_stay_inline_after_framing(
     tool = mcp_tool("read", read_only=True)
     notes = mcp_api(tools=[tool], return_value=SimpleNamespace(data=data, error=error))
     register_apis(setup, monkeypatch, notes)
-    setup.entry.options.update(mcp_servers=["mcp-notes"])
+    select_mcp(setup, "mcp-notes")
 
     async def run():
         if task:
@@ -4408,7 +4420,7 @@ async def test_mcp_oversized_schemas_are_skipped_with_one_warning(
     huge.parameters = vol.Schema({vol.Required("pick"): vol.In(list(range(5_000)))})
     notes = mcp_api(tools=[huge, mcp_tool("small", read_only=True)])
     register_apis(setup, monkeypatch, notes)
-    setup.entry.options.update(mcp_servers=["mcp-notes"])
+    select_mcp(setup, "mcp-notes")
 
     for _ in range(2):
         observed, _ = await call_tools(setup, [], lambda: turn(setup))
@@ -4452,7 +4464,7 @@ async def test_mcp_reauth_failure_returns_fixed_notice(setup, monkeypatch):
         side_effect=ConfigEntryAuthFailed("401 for https://secret.example"),
     )
     register_apis(setup, monkeypatch, notes)
-    setup.entry.options.update(mcp_servers=["mcp-notes"])
+    select_mcp(setup, "mcp-notes")
 
     _, results = await call_tools(setup, [("read", {})], lambda: turn(setup))
 
@@ -4472,7 +4484,7 @@ async def test_large_mcp_tool_sets_are_deferred_and_integration_tools_load(
     notes = mcp_api(tools=[mcp_tool(f"t{i}", read_only=True) for i in range(count)])
     register_apis(setup, monkeypatch, notes)
     if count:
-        setup.entry.options.update(mcp_servers=["mcp-notes"])
+        select_mcp(setup, "mcp-notes")
 
     observed, _ = await call_tools(setup, [], lambda: turn(setup))
 
@@ -4495,7 +4507,7 @@ async def test_mcp_tools_over_safety_cap_warn_once(setup, monkeypatch, caplog):
     )
     notes = mcp_api(tools=[mcp_tool(f"t{i}", read_only=True) for i in range(3)])
     register_apis(setup, monkeypatch, notes)
-    setup.entry.options.update(mcp_servers=["mcp-notes"])
+    select_mcp(setup, "mcp-notes")
 
     for _ in range(2):
         observed, _ = await call_tools(setup, [], lambda: turn(setup))
@@ -4506,4 +4518,110 @@ async def test_mcp_tools_over_safety_cap_warn_once(setup, monkeypatch, caplog):
         if record.levelno == logging.WARNING and "remote MCP tools" in record.message
     ]
     assert len(warnings) == 1
+    await assert_clean(setup)
+
+
+async def test_mcp_grants_follow_the_selected_config_entry(setup, monkeypatch):
+    notes = mcp_api(
+        tools=[mcp_tool("read", read_only=True), mcp_tool("later", read_only=True)]
+    )
+    register_apis(setup, monkeypatch, notes)
+    select_mcp(setup, "mcp-notes")
+
+    async def call_tool(tool_input):
+        # The add-on's MCP entry is removed and set up again with the same slug.
+        notes.coordinator.config_entry.entry_id = "entry-replacement"
+        return SimpleNamespace(data={"ok": True}, error=False)
+
+    notes.instance.async_call_tool.side_effect = call_tool
+    _, results = await call_tools(
+        setup, [("read", {}), ("later", {})], lambda: turn(setup)
+    )
+
+    later = json.loads(results["later"].text_result_for_llm.split("\n\n", 1)[1])
+    assert later["error_text"] == "This MCP server is unavailable in Home Assistant."
+    assert notes.instance.async_call_tool.await_count == 1
+    observed, _ = await call_tools(setup, [], lambda: turn(setup))
+    assert not any(tool.name.startswith("mcp_") for tool in observed)
+    await assert_clean(setup)
+
+
+async def test_mcp_inspection_budget_includes_skipped_tools(setup, monkeypatch):
+    monkeypatch.setattr(
+        sys.modules["custom_components.github_copilot.mcp_tools"],
+        "MCP_MAX_INSPECTED_TOOLS",
+        5,
+    )
+    inspected = []
+
+    class CountingTool(SimpleNamespace):
+        @property
+        def annotations(self):
+            inspected.append(self.name)
+            return SimpleNamespace(read_only=self.name == "last")
+
+    tools = [
+        CountingTool(name=name, description="", parameters=vol.Schema({}))
+        for name in [f"write{index}" for index in range(10)] + ["last"]
+    ]
+    notes = mcp_api(tools=tools)
+    register_apis(setup, monkeypatch, notes)
+    select_mcp(setup, "mcp-notes")
+
+    observed, _ = await call_tools(setup, [], lambda: turn(setup))
+
+    assert len(inspected) == 5
+    assert not any(tool.name.startswith("mcp_") for tool in observed)
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize(
+    ("read_only", "error", "may_have_completed"),
+    [
+        (True, "HomeAssistantError", False),
+        (False, "HomeAssistantError", True),
+        (False, "ConfigEntryAuthFailed", True),
+    ],
+)
+async def test_mcp_failed_write_calls_warn_they_may_have_completed(
+    setup, monkeypatch, read_only, error, may_have_completed
+):
+    from homeassistant import exceptions
+
+    notes = mcp_api(
+        tools=[mcp_tool("act", read_only=read_only)],
+        side_effect=getattr(exceptions, error)("connection reset"),
+    )
+    register_apis(setup, monkeypatch, notes)
+    select_mcp(setup, "mcp-notes", write=["mcp-notes"])
+
+    _, results = await call_tools(setup, [("act", {})], lambda: turn(setup))
+
+    payload = json.loads(results["act"].text_result_for_llm.split("\n\n", 1)[1])
+    assert ("may already have completed" in payload["error_text"]) is (
+        may_have_completed
+    )
+    assert "connection reset" not in payload["error_text"]
+    await assert_clean(setup)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_mcp_remote_error_field_does_not_mark_success_as_failure(
+    setup, monkeypatch, failed
+):
+    data = {"error": "remote says hello", "content": [{"text": "ok"}]}
+    notes = mcp_api(
+        tools=[mcp_tool("read", read_only=True)],
+        return_value=SimpleNamespace(data=data, error=failed),
+    )
+    register_apis(setup, monkeypatch, notes)
+    select_mcp(setup, "mcp-notes")
+
+    _, results = await call_tools(setup, [("read", {})], lambda: turn(setup))
+
+    payload = json.loads(results["read"].text_result_for_llm.split("\n\n", 1)[1])
+    assert results["read"].result_type == ("failure" if failed else "success")
+    assert payload == (
+        {"error": "mcp_tool_error", "result": data} if failed else {"result": data}
+    )
     await assert_clean(setup)

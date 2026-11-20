@@ -50,6 +50,7 @@ from .const import (
     CONF_ENABLE_DEVICE_CONTROL,
     CONF_ENABLE_HOME_ASSISTANT_API,
     CONF_ENABLE_SHARED_MEMORY,
+    CONF_MCP_SERVER_ENTRIES,
     CONF_MCP_SERVERS,
     CONF_MCP_WRITE_SERVERS,
     CONF_MODEL,
@@ -64,7 +65,12 @@ from .const import (
 )
 from .history import selected_satellite_entity_ids
 from .llm_api import home_assistant_api_supported, selected_llm_apis
-from .mcp_tools import registered_mcp_apis
+from .mcp_tools import (
+    mcp_api_granted,
+    mcp_entry_id,
+    mcp_server_entries,
+    registered_mcp_apis,
+)
 from .models import (
     find_fallback_model,
     model_billing,
@@ -252,7 +258,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
                 options[CONF_ENABLE_HOME_ASSISTANT_API] = user_input[
                     CONF_ENABLE_HOME_ASSISTANT_API
                 ]
-            _apply_mcp_options(options, user_input)
+            _apply_mcp_options(self.hass, options, user_input, {})
             options[CONF_LLM_HASS_API] = selected_llm_apis(options)
             return self.async_create_entry(
                 title=NAME,
@@ -397,7 +403,7 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             )
             device_control_enabled = options[CONF_ENABLE_DEVICE_CONTROL]
             options[CONF_ENABLE_DEVICE_CONTROL] = device_control_enabled
-            _apply_mcp_options(options, dict(options))
+            _apply_mcp_options(self.hass, options, dict(options), self._entry.options)
             options[CONF_LLM_HASS_API] = selected_llm_apis(options)
             selected_model = options[CONF_MODEL]
             billing = model_billing(selected_model, self._models)
@@ -576,11 +582,18 @@ def _options_schema(
         ] = BooleanSelector()
     mcp_options = _mcp_server_options(hass, options)
     if mcp_options:
+        apis = registered_mcp_apis(hass)
         for key in (CONF_MCP_SERVERS, CONF_MCP_WRITE_SERVERS):
+            # A server replaced by a new MCP entry must be selected again.
+            saved = [
+                server
+                for server in options.get(key) or []
+                if server not in apis or mcp_api_granted(apis[server], options)
+            ]
             fields[
                 vol.Optional(
                     key,
-                    description={"suggested_value": list(options.get(key) or [])},
+                    description={"suggested_value": saved},
                 )
             ] = SelectSelector(
                 SelectSelectorConfig(
@@ -618,8 +631,17 @@ def _mcp_server_options(
     return choices
 
 
-def _apply_mcp_options(options: dict[str, Any], user_input: Mapping[str, Any]) -> None:
-    """Store only non-empty selections; write grants need a selected server."""
+def _apply_mcp_options(
+    hass: Any,
+    options: dict[str, Any],
+    user_input: Mapping[str, Any],
+    previous: Mapping[str, Any],
+) -> None:
+    """Store non-empty selections bound to the MCP config entry chosen now.
+
+    Write grants need a selected server. A server that is not loaded keeps the
+    entry it was bound to before, so a temporary unload keeps its grants.
+    """
     servers = [
         server
         for server in user_input.get(CONF_MCP_SERVERS) or []
@@ -630,12 +652,23 @@ def _apply_mcp_options(options: dict[str, Any], user_input: Mapping[str, Any]) -
         for server in user_input.get(CONF_MCP_WRITE_SERVERS) or []
         if server in servers
     ]
-    options.pop(CONF_MCP_SERVERS, None)
-    options.pop(CONF_MCP_WRITE_SERVERS, None)
+    apis = registered_mcp_apis(hass)
+    saved_entries = mcp_server_entries(previous)
+    entries = {}
+    for server in servers:
+        entry_id = (
+            mcp_entry_id(apis[server]) if server in apis else saved_entries.get(server)
+        )
+        if entry_id is not None:
+            entries[server] = entry_id
+    for key in (CONF_MCP_SERVERS, CONF_MCP_WRITE_SERVERS, CONF_MCP_SERVER_ENTRIES):
+        options.pop(key, None)
     if servers:
         options[CONF_MCP_SERVERS] = servers
     if writable:
         options[CONF_MCP_WRITE_SERVERS] = writable
+    if entries:
+        options[CONF_MCP_SERVER_ENTRIES] = entries
 
 
 def _satellite_registry_ids(hass: Any, entity_ids: Any) -> list[str]:

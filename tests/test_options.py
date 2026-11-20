@@ -417,31 +417,54 @@ async def test_invalid_task_timeout_is_rejected(options_setup, timeout):
         form["data_schema"]({"ai_task_timeout": timeout})
 
 
-async def test_mcp_servers_keep_unloaded_choice_and_drop_orphan_write_grant(
+async def test_mcp_servers_bind_entries_keep_unloaded_and_reselect_replaced(
     options_setup, monkeypatch
 ):
     class ModelContextProtocolAPI:
-        id = "mcp-notes"
         name = "Notes"
+
+        def __init__(self, api_id, entry_id):
+            self.id = api_id
+            self.coordinator = SimpleNamespace(
+                config_entry=SimpleNamespace(entry_id=entry_id)
+            )
 
     ModelContextProtocolAPI.__module__ = "homeassistant.components.mcp"
     llm = sys.modules["homeassistant.helpers.llm"]
-    monkeypatch.setattr(
-        llm, "async_get_apis", lambda hass: [ModelContextProtocolAPI()], raising=False
-    )
+    apis = [
+        ModelContextProtocolAPI("mcp-notes", "entry-new"),
+        ModelContextProtocolAPI("mcp-fresh", "entry-fresh"),
+    ]
+    monkeypatch.setattr(llm, "async_get_apis", lambda hass: apis, raising=False)
     setup = options_setup
-    setup.entry.options["mcp_servers"] = ["mcp-offline"]
+    setup.entry.options.update(
+        mcp_servers=["mcp-offline", "mcp-notes"],
+        mcp_write_servers=["mcp-notes"],
+        mcp_server_entries={"mcp-offline": "entry-offline", "mcp-notes": "entry-old"},
+    )
     form = await setup.flow.async_step_init()
+    suggested = {
+        str(key): key.description["suggested_value"]
+        for key in form["data_schema"].schema
+        if str(key) in ("mcp_servers", "mcp_write_servers")
+    }
+
+    # The replaced mcp-notes entry is not preselected; mcp-offline keeps its grant.
+    assert suggested == {"mcp_servers": ["mcp-offline"], "mcp_write_servers": []}
     submitted = form["data_schema"](
         {
-            "mcp_servers": ["mcp-offline"],
+            "mcp_servers": ["mcp-offline", "mcp-fresh"],
             "mcp_write_servers": ["mcp-notes", "mcp-offline"],
         }
     )
 
     result = await setup.flow.async_step_init(submitted)
 
-    assert result["data"]["mcp_servers"] == ["mcp-offline"]
+    assert result["data"]["mcp_servers"] == ["mcp-offline", "mcp-fresh"]
     assert result["data"]["mcp_write_servers"] == ["mcp-offline"]
+    assert result["data"]["mcp_server_entries"] == {
+        "mcp-offline": "entry-offline",
+        "mcp-fresh": "entry-fresh",
+    }
     with pytest.raises(vol.Invalid):
         form["data_schema"]({"mcp_servers": ["mcp-unknown"]})

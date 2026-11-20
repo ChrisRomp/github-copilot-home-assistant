@@ -1063,6 +1063,7 @@ async def test_real_mcp_client_tools_are_discovered_gated_and_called(
 ):
     from contextlib import asynccontextmanager
 
+    import annotationlib
     from homeassistant.components.mcp import ModelContextProtocolAPI
     from homeassistant.components.mcp import coordinator as mcp_coordinator
     from homeassistant.core import Context, HomeAssistant
@@ -1113,13 +1114,22 @@ async def test_real_mcp_client_tools_are_discovered_gated_and_called(
             id="mcp-notes",
             name="Notes",
             coordinator=SimpleNamespace(
-                data=[tool("search", read_only=True), tool("delete", read_only=False)]
+                data=[tool("search", read_only=True), tool("delete", read_only=False)],
+                config_entry=SimpleNamespace(entry_id="entry-notes"),
             ),
         )
         llm.async_register_api(hass, api)
         assert registered_mcp_apis(hass) == {"mcp-notes": api}
+        # Grants are bound to the entry the real coordinator stores here.
+        assert "config_entry" in annotationlib.get_annotations(
+            mcp_coordinator.ModelContextProtocolCoordinator,
+            format=annotationlib.Format.FORWARDREF,
+        )
 
-        options = {"mcp_servers": ["mcp-notes"]}
+        options = {
+            "mcp_servers": ["mcp-notes"],
+            "mcp_server_entries": {"mcp-notes": "entry-notes"},
+        }
         context = llm.LLMContext(
             platform="github_copilot",
             context=Context(),
@@ -1153,6 +1163,12 @@ async def test_real_mcp_client_tools_are_discovered_gated_and_called(
         )
         assert result["error"] == "mcp_tool_error"
         assert len(json.dumps(result).encode()) <= 16_000
+
+        responses.append({"content": [], "isError": False, "error": "remote"})
+        result = await async_call_mcp_tool(
+            hass, lambda: options, bindings[0], {"query": "milk"}, "call"
+        )
+        assert "error" not in result
 
         options["mcp_write_servers"] = ["mcp-notes"]
         bindings = await async_mcp_bindings(hass, options, context)

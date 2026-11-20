@@ -35,10 +35,13 @@ CONF_ALLOWED_SATELLITES = "allowed_satellites"
 CONF_ENABLE_SHARED_MEMORY = "enable_shared_memory"
 CONF_MCP_SERVERS = "mcp_servers"
 CONF_MCP_WRITE_SERVERS = "mcp_write_servers"
+CONF_MCP_SERVER_ENTRIES = "mcp_server_entries"
 CONF_PROMPT = "prompt"
 # Larger MCP tool sets are deferred behind the SDK's tool search, so these caps
 # only bound local work; the model receives a deferred tool when it searches.
 MCP_MAX_TOOLS = 512
+# Includes skipped tools, so a server with many bad tools stays bounded.
+MCP_MAX_INSPECTED_TOOLS = 1024
 MCP_MAX_DESCRIPTION = 1024
 MCP_MAX_SCHEMA_BYTES = 8_000
 MCP_MAX_DEFINITION_BYTES = 1_000_000

@@ -133,6 +133,13 @@ server and is not a guarantee, so select only servers that you trust.
 
 The integration checks the settings again before each tool call. If you remove a
 server or its write permission, or the MCP integration unloads, new calls fail.
+If you remove a server from the Model Context Protocol integration and add it
+again, select it again in the GitHub Copilot settings. Its earlier permissions
+do not apply to the new entry.
+
+If a call to a write tool fails, the action may still have completed on the
+remote service. Copilot is told to check the result before it repeats the
+action.
 A server's tool list can change while Home Assistant runs; each new request uses
 the current list.
 
