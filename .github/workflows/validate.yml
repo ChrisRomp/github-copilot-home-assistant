@@ -40,7 +40,7 @@ jobs:
           assert sdk == manifest["requirements"], "SDK pins differ"
           PY
       - run: python -m pip install -e '.[dev]' 'homeassistant==${{ matrix.homeassistant }}'
-      - name: Install HA conversation and AI Task contract requirements
+      - name: Install HA conversation, AI Task, and MCP contract requirements
         run: |
           python - <<'PY'
           import json
@@ -51,7 +51,7 @@ jobs:
           components = pathlib.Path(homeassistant.__file__).parent / "components"
           requirements = sorted({
               requirement
-              for name in ("conversation", "camera", "image", "stream")
+              for name in ("conversation", "camera", "image", "stream", "mcp")
               for requirement in json.loads(
                   (components / name / "manifest.json").read_text()
               ).get("requirements", [])

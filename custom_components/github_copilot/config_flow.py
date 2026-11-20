@@ -50,6 +50,8 @@ from .const import (
     CONF_ENABLE_DEVICE_CONTROL,
     CONF_ENABLE_HOME_ASSISTANT_API,
     CONF_ENABLE_SHARED_MEMORY,
+    CONF_MCP_SERVERS,
+    CONF_MCP_WRITE_SERVERS,
     CONF_MODEL,
     CONF_MODEL_BILLING,
     CONF_REFRESH_TOKEN,
@@ -62,6 +64,7 @@ from .const import (
 )
 from .history import selected_satellite_entity_ids
 from .llm_api import home_assistant_api_supported, selected_llm_apis
+from .mcp_tools import registered_mcp_apis
 from .models import (
     find_fallback_model,
     model_billing,
@@ -249,6 +252,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
                 options[CONF_ENABLE_HOME_ASSISTANT_API] = user_input[
                     CONF_ENABLE_HOME_ASSISTANT_API
                 ]
+            _apply_mcp_options(options, user_input)
             options[CONF_LLM_HASS_API] = selected_llm_apis(options)
             return self.async_create_entry(
                 title=NAME,
@@ -393,6 +397,7 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
             )
             device_control_enabled = options[CONF_ENABLE_DEVICE_CONTROL]
             options[CONF_ENABLE_DEVICE_CONTROL] = device_control_enabled
+            _apply_mcp_options(options, dict(options))
             options[CONF_LLM_HASS_API] = selected_llm_apis(options)
             selected_model = options[CONF_MODEL]
             billing = model_billing(selected_model, self._models)
@@ -569,6 +574,19 @@ def _options_schema(
                 default=bool(options.get(CONF_ENABLE_HOME_ASSISTANT_API, False)),
             )
         ] = BooleanSelector()
+    mcp_options = _mcp_server_options(hass, options)
+    if mcp_options:
+        for key in (CONF_MCP_SERVERS, CONF_MCP_WRITE_SERVERS):
+            fields[
+                vol.Optional(
+                    key,
+                    description={"suggested_value": list(options.get(key) or [])},
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=mcp_options, multiple=True, custom_value=False
+                )
+            )
     fields[
         vol.Optional(
             CONF_PROMPT,
@@ -576,6 +594,48 @@ def _options_schema(
         )
     ] = TextSelector()
     return vol.Schema(fields)
+
+
+def _mcp_server_options(
+    hass: Any, options: Mapping[str, Any]
+) -> list[SelectOptionDict]:
+    """List registered MCP servers, plus saved ones that are not loaded now."""
+    apis = registered_mcp_apis(hass)
+    choices = [
+        SelectOptionDict(label=api.name, value=api_id)
+        for api_id, api in sorted(apis.items(), key=lambda item: item[1].name)
+    ]
+    saved = {
+        server
+        for key in (CONF_MCP_SERVERS, CONF_MCP_WRITE_SERVERS)
+        for server in options.get(key) or []
+        if isinstance(server, str)
+    }
+    choices.extend(
+        SelectOptionDict(label=f"{server} (unavailable)", value=server)
+        for server in sorted(saved - apis.keys())
+    )
+    return choices
+
+
+def _apply_mcp_options(options: dict[str, Any], user_input: Mapping[str, Any]) -> None:
+    """Store only non-empty selections; write grants need a selected server."""
+    servers = [
+        server
+        for server in user_input.get(CONF_MCP_SERVERS) or []
+        if isinstance(server, str)
+    ]
+    writable = [
+        server
+        for server in user_input.get(CONF_MCP_WRITE_SERVERS) or []
+        if server in servers
+    ]
+    options.pop(CONF_MCP_SERVERS, None)
+    options.pop(CONF_MCP_WRITE_SERVERS, None)
+    if servers:
+        options[CONF_MCP_SERVERS] = servers
+    if writable:
+        options[CONF_MCP_WRITE_SERVERS] = writable
 
 
 def _satellite_registry_ids(hass: Any, entity_ids: Any) -> list[str]:

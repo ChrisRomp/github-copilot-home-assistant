@@ -25,7 +25,7 @@ HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py  # cached SDK runtim
 
 - Before running real-HA contracts (`HA_COPILOT_HA_TESTS=1`), install the
   requirements declared in the installed HA's `conversation`, `camera`, `image`,
-  and `stream` component manifests. Copy the script from the CI workflow. A
+  `stream`, and `mcp` component manifests. Copy the script from the CI workflow. A
   green run without the flag can hide skipped contracts.
 - CI also runs hassfest, HACS validation, and a check that `version` and the
   `github-copilot-sdk==` pin match between `pyproject.toml` and `manifest.json`.

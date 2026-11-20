@@ -380,8 +380,8 @@ HA templates are not expanded into that privileged channel. HA's combined,
 rendered system prompt is not forwarded there because it also contains device
 and request data.
 
-Conversation instructions describe shared memory, Assist device control, and
-administrator tools even when disabled, with their settings labels and
+Conversation instructions describe shared memory, Assist device control,
+administrator tools, and remote MCP servers even when disabled, with their settings labels and
 configuration path. Administrator guidance distinguishes a disabled setting from
 an unsupported HA version or a caller without administrator access. This
 awareness does not expose disabled tools or read disabled memory, and is omitted
@@ -412,6 +412,39 @@ action-confirmation policy.
 
 If an action result cannot be serialized, the integration reports that the
 action may already have completed and does not replay it.
+
+### Remote MCP tools
+
+`mcp_tools.py` exposes tools from HA's `mcp` client integration. Each MCP config
+entry registers an LLM API with ID `mcp-<slug or entry_id>` and
+`requires_admin=False`. Discovery trusts only the
+`homeassistant.components.mcp.ModelContextProtocolAPI` class, not the ID prefix.
+
+MCP APIs are not added to `CONF_LLM_HASS_API`. HA's `MergedAPI` drops per-tool
+ownership and renames tools differently on 2026.10 (always namespaced by API
+name) and 2026.11 (namespaced by API ID only on collision). Instead, the backend
+gets one `APIInstance` per selected server for each request. It keeps a
+`McpToolBinding` per tool and calls the owning instance with the original tool
+name. Assist and administrator rechecks do not apply to MCP tools.
+
+- Options: `mcp_servers` and `mcp_write_servers` store API IDs, only when not
+  empty. Write grants require a selected server. Saved servers that are not loaded
+  stay selectable and are skipped at runtime.
+- Access: any conversation caller and AI Tasks. Tools are exposed only when
+  `annotations.read_only` is true, unless the server has a write grant.
+- Every call rechecks the selection, the write grant, and that the same API
+  object is still registered.
+- SDK names are `mcp_<api hash>_<tool>`, limited to `[A-Za-z0-9_-]` and 64
+  characters, with a name hash suffix when sanitized.
+- Remote descriptions are whitespace-normalized, labelled as untrusted, and
+  limited to `MCP_MAX_DESCRIPTION`. They enter SDK tool definitions, never system
+  instructions. Per request, at most `MCP_MAX_TOOLS` tools are provided. Tools
+  with unsupported schemas are skipped and counted in the log.
+- Results larger than `MCP_MAX_RESULT_BYTES` return `status: incomplete` with a
+  preview. Call exceptions map to fixed categories (`reauth_required`,
+  `mcp_call_failed`) because MCP error text can contain server URLs.
+- Cached sessions receive a new tool list through `set_tools` on each turn, so a
+  changed server tool list does not need a new session key.
 
 ## AI Task boundaries
 

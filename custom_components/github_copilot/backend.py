@@ -117,6 +117,13 @@ from .llm_api import (
     home_assistant_api_supported,
     selected_llm_apis,
 )
+from .mcp_tools import (
+    McpToolBinding,
+    async_call_mcp_tool,
+    async_mcp_bindings,
+    mcp_description,
+    selected_mcp_servers,
+)
 from .memory import MemoryManager, render_reference
 from .models import (
     ModelResolution,
@@ -589,6 +596,8 @@ class ConversationBackend:
         history_enabled = not is_task and history_status == "available"
         history_budget = HistoryTurnBudget()
         satellite_id = None if is_task else getattr(user_input, "satellite_id", None)
+        mcp_tools = await async_mcp_bindings(self.hass, self.entry.options, context)
+        mcp_by_name = {binding.sdk_name: binding for binding in mcp_tools}
 
         async def require_active_admin() -> None:
             await async_require_admin(self.hass, context.context)
@@ -618,6 +627,7 @@ class ConversationBackend:
                 user_input,
                 admin_notice,
                 history_status,
+                mcp_tools,
             ) as record,
             record.lock,
         ):
@@ -664,6 +674,7 @@ class ConversationBackend:
                 admin_notice,
                 include_memory=not is_task,
                 history_enabled=history_enabled,
+                mcp_tools=mcp_tools,
             )
             loop = asyncio.get_running_loop()
             session_error: SessionErrorData | None = None
@@ -737,6 +748,7 @@ class ConversationBackend:
                     is_context = item.sdk_name == CONTEXT_TOOL_NAME
                     is_memory = item.sdk_name in MEMORY_TOOLS and not is_task
                     is_history = item.sdk_name in HISTORY_TOOLS and not is_task
+                    mcp_binding = mcp_by_name.get(item.sdk_name)
                     if (
                         ha_name is None
                         or (
@@ -744,6 +756,7 @@ class ConversationBackend:
                             and not is_context
                             and not is_memory
                             and not is_history
+                            and mcp_binding is None
                         )
                         or not isinstance(arguments, dict)
                     ):
@@ -796,6 +809,14 @@ class ConversationBackend:
                                 await require_active_assist()
                             tool_result = self._context_tool_result(
                                 arguments, user_input, chat_log
+                            )
+                        elif mcp_binding is not None:
+                            tool_result = await async_call_mcp_tool(
+                                self.hass,
+                                lambda: self.entry.options,
+                                mcp_binding,
+                                arguments,
+                                ha_tool_input.id,
                             )
                         elif is_history:
                             if not history_enabled:
@@ -1067,10 +1088,11 @@ class ConversationBackend:
         request: ConversationInput | DataTaskRequest,
         admin_notice: str | None,
         history_status: str | None = None,
+        mcp_tools: list[McpToolBinding] | None = None,
     ):
         if not isinstance(request, DataTaskRequest):
             yield await self._async_get_session(
-                key, api, instructions, admin_notice, history_status
+                key, api, instructions, admin_notice, history_status, mcp_tools
             )
             return
         image_request = request if isinstance(request, ImageTaskRequest) else None
@@ -1365,6 +1387,7 @@ class ConversationBackend:
         instructions: str,
         admin_notice: str | None,
         history_status: str | None,
+        mcp_tools: list[McpToolBinding] | None = None,
     ) -> _SessionRecord:
         """Reuse an active session or create a bounded new one."""
         async with self._session_lock:
@@ -1402,6 +1425,7 @@ class ConversationBackend:
                 admin_notice,
                 include_memory=True,
                 history_enabled=history_status == "available",
+                mcp_tools=mcp_tools,
             )
             prompt_context = {"instructions": instructions}
             model_id = await self.async_resolve_model()
@@ -1990,6 +2014,11 @@ class ConversationBackend:
                     if self.entry.options.get(CONF_ALLOWED_SATELLITES)
                     else "disabled"
                 ),
+                mcp_servers=(
+                    "enabled"
+                    if selected_mcp_servers(self.entry.options)
+                    else "disabled"
+                ),
             ),
         ]
         if admin_notice:
@@ -2076,6 +2105,7 @@ class ConversationBackend:
         *,
         include_memory: bool = False,
         history_enabled: bool = False,
+        mcp_tools: list[McpToolBinding] | None = None,
     ) -> list[CopilotTool]:
         """Convert the selected Home Assistant APIs to SDK tool definitions."""
         tools: list[CopilotTool] = []
@@ -2237,6 +2267,35 @@ class ConversationBackend:
                     handler=handler,
                     skip_permission=True,
                 )
+            )
+        unsupported_mcp = 0
+        for binding in mcp_tools or ():
+            try:
+                schema = convert_tool_schema(
+                    binding.tool.parameters,
+                    custom_serializer=binding.instance.custom_serializer,
+                )
+                if not isinstance(schema, dict) or schema.get("type") != "object":
+                    raise ValueError("Tool parameters must be an object schema.")
+            except (TypeError, ValueError):
+                unsupported_mcp += 1
+                continue
+            names[binding.sdk_name] = binding.tool.name
+            tools.append(
+                CopilotTool(
+                    name=binding.sdk_name,
+                    description=mcp_description(
+                        binding.api, binding.tool, binding.read_only
+                    ),
+                    parameters=schema,
+                    handler=handler,
+                    skip_permission=True,
+                )
+            )
+        if unsupported_mcp:
+            _LOGGER.warning(
+                "Skipped %d remote MCP tools with unsupported parameter schemas",
+                unsupported_mcp,
             )
         names[CONTEXT_TOOL_NAME] = CONTEXT_TOOL_NAME
         tools.append(

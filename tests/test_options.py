@@ -415,3 +415,33 @@ async def test_invalid_task_timeout_is_rejected(options_setup, timeout):
     form = await options_setup.flow.async_step_init()
     with pytest.raises(vol.Invalid):
         form["data_schema"]({"ai_task_timeout": timeout})
+
+
+async def test_mcp_servers_keep_unloaded_choice_and_drop_orphan_write_grant(
+    options_setup, monkeypatch
+):
+    class ModelContextProtocolAPI:
+        id = "mcp-notes"
+        name = "Notes"
+
+    ModelContextProtocolAPI.__module__ = "homeassistant.components.mcp"
+    llm = sys.modules["homeassistant.helpers.llm"]
+    monkeypatch.setattr(
+        llm, "async_get_apis", lambda hass: [ModelContextProtocolAPI()], raising=False
+    )
+    setup = options_setup
+    setup.entry.options["mcp_servers"] = ["mcp-offline"]
+    form = await setup.flow.async_step_init()
+    submitted = form["data_schema"](
+        {
+            "mcp_servers": ["mcp-offline"],
+            "mcp_write_servers": ["mcp-notes", "mcp-offline"],
+        }
+    )
+
+    result = await setup.flow.async_step_init(submitted)
+
+    assert result["data"]["mcp_servers"] == ["mcp-offline"]
+    assert result["data"]["mcp_write_servers"] == ["mcp-offline"]
+    with pytest.raises(vol.Invalid):
+        form["data_schema"]({"mcp_servers": ["mcp-unknown"]})

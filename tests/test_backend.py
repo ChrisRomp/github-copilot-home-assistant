@@ -4184,3 +4184,172 @@ async def test_revoked_satellite_history_blocks_send_on_history_session(setup):
 
     setup.session.send_and_wait.assert_not_awaited()
     await assert_clean(setup)
+
+
+def mcp_tool(name, *, read_only):
+    return SimpleNamespace(
+        name=name,
+        description=f"{name} description",
+        parameters=vol.Schema({vol.Optional("query"): str}),
+        annotations=SimpleNamespace(read_only=read_only),
+    )
+
+
+def mcp_api(api_id="mcp-notes", name="Notes", tools=(), **call_kwargs):
+    class ModelContextProtocolAPI:
+        async def async_get_api_instance(self, llm_context):
+            return self.instance
+
+    ModelContextProtocolAPI.__module__ = "homeassistant.components.mcp"
+    api = ModelContextProtocolAPI()
+    api.id = api_id
+    api.name = name
+    api.instance = SimpleNamespace(
+        tools=list(tools),
+        custom_serializer=None,
+        async_call_tool=AsyncMock(**call_kwargs),
+    )
+    return api
+
+
+def register_apis(setup, monkeypatch, *apis):
+    monkeypatch.setattr(
+        setup.module.llm, "async_get_apis", lambda hass: list(apis), raising=False
+    )
+
+
+async def call_tools(setup, calls, run):
+    """Call SDK tools by HA tool name during one send, and return the results."""
+    results = {}
+    observed = []
+
+    async def send(*args, **kwargs):
+        tools = setup.session.set_tools.await_args.args[0]
+        observed.extend(tools)
+        for ha_name, arguments in calls:
+            tool = next(t for t in tools if t.name.endswith(f"_{ha_name}"))
+            results[ha_name] = await tool.handler(
+                ToolInvocation(
+                    tool_name=tool.name, tool_call_id=ha_name, arguments=arguments
+                )
+            )
+        return SimpleNamespace(
+            data=AssistantMessageData(content="Done", message_id="m")
+        )
+
+    setup.session.send_and_wait.side_effect = send
+    await run()
+    return observed, results
+
+
+@pytest.mark.parametrize("task", [False, True])
+async def test_mcp_tools_route_to_owning_server_with_write_opt_in(
+    setup, monkeypatch, task
+):
+    notes = mcp_api(
+        tools=[
+            mcp_tool("search", read_only=True),
+            mcp_tool("delete", read_only=False),
+        ],
+        return_value=SimpleNamespace(data={"content": [{"text": "hit"}]}, error=False),
+    )
+    impostor = mcp_api(api_id="mcp-impostor", tools=[mcp_tool("leak", read_only=True)])
+    type(impostor).__module__ = "custom_components.impostor"
+    register_apis(setup, monkeypatch, notes, impostor)
+    setup.entry.options.update(mcp_servers=["mcp-notes", "mcp-impostor"])
+
+    async def run():
+        if task:
+            await setup.backend.async_generate_data(
+                "task", task_request(setup), ChatLog()
+            )
+        else:
+            await turn(setup)
+
+    observed, results = await call_tools(setup, [("search", {"query": "x"})], run)
+
+    names = {tool.name for tool in observed}
+    assert any(name.endswith("_search") for name in names)
+    assert not any(name.endswith(("_delete", "_leak")) for name in names)
+    search = next(tool for tool in observed if tool.name.endswith("_search"))
+    assert "'Notes'" in search.description
+    assert "untrusted data" in search.description
+    assert results["search"].result_type == "success"
+    assert json.loads(results["search"].text_result_for_llm.split("\n\n", 1)[1]) == {
+        "content": [{"text": "hit"}]
+    }
+    tool_input = notes.instance.async_call_tool.await_args.args[0]
+    assert (tool_input.tool_name, tool_input.tool_args) == ("search", {"query": "x"})
+
+    setup.entry.options["mcp_write_servers"] = ["mcp-notes"]
+    observed, _ = await call_tools(setup, [], run)
+    assert any(tool.name.endswith("_delete") for tool in observed)
+    if not task:
+        prompt = setup.client.create_session.await_args.kwargs["system_message"]
+        assert "Remote MCP servers: enabled" in json.dumps(prompt)
+    await assert_clean(setup)
+
+
+async def test_mcp_call_rechecks_grants_and_hides_remote_errors(setup, monkeypatch):
+    notes = mcp_api(
+        tools=[
+            mcp_tool("search", read_only=True),
+            mcp_tool("write", read_only=False),
+            mcp_tool("fail", read_only=True),
+            mcp_tool("big", read_only=True),
+            mcp_tool("after", read_only=True),
+        ],
+    )
+    register_apis(setup, monkeypatch, notes)
+    setup.entry.options.update(
+        mcp_servers=["mcp-notes"], mcp_write_servers=["mcp-notes"]
+    )
+
+    async def call_tool(tool_input):
+        if tool_input.tool_name == "search":
+            # The owner removes the write grant while this turn is running.
+            setup.entry.options["mcp_write_servers"] = []
+            return SimpleNamespace(data={"ok": True}, error=False)
+        if tool_input.tool_name == "fail":
+            raise setup.error("Error calling https://secret.example/?token=abc")
+        # The MCP config entry unloads after this call.
+        register_apis(setup, monkeypatch)
+        return SimpleNamespace(data={"text": "x" * 50_000}, error=False)
+
+    notes.instance.async_call_tool.side_effect = call_tool
+    _, results = await call_tools(
+        setup,
+        [("search", {}), ("write", {}), ("fail", {}), ("big", {}), ("after", {})],
+        lambda: turn(setup),
+    )
+
+    def payload(name):
+        return json.loads(results[name].text_result_for_llm.split("\n\n", 1)[1])
+
+    assert (
+        payload("write")["error_text"]
+        == "Write tools are disabled for this MCP server."
+    )
+    assert results["fail"].result_type == "failure"
+    assert "secret.example" not in results["fail"].text_result_for_llm
+    big = payload("big")
+    assert big["status"] == "incomplete"
+    assert big["reason"] == "result_too_large"
+    assert payload("after")["error_text"] == (
+        "This MCP server is unavailable in Home Assistant."
+    )
+    assert notes.instance.async_call_tool.await_count == 3
+    await assert_clean(setup)
+
+
+def test_mcp_sdk_names_are_bounded_safe_and_unique(setup):
+    from custom_components.github_copilot.mcp_tools import mcp_sdk_name
+
+    names = {
+        mcp_sdk_name(api_id, tool)
+        for api_id in ("mcp-a", "mcp-b")
+        for tool in ("search", "search.v2", "search_v2", "x" * 200)
+    }
+    assert len(names) == 8
+    assert all(len(name) <= 64 for name in names)
+    assert all(name.replace("_", "").replace("-", "").isalnum() for name in names)

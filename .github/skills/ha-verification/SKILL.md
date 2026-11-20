@@ -64,7 +64,7 @@ import homeassistant
 components = Path(homeassistant.__file__).parent / "components"
 requirements = sorted({
     requirement
-    for name in ("conversation", "camera", "image", "stream")
+    for name in ("conversation", "camera", "image", "stream", "mcp")
     for requirement in json.loads(
         (components / name / "manifest.json").read_text()
     ).get("requirements", [])

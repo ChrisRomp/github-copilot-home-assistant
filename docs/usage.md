@@ -5,8 +5,8 @@ the [setup guide](setup.md).
 
 ## Settings
 
-Choose your models, optional device control, administrator tools, shared memory,
-and **Additional instructions** under **Settings > Devices & services > GitHub
+Choose your models, optional device control, administrator tools, MCP servers,
+shared memory, and **Additional instructions** under **Settings > Devices & services > GitHub
 Copilot > Configure**. These options are also available during initial setup.
 
 You can ask Copilot about shared memory, Assist device control, or administrator
@@ -108,6 +108,37 @@ to GitHub, Home Assistant debug traces, or backups. See
 [conversation data and privacy](#conversation-data-and-privacy).
 If Copilot reports that memory is unavailable, see
 [shared memory errors](#shared-memory-errors).
+
+## Remote MCP tools
+
+Home Assistant's
+[Model Context Protocol](https://www.home-assistant.io/integrations/mcp/)
+integration connects Home Assistant to remote MCP servers, such as a notes,
+calendar, or search service. To let Copilot use a server's tools:
+
+1. Set up the server with the Model Context Protocol integration.
+2. Go to **Settings > Devices & services > GitHub Copilot > Configure**.
+3. Select the server in **MCP servers available to Copilot**.
+4. Optional: select the server in **MCP servers allowed to use write tools**.
+
+Copilot does not get MCP tools automatically, and it does not use HA's other
+LLM API settings for them. The settings apply to conversations from any caller,
+including Assist satellites without a signed-in user, and to AI Tasks.
+
+By default, Copilot gets only the tools that the server marks as read-only. Write
+tools can change data on the remote service. The read-only label comes from the
+server and is not a guarantee, so select only servers that you trust.
+
+The integration checks the settings again before each tool call. If you remove a
+server or its write permission, or the MCP integration unloads, new calls fail.
+A server's tool list can change while Home Assistant runs; each new request uses
+the current list. At most 64 MCP tools are provided for each request. Tool
+results larger than 32 KB are cut short and marked as incomplete.
+
+Tool descriptions and results come from the remote server. Copilot treats them as
+untrusted data, not as instructions. If a server needs you to sign in again,
+Copilot reports that it is unavailable; reauthenticate the server in Home
+Assistant. See [conversation data and privacy](#conversation-data-and-privacy).
 
 ## AI Tasks
 
@@ -317,7 +348,9 @@ containing conversation data. Deleting a chat or memory does not erase those
 copies or requests already sent to GitHub. Treat backups as sensitive: they may
 also contain credentials, settings, and generated images.
 
-Copilot can only use the Home Assistant tools you enable. Administrator tools
+Copilot can only use the Home Assistant tools you enable. When Copilot calls an
+MCP tool, the integration sends the tool arguments to that MCP server, and the
+result is sent to GitHub Copilot. Administrator tools
 have broader access than Assist device control. There is no extra confirmation
 step before actions, and protections against misleading instructions in device
 or external data cannot eliminate all risk. Keep tool access off for tasks that
