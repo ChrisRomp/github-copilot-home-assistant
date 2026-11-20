@@ -79,7 +79,9 @@ fails the same way while Copilot's pull request is open, the watch comments
 `@copilot` on that pull request once per version. If Copilot's pull request was
 closed without a fix, the watch opens a new issue and assigns it again. Without
 the secret, or when assignment fails, issues still open and assignment retries
-on the next failing run.
+on the next failing run. The watch records which versions were listed at
+assignment time. If GitHub accepts the assignment but the final issue update
+fails, a later failure can still notify Copilot's open PR about a new version.
 
 `GITHUB_TOKEN` cannot assign Copilot, so the secret must be a fine-grained
 personal access token limited to this repository, with read and write access
