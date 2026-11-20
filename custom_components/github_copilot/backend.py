@@ -121,7 +121,6 @@ from .mcp_tools import (
     McpToolBinding,
     async_call_mcp_tool,
     async_mcp_bindings,
-    mcp_description,
     selected_mcp_servers,
 )
 from .memory import MemoryManager, render_reference
@@ -267,6 +266,7 @@ class ConversationBackend:
         self._rejected_models: dict[str, float] = {}
         self._available_model_ids: set[str] = set()
         self._admin_tools_warning_logged = False
+        self._mcp_warned_tools: set[str] = set()
 
     async def async_handle_message(
         self,
@@ -596,7 +596,9 @@ class ConversationBackend:
         history_enabled = not is_task and history_status == "available"
         history_budget = HistoryTurnBudget()
         satellite_id = None if is_task else getattr(user_input, "satellite_id", None)
-        mcp_tools = await async_mcp_bindings(self.hass, self.entry.options, context)
+        mcp_tools = await async_mcp_bindings(
+            self.hass, self.entry.options, context, self._mcp_warned_tools
+        )
         mcp_by_name = {binding.sdk_name: binding for binding in mcp_tools}
 
         async def require_active_admin() -> None:
@@ -2268,34 +2270,16 @@ class ConversationBackend:
                     skip_permission=True,
                 )
             )
-        unsupported_mcp = 0
         for binding in mcp_tools or ():
-            try:
-                schema = convert_tool_schema(
-                    binding.tool.parameters,
-                    custom_serializer=binding.instance.custom_serializer,
-                )
-                if not isinstance(schema, dict) or schema.get("type") != "object":
-                    raise ValueError("Tool parameters must be an object schema.")
-            except (TypeError, ValueError):
-                unsupported_mcp += 1
-                continue
             names[binding.sdk_name] = binding.tool.name
             tools.append(
                 CopilotTool(
                     name=binding.sdk_name,
-                    description=mcp_description(
-                        binding.api, binding.tool, binding.read_only
-                    ),
-                    parameters=schema,
+                    description=binding.description,
+                    parameters=binding.parameters,
                     handler=handler,
                     skip_permission=True,
                 )
-            )
-        if unsupported_mcp:
-            _LOGGER.warning(
-                "Skipped %d remote MCP tools with unsupported parameter schemas",
-                unsupported_mcp,
             )
         names[CONTEXT_TOOL_NAME] = CONTEXT_TOOL_NAME
         tools.append(

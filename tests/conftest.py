@@ -101,6 +101,9 @@ def ha_boundary(monkeypatch):
             "HomeAssistantError": _HomeAssistantError,
             "Unauthorized": _Unauthorized,
             "ConfigEntryNotReady": type("ConfigEntryNotReady", (Exception,), {}),
+            "ConfigEntryAuthFailed": type(
+                "ConfigEntryAuthFailed", (_HomeAssistantError,), {}
+            ),
         },
         "homeassistant.config_entries": {
             "ConfigEntry": SimpleNamespace,

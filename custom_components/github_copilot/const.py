@@ -38,7 +38,11 @@ CONF_MCP_WRITE_SERVERS = "mcp_write_servers"
 CONF_PROMPT = "prompt"
 MCP_MAX_TOOLS = 64
 MCP_MAX_DESCRIPTION = 1024
-MCP_MAX_RESULT_BYTES = 32_000
+MCP_MAX_SCHEMA_BYTES = 8_000
+MCP_MAX_DEFINITION_BYTES = 96_000
+# Below the SDK's 20,480-byte large-output default, with room for the backend's
+# untrusted-data framing, so results stay inline without changing sessions.
+MCP_MAX_RESULT_BYTES = 16_000
 MEMORY_MAX_FACTS = 50
 MEMORY_MAX_TEXT = 300
 MEMORY_MAX_SOURCE = 300
