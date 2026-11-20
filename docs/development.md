@@ -36,7 +36,56 @@ fake model, including strict task schema transport and disposable task sessions.
 
 The validation workflow runs unit tests, the real HA contract test, hassfest,
 and HACS validation. HACS validation also requires the GitHub repository to
-have a description, topics, and issues enabled.
+have a description, topics, and issues enabled. Both workflows install and test
+through the shared `.github/actions/ha-tests` action.
+
+### HA release watch
+
+`.github/workflows/ha-release-watch.yml` polls PyPI every six hours and tests
+the latest stable Home Assistant release. It also tests the newest beta or
+release candidate when that beta is for a newer month, such as `2026.12.0b0`
+before 2026.12.0 ships. Older month lines are covered only by the CI matrix.
+A release that already passed on the current default-branch commit is skipped
+unless it has an open failure issue. Run the workflow manually to test one
+exact version or to force a retest.
+
+The watch installs in watch mode, which bypasses the development HA range so
+betas outside the supported range can be tested, and then runs `pip check`. It
+skips ruff because the validation workflow already lints every change. Reproduce
+a watch failure locally in a new Python virtual environment:
+
+```sh
+python .github/scripts/ha_release_watch.py install --mode watch 2026.12.0b0
+HA_COPILOT_HA_TESTS=1 python -m pytest -q -rs
+```
+
+A passing beta never changes the supported range or the CI matrix; widening
+them stays a deliberate change.
+
+Failures open issues labeled `ha-compat`. An issue groups failures by month
+line and failure signature, which is the failing step plus the failing test IDs.
+A later version that fails the same way updates the existing issue. A passing
+version closes its issue as fixed, and closes older issues in the same month
+line as superseded. Each issue body carries a hidden state marker that the
+workflow validates before use; do not edit it by hand.
+
+When the optional `COPILOT_ASSIGN_TOKEN` repository secret is set, the watch
+assigns Copilot cloud agent to new test failures. Install failures, which
+usually mean a dependency conflict, are not assigned. When a later version
+fails the same way while Copilot's pull request is open, the watch comments
+`@copilot` on that pull request once per version. If Copilot's pull request was
+closed without a fix, the watch opens a new issue and assigns it again. Without
+the secret, or when assignment fails, issues still open and assignment retries
+on the next failing run.
+
+`GITHUB_TOKEN` cannot assign Copilot, so the secret must be a fine-grained
+personal access token limited to this repository, with read and write access
+to actions, contents, issues, and pull requests. Only the workflow's final
+Copilot step receives it; jobs that install and run tests have read-only
+repository access. Renew the token before it expires.
+
+GitHub disables scheduled workflows after 60 days without repository activity.
+Re-enable the workflow from the Actions tab if that happens.
 
 ## Versions and authentication
 

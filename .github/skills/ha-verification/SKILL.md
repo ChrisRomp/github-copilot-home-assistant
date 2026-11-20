@@ -13,8 +13,9 @@ unit boundaries. Run commands from the repository root.
 
 Read `pyproject.toml`, `custom_components/github_copilot/manifest.json`,
 `.github/workflows/validate.yml`, and [the development guide](../../../docs/development.md).
-The workflow is the source of truth for the HA version matrix and component
-dependency installation. Do not freeze those versions into this skill.
+The workflow is the source of truth for the HA version matrix. Dependency
+installation lives in `.github/scripts/ha_release_watch.py`, which CI runs
+through `.github/actions/ha-tests`. Do not freeze those versions into this skill.
 
 Inspect `git status --short --branch` and the relevant diff first. Preserve
 existing edits; verification does not authorize checkout changes, commits,
@@ -48,32 +49,18 @@ proxy configuration to the repository.
 ## Prepare real-HA contracts
 
 Installing the `homeassistant` distribution alone does not install every
-component dependency. Follow the workflow's requirement extraction using the
-**installed target HA version**, rather than guessing package names or
-installing their latest releases:
+component dependency. Use CI's install script, which installs the dev
+dependencies and the requirements of the **installed target HA version**'s
+contract components, rather than guessing package names or installing their
+latest releases:
 
 ```sh
-"$VENV/bin/python" - <<'PY'
-import json
-import subprocess
-import sys
-from pathlib import Path
-
-import homeassistant
-
-components = Path(homeassistant.__file__).parent / "components"
-requirements = sorted({
-    requirement
-    for name in ("conversation", "camera", "image", "stream")
-    for requirement in json.loads(
-        (components / name / "manifest.json").read_text()
-    ).get("requirements", [])
-})
-subprocess.run(
-    [sys.executable, "-m", "pip", "install", *requirements], check=True
-)
-PY
+"$VENV/bin/python" .github/scripts/ha_release_watch.py install "$HA_VERSION"
 ```
+
+For an HA version outside the supported range, such as a monthly beta or an
+`ha-compat` issue from the release watch, add `--mode watch`. Watch mode
+bypasses the development HA range and runs `pip check`.
 
 Run this installation only when requirements are missing/mismatched or the
 dependency manifests changed. Recheck the component list against CI if it

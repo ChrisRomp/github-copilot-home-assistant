@@ -25,10 +25,17 @@ HA_COPILOT_NATIVE_TESTS=1 pytest tests/test_sdk_contract.py  # cached SDK runtim
 
 - Before running real-HA contracts (`HA_COPILOT_HA_TESTS=1`), install the
   requirements declared in the installed HA's `conversation`, `camera`, `image`,
-  and `stream` component manifests. Copy the script from the CI workflow. A
-  green run without the flag can hide skipped contracts.
+  and `stream` component manifests.
+  `python .github/scripts/ha_release_watch.py install <ha-version>` installs
+  them along with the dev dependencies, as CI does. A green run without the
+  flag can hide skipped contracts.
 - CI also runs hassfest, HACS validation, and a check that `version` and the
   `github-copilot-sdk==` pin match between `pyproject.toml` and `manifest.json`.
+- `.github/workflows/ha-release-watch.yml` tests new HA stable releases and
+  monthly betas from PyPI and tracks failures in `ha-compat` issues. For those
+  issues, `install --mode watch <ha-version>` installs a version outside the
+  supported range. Do not widen the supported range or the CI matrix just to
+  make a beta pass. See `docs/development.md`.
 - Use the `ha-verification` skill (`.github/skills/`) for verification and
   compatibility runs. Use `ha-docs-screenshots` to refresh documentation
   screenshots from a disposable real HA instance; never use mockups.
