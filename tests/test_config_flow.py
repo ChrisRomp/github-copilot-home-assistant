@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -433,3 +434,44 @@ async def test_rejected_pat_discovery_starts_account_bound_reauth(
     assert entry.data["account_id"] == "123"
     assert entry.options["model"] == "keep"
     flow.hass.config_entries.async_update_entry.assert_not_called()
+
+
+async def test_setup_rejects_mcp_entry_replaced_while_form_is_open(
+    flow_setup, monkeypatch
+):
+    class ModelContextProtocolAPI:
+        name = "Notes"
+        id = "mcp-notes"
+
+        def __init__(self, entry_id):
+            self.coordinator = SimpleNamespace(
+                config_entry=SimpleNamespace(entry_id=entry_id)
+            )
+
+    ModelContextProtocolAPI.__module__ = "homeassistant.components.mcp"
+    apis = [ModelContextProtocolAPI("entry-old")]
+    monkeypatch.setattr(
+        sys.modules["homeassistant.helpers.llm"],
+        "async_get_apis",
+        lambda hass: list(apis),
+        raising=False,
+    )
+    form = await flow_setup.flow.async_step_pat({"token": "github_pat_test"})
+    submitted = form["data_schema"](
+        {
+            "model": "gpt-6-luna",
+            "mcp_servers": ["mcp-notes"],
+            "mcp_write_servers": ["mcp-notes"],
+        }
+    )
+    apis[:] = [ModelContextProtocolAPI("entry-new")]
+
+    result = await flow_setup.flow.async_step_model(submitted)
+
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "mcp_server_changed"}
+    created = await flow_setup.flow.async_step_model(
+        result["data_schema"]({"model": "gpt-6-luna", "mcp_servers": ["mcp-notes"]})
+    )
+    assert created["options"]["mcp_server_entries"] == {"mcp-notes": "entry-new"}
+    assert "mcp_write_servers" not in created["options"]

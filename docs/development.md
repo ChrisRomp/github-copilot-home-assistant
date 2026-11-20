@@ -380,8 +380,8 @@ HA templates are not expanded into that privileged channel. HA's combined,
 rendered system prompt is not forwarded there because it also contains device
 and request data.
 
-Conversation instructions describe shared memory, Assist device control, and
-administrator tools even when disabled, with their settings labels and
+Conversation instructions describe shared memory, Assist device control,
+administrator tools, and remote MCP servers even when disabled, with their settings labels and
 configuration path. Administrator guidance distinguishes a disabled setting from
 an unsupported HA version or a caller without administrator access. This
 awareness does not expose disabled tools or read disabled memory, and is omitted
@@ -412,6 +412,82 @@ action-confirmation policy.
 
 If an action result cannot be serialized, the integration reports that the
 action may already have completed and does not replay it.
+
+### Remote MCP tools
+
+`mcp_tools.py` exposes tools from HA's `mcp` client integration. Each MCP config
+entry registers an LLM API with ID `mcp-<slug or entry_id>` and
+`requires_admin=False`. Discovery trusts only the
+`homeassistant.components.mcp.ModelContextProtocolAPI` class, not the ID prefix.
+
+MCP APIs are not added to `CONF_LLM_HASS_API`. HA's `MergedAPI` drops per-tool
+ownership and renames tools differently on 2026.10 (always namespaced by API
+name) and 2026.11 (namespaced by API ID only on collision). Instead, the backend
+gets one `APIInstance` per selected server for each request. It keeps a
+`McpToolBinding` per tool and calls the owning instance with the original tool
+name. Assist and administrator rechecks do not apply to MCP tools.
+
+- Options: `mcp_servers` and `mcp_write_servers` store API IDs, only when not
+  empty. Write grants require a selected server. `mcp_server_entries` binds each
+  selected API ID to the MCP config entry (`api.coordinator.config_entry`) that
+  was registered when the owner saved it. An add-on (app) slug ID is reused when
+  that add-on's MCP entry is removed and set up again. A server whose entry
+  changed is unavailable and is not preselected until the owner selects it
+  again. Saved servers that are not loaded stay selectable, keep their entry, and
+  are skipped at runtime. Each setup and options form records the entry that
+  each server choice stands for when it is shown. If a selected server's entry
+  changes before Submit, the form is shown again with `mcp_server_changed` and
+  nothing is saved. A form shown again after an error keeps the submitted
+  selections that still match the recorded entries.
+- Access: any conversation caller and AI Tasks. Tools are exposed only when
+  `annotations.read_only` is true, unless the server has a write grant.
+- Every call rechecks the selection, the write grant, the entry binding, and
+  that the same API object is still registered. The read-only label of a tool is
+  taken once per request. A server can mislabel a tool at any time, so a recheck
+  of the label would not protect against the server itself.
+- SDK names are `mcp_<8-hex API ID hash>_<8-hex tool name hash>_<name>`. The
+  readable name is limited to `[A-Za-z0-9_-]` and 42 characters, so the name is
+  at most 64 characters. Both digests are always present, so sanitizing or
+  truncating the readable part cannot merge two tools. A duplicate name is
+  skipped with the other rejected tools.
+- Descriptions start with fixed text: the access label, the server and tool
+  names reduced to safe characters and 64 characters each, and an untrusted-data
+  label. Only the remote description after it is cut to `MCP_MAX_DESCRIPTION`.
+  Descriptions enter SDK tool definitions, never system instructions.
+- A tool is skipped when its schema does not convert to an object, is larger
+  than `MCP_MAX_SCHEMA_BYTES`, would take the MCP definitions over
+  `MCP_MAX_DEFINITION_BYTES`, or is past `MCP_MAX_TOOLS`. At most
+  `MCP_MAX_INSPECTED_TOOLS` tools are examined per request, including tools that
+  are later skipped or not allowed, and scanning stops there. These caps bound
+  local work; `set_tools` sends the definitions to the runtime on every turn.
+  Each skipped tool, and each server that reaches the inspection limit, is warned
+  about once per entry runtime.
+- Tool search: sessions other than image tasks pass
+  `tool_search={"enabled": True, "defer_threshold": 1}`. Integration tools use
+  `defer="never"`. When the MCP tools for a request exceed `MCP_EAGER_TOOLS` or
+  `MCP_EAGER_DEFINITION_BYTES`, every MCP tool uses `defer="auto"`. Otherwise
+  they use `"never"`. The pinned runtime (1.0.109) adds `tool_search_tool`
+  only while a tool is deferred, even under the `custom:*` filter. It returns
+  matching definitions on search and adds a user-role reminder that lists the
+  deferred SDK tool names (not descriptions). Deferral works with per-turn
+  `set_tools`. Without `tool_search`, this runtime does not defer custom tools.
+  The native contract `test_native_large_mcp_tool_sets_load_through_tool_search`
+  verifies this; rerun it on SDK upgrades.
+- `MCP_MAX_RESULT_BYTES` bounds the final serialized result, including the
+  re-escaped preview of an oversized result (`status: incomplete`). It stays
+  below the SDK's 20,480-byte large-output default, so results stay inline. The
+  runtime would otherwise replace them with temp-file references that the model
+  cannot read. Call exceptions map to fixed categories (`reauth_required`,
+  `mcp_call_failed`) because MCP error text can contain server URLs. For a tool
+  that is not read-only, the notice also says that the action may already have
+  completed, because a write can succeed before the connection or
+  authentication fails.
+- A top-level `error` key is the failure signal for the backend. Only HA's
+  `ToolResult.error` flag sets it (`{"error": "mcp_tool_error", "result": ...}`).
+  On HA 2026.10, `CallToolResult` keeps unknown fields, so a successful result
+  that carries a remote `error` field is returned as `{"result": ...}`.
+- Cached sessions receive a new tool list through `set_tools` on each turn, so a
+  changed server tool list does not need a new session key.
 
 ## AI Task boundaries
 

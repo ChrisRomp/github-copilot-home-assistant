@@ -39,6 +39,8 @@
           "allow_all_satellites": "Allow history from all Assist satellites",
           "allowed_satellites": "Assist satellites allowed to read history",
           "enable_shared_memory": "Enable shared memory",
+          "mcp_servers": "MCP servers available to Copilot",
+          "mcp_write_servers": "MCP servers allowed to use write tools",
           "prompt": "Additional instructions"
         },
         "data_description": {
@@ -49,7 +51,9 @@
           "allow_all_satellites": "Allows future registered Assist satellites too. This grants endpoint access, not speaker identity: software satellites may be used remotely or by automations. Only currently Assist-exposed entities are eligible. Recent state can be read even when device control is disabled.",
           "allowed_satellites": "Choose registered satellite endpoints allowed to read retained state history for any entity currently exposed to Assist. Anyone or any integration that can send a no-user request through a selected endpoint can ask about that history. Newly exposed entities become eligible automatically.",
           "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
-          "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
+          "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities.",
+          "mcp_servers": "Servers set up with the Model Context Protocol integration. Conversations from any caller, including Assist satellites without a signed-in user, and AI Tasks can use their read-only tools. Tool descriptions and results come from the remote server and are treated as untrusted data.",
+          "mcp_write_servers": "Also provide tools that a server does not mark as read-only. The server must also be selected above. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee."
         }
       }
     },
@@ -72,7 +76,8 @@
     },
     "error": {
       "invalid_pat": "Use a fine-grained PAT with Copilot Requests permission. Classic PATs are not supported.",
-      "home_assistant_api_unavailable": "Administrator tools require Home Assistant 2026.11 or newer. Turn them off or update Home Assistant."
+      "home_assistant_api_unavailable": "Administrator tools require Home Assistant 2026.11 or newer. Turn them off or update Home Assistant.",
+      "mcp_server_changed": "An MCP server was removed and set up again while this form was open. Select it again, then save."
     }
   },
   "options": {
@@ -89,6 +94,8 @@
           "allow_all_satellites": "Allow history from all Assist satellites",
           "allowed_satellites": "Assist satellites allowed to read history",
           "enable_shared_memory": "Enable shared memory",
+          "mcp_servers": "MCP servers available to Copilot",
+          "mcp_write_servers": "MCP servers allowed to use write tools",
           "prompt": "Additional instructions"
         },
         "data_description": {
@@ -99,7 +106,9 @@
           "allow_all_satellites": "Allows future registered Assist satellites too. This grants endpoint access, not speaker identity: software satellites may be used remotely or by automations. Only currently Assist-exposed entities are eligible. Recent state can be read even when device control is disabled.",
           "allowed_satellites": "Choose registered satellite endpoints allowed to read retained state history for any entity currently exposed to Assist. Anyone or any integration that can send a no-user request through a selected endpoint can ask about that history. Newly exposed entities become eligible automatically.",
           "enable_shared_memory": "Automatically remember durable household facts shared by all callers of this conversation agent. Stored in Home Assistant for this integration entry. Not private per-user; do not share secrets. AI Tasks do not use memory. Disabling retains saved facts.",
-          "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities."
+          "enable_home_assistant_api": "Requires Home Assistant 2026.11 or newer and an administrator caller. Allows access to logs, history, and configuration, and can call actions or reload integrations. Access is not limited to Assist-exposed entities.",
+          "mcp_servers": "Servers set up with the Model Context Protocol integration. Conversations from any caller, including Assist satellites without a signed-in user, and AI Tasks can use their read-only tools. Tool descriptions and results come from the remote server and are treated as untrusted data.",
+          "mcp_write_servers": "Also provide tools that a server does not mark as read-only. The server must also be selected above. These tools can change data on the remote service. The read-only label comes from the server and is not a guarantee."
         }
       }
     },
@@ -113,7 +122,8 @@
       "home_assistant_api_unavailable": "Administrator tools require Home Assistant 2026.11 or newer. Turn them off or update Home Assistant.",
       "task_model_unavailable": "The saved AI Task model is unavailable. An available choice is shown; select a model and save.",
       "model_unavailable": "The previously selected model {model} is no longer available. Choose another model and save.",
-      "model_unavailable_fallback": "The previously selected model {model} is no longer available. Conversations are using {fallback}, which is preselected. Choose a model and save."
+      "model_unavailable_fallback": "The previously selected model {model} is no longer available. Conversations are using {fallback}, which is preselected. Choose a model and save.",
+      "mcp_server_changed": "An MCP server was removed and set up again while this form was open. Select it again, then save."
     }
   },
   "issues": {

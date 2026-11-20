@@ -1056,3 +1056,122 @@ async def test_real_administrator_tools_read_logs_and_call_actions(
     finally:
         await backend.async_stop()
         await hass.async_stop()
+
+
+async def test_real_mcp_client_tools_are_discovered_gated_and_called(
+    tmp_path, monkeypatch
+):
+    from contextlib import asynccontextmanager
+
+    import annotationlib
+    from homeassistant.components.mcp import ModelContextProtocolAPI
+    from homeassistant.components.mcp import coordinator as mcp_coordinator
+    from homeassistant.core import Context, HomeAssistant
+    from homeassistant.helpers import llm
+    from mcp.types import CallToolResult
+    from probatio import from_openapi
+
+    from custom_components.github_copilot.mcp_tools import (
+        async_call_mcp_tool,
+        async_mcp_bindings,
+        registered_mcp_apis,
+    )
+    from custom_components.github_copilot.schema import convert_tool_schema
+
+    def tool(name, *, read_only):
+        return mcp_coordinator.ModelContextProtocolTool(
+            name,
+            None,
+            f"{name} notes",
+            from_openapi(
+                {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                }
+            ),
+            "http://mcp.invalid/mcp",
+            SimpleNamespace(),
+            annotations=llm.ToolAnnotations(read_only=read_only),
+        )
+
+    calls = []
+    responses = [{"content": [{"type": "text", "text": "hit"}], "isError": False}]
+
+    @asynccontextmanager
+    async def fake_client(hass, url, token_manager):
+        async def call_tool(name, arguments):
+            calls.append((name, arguments))
+            return CallToolResult.model_validate(responses[-1])
+
+        yield SimpleNamespace(call_tool=call_tool), None
+
+    monkeypatch.setattr(mcp_coordinator, "mcp_client", fake_client)
+    hass = HomeAssistant(str(tmp_path))
+    try:
+        api = ModelContextProtocolAPI(
+            hass=hass,
+            id="mcp-notes",
+            name="Notes",
+            coordinator=SimpleNamespace(
+                data=[tool("search", read_only=True), tool("delete", read_only=False)],
+                config_entry=SimpleNamespace(entry_id="entry-notes"),
+            ),
+        )
+        llm.async_register_api(hass, api)
+        assert registered_mcp_apis(hass) == {"mcp-notes": api}
+        # Grants are bound to the entry the real coordinator stores here.
+        assert "config_entry" in annotationlib.get_annotations(
+            mcp_coordinator.ModelContextProtocolCoordinator,
+            format=annotationlib.Format.FORWARDREF,
+        )
+
+        options = {
+            "mcp_servers": ["mcp-notes"],
+            "mcp_server_entries": {"mcp-notes": "entry-notes"},
+        }
+        context = llm.LLMContext(
+            platform="github_copilot",
+            context=Context(),
+            language="en",
+            assistant="conversation",
+            device_id=None,
+        )
+        bindings = await async_mcp_bindings(hass, options, context)
+        assert [binding.tool.name for binding in bindings] == ["search"]
+        schema = convert_tool_schema(
+            bindings[0].tool.parameters,
+            custom_serializer=bindings[0].instance.custom_serializer,
+        )
+        assert schema["type"] == "object"
+        assert schema["required"] == ["query"]
+
+        result = await async_call_mcp_tool(
+            hass, lambda: options, bindings[0], {"query": "milk"}, "call"
+        )
+        assert calls == [("search", {"query": "milk"})]
+        assert result["content"][0]["text"] == "hit"
+        assert "error" not in result
+
+        # HA 2026.10 keeps unknown result fields; 2026.11 drops them.
+        responses.append({"content": [], "isError": True, "error": "e" * 20_000})
+        result = await asyncio.wait_for(
+            async_call_mcp_tool(
+                hass, lambda: options, bindings[0], {"query": "milk"}, "call"
+            ),
+            5,
+        )
+        assert result["error"] == "mcp_tool_error"
+        assert len(json.dumps(result).encode()) <= 16_000
+
+        responses.append({"content": [], "isError": False, "error": "remote"})
+        result = await async_call_mcp_tool(
+            hass, lambda: options, bindings[0], {"query": "milk"}, "call"
+        )
+        assert "error" not in result
+
+        options["mcp_write_servers"] = ["mcp-notes"]
+        bindings = await async_mcp_bindings(hass, options, context)
+        assert {binding.tool.name for binding in bindings} == {"search", "delete"}
+    finally:
+        await hass.async_stop()

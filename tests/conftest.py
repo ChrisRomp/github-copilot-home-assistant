@@ -101,6 +101,9 @@ def ha_boundary(monkeypatch):
             "HomeAssistantError": _HomeAssistantError,
             "Unauthorized": _Unauthorized,
             "ConfigEntryNotReady": type("ConfigEntryNotReady", (Exception,), {}),
+            "ConfigEntryAuthFailed": type(
+                "ConfigEntryAuthFailed", (_HomeAssistantError,), {}
+            ),
         },
         "homeassistant.config_entries": {
             "ConfigEntry": SimpleNamespace,
@@ -140,8 +143,10 @@ def ha_boundary(monkeypatch):
             "EntitySelectorConfig": dict,
             "SelectOptionDict": dict,
             "SelectSelectorConfig": dict,
-            "SelectSelector": lambda config: vol.In(
-                [item["value"] for item in config["options"]]
+            "SelectSelector": lambda config: (
+                [vol.In([item["value"] for item in config["options"]])]
+                if config.get("multiple")
+                else vol.In([item["value"] for item in config["options"]])
             ),
             "TextSelector": lambda *args, **kwargs: str,
             "TextSelectorConfig": dict,
@@ -167,13 +172,18 @@ def ha_boundary(monkeypatch):
         spec.loader.exec_module(module)
         return module
 
-    api_path = Path(__file__).parents[1] / "custom_components/github_copilot/llm_api.py"
-    api_name = "custom_components.github_copilot.llm_api"
-    api_spec = importlib.util.spec_from_file_location(api_name, api_path)
-    assert api_spec is not None and api_spec.loader is not None
-    api_module = importlib.util.module_from_spec(api_spec)
-    monkeypatch.setitem(sys.modules, api_name, api_module)
-    api_spec.loader.exec_module(api_module)
+    for dependency in ("llm_api", "mcp_tools"):
+        api_path = (
+            Path(__file__).parents[1]
+            / "custom_components/github_copilot"
+            / f"{dependency}.py"
+        )
+        api_name = f"custom_components.github_copilot.{dependency}"
+        api_spec = importlib.util.spec_from_file_location(api_name, api_path)
+        assert api_spec is not None and api_spec.loader is not None
+        api_module = importlib.util.module_from_spec(api_spec)
+        monkeypatch.setitem(sys.modules, api_name, api_module)
+        api_spec.loader.exec_module(api_module)
 
     return SimpleNamespace(
         load=load,

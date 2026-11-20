@@ -84,6 +84,13 @@ history for Assist-exposed entities, without granting device control or
 administrator tools. Selecting a satellite trusts the endpoint, not the speaker.
 See [voice satellite history](docs/usage.md#voice-satellite-history).
 
+**MCP servers available to Copilot** is empty by default. It lets conversations
+and AI Tasks use tools from servers that you set up with Home Assistant's
+[Model Context Protocol](https://www.home-assistant.io/integrations/mcp/)
+integration. Only tools that the server marks as read-only are used, unless you
+also select the server under **MCP servers allowed to use write tools**. See
+[remote MCP tools](docs/usage.md#remote-mcp-tools).
+
 An AI Task entity is created alongside the conversation entity without another
 sign-in. Use it in scripts and automations, or choose it as your preferred provider
 under **Settings > System > AI**. See the [AI Task usage guide](docs/usage.md#ai-tasks)
@@ -96,7 +103,8 @@ Model inference runs through GitHub's cloud service. Prompts, relevant device
 information, and tool results are sent to GitHub Copilot. Credentials and
 temporary conversation files can be included in Home Assistant backups; treat
 those backups as sensitive. Logs and configuration may contain sensitive data;
-review the administrator-tools option before enabling it.
+review the administrator-tools option before enabling it. Tool calls to an MCP
+server send the tool arguments to that server.
 
 Optional shared memories also persist in HA storage and backups. Disabling
 memory preserves them; removing the integration entry deletes its memory store.
