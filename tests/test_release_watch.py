@@ -190,12 +190,14 @@ class FakeGitHub:
         return list(self.issues.values())
 
 
-def _result(version, outcome="failure", tests=("tests.t::test_a",), phase="test"):
+def _result(
+    version, outcome="failure", tests=("tests.t::test_a",), phase="test", python="3.14"
+):
     return watch.validate_result(
         {
             "version": version,
             "sha": SHA,
-            "python": "3.14",
+            "python": python,
             "outcome": outcome,
             "phase": phase if outcome == "failure" else None,
             "sig": watch.signature(phase, list(tests))
@@ -333,6 +335,48 @@ def test_older_passing_version_cannot_close_grouped_issue():
     assert api.issues[101]["state"] == "open"
     _reporter(api).process(_result("2026.12.0b10", outcome="success"))
     assert api.issues[101]["state_reason"] == "completed"
+
+
+def test_older_failure_keeps_newest_python():
+    api = FakeGitHub()
+    _reporter(api).process(_result("2026.12.0b0"))
+    _reporter(api).process(_result("2026.12.0b1", python="3.15"))
+    _reporter(api).process(_result("2026.12.0b0"))
+    assert _state(api, 101)["python"] == "3.15"
+    assert "install --mode watch 2026.12.0b1" in api.issues[101]["body"]
+
+
+def test_replacement_issue_keeps_newer_affected_versions():
+    api = FakeGitHub()
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b9"))
+    assert _run_copilot(api, reporter.copilot_ops) == 0
+    _reporter(api).process(_result("2026.12.0b10", python="3.15"))
+    _copilot_pr(api, 101, 7, state="closed")
+
+    _reporter(api).process(_result("2026.12.0b9"))
+    assert api.issues[101]["state"] == "closed"
+    state = _state(api, 102)
+    assert state["versions"] == ["2026.12.0b9", "2026.12.0b10"]
+    assert state["python"] == "3.15"
+
+    # An older passing retest cannot close the newer known failure.
+    _reporter(api).process(_result("2026.12.0b9", outcome="success"))
+    assert api.issues[102]["state"] == "open"
+
+
+def test_truncated_listing_stops_issue_decisions():
+    class Pages(watch.GitHub):
+        def __init__(self, size):
+            super().__init__("token", "o/r")
+            self.size = size
+
+        def request(self, method, path, body=None, params=None):
+            return [{}] * self.size
+
+    assert len(Pages(5).paginate("/issues", {}, max_pages=2)) == 5
+    with pytest.raises(watch.TruncatedError):
+        watch.load_issues(Pages(100))
 
 
 def test_passing_versions_close_fixed_and_superseded_issues():

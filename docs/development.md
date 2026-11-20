@@ -67,7 +67,9 @@ Failures open issues labeled `ha-compat`. An issue groups failures by month
 line and failure signature, which is the failing step plus the failing test IDs.
 A later version that fails the same way updates the existing issue. The issue
 closes as fixed when its newest affected version passes, or as superseded when
-a newer version in the same month passes. Each issue body carries a hidden
+a newer version in the same month passes. Issue lookups are bounded; when
+there are too many open `ha-compat` issues to read, reporting stops with an
+error instead of acting on an incomplete list. Each issue body carries a hidden
 state marker that the workflow validates before use; do not edit it by hand.
 
 When the optional `COPILOT_ASSIGN_TOKEN` repository secret is set, the watch

@@ -185,6 +185,10 @@ class GitHubError(RuntimeError):
         self.status = status
 
 
+class TruncatedError(RuntimeError):
+    """A GitHub listing has more items than its page budget allows."""
+
+
 def _fetch_json(request: urllib.request.Request, attempts: int = 3) -> Any:
     for attempt in range(attempts):
         try:
@@ -240,8 +244,9 @@ class GitHub:
             )
             items.extend(batch or [])
             if not batch or len(batch) < 100:
-                break
-        return items
+                return items
+        # Callers must not make decisions from an incomplete listing.
+        raise TruncatedError("GitHub listing exceeded its page budget")
 
 
 # Issue state
@@ -322,7 +327,7 @@ def parse_marker(body: str | None) -> dict[str, Any] | None:
 
 def load_issues(api: Any) -> list[Tracked]:
     issues = api.paginate(
-        "/issues", {"labels": LABEL, "state": "all"}, max_pages=MAX_ISSUE_PAGES
+        "/issues", {"labels": LABEL, "state": "open"}, max_pages=MAX_ISSUE_PAGES
     )
     tracked = []
     for issue in issues:
@@ -493,6 +498,25 @@ def issue_title(state: dict[str, Any]) -> str:
     )
 
 
+def _merge_result(state: dict[str, Any], result: dict[str, Any]) -> None:
+    """Add a same-signature failure to an issue state.
+
+    The reproduction targets the newest affected version, so only a result for
+    that version may change the recorded Python.
+    """
+    newest = max(parse_version(v) for v in state["versions"])
+    if result["version"] not in state["versions"]:
+        state["versions"].append(result["version"])
+    if parse_version(result["version"]) >= newest:
+        state["python"] = result["python"]
+    latest = max(state["versions"], key=parse_version)
+    state.update(
+        sha=result["sha"],
+        channel="beta" if is_prerelease(latest) else "stable",
+        failing_total=result["failing_total"],
+    )
+
+
 # Reporting
 
 
@@ -591,7 +615,7 @@ class Reporter:
         prs = self.copilot_prs(match) if match.state["assigned"] else []
         open_pr = next((number for number, is_open in prs if is_open), None)
         if prs and open_pr is None:
-            new = self._create(result, sig, assignable, previous=match.number)
+            new = self._create(result, sig, assignable, replaces=match)
             self._comment(
                 match.number,
                 "Copilot's pull request for this issue is closed, but Home Assistant "
@@ -602,15 +626,7 @@ class Reporter:
             return
 
         state = match.state
-        if result["version"] not in state["versions"]:
-            state["versions"].append(result["version"])
-        latest = max(state["versions"], key=parse_version)
-        state.update(
-            sha=result["sha"],
-            python=result["python"],
-            channel="beta" if is_prerelease(latest) else "stable",
-            failing_total=result["failing_total"],
-        )
+        _merge_result(state, result)
         self.api.request(
             "PATCH",
             f"/issues/{match.number}",
@@ -636,7 +652,7 @@ class Reporter:
         result: dict[str, Any],
         sig: str,
         assignable: bool,
-        previous: int | None = None,
+        replaces: Tracked | None = None,
     ) -> Tracked:
         state: dict[str, Any] = {
             "sig": sig,
@@ -651,8 +667,13 @@ class Reporter:
             "assigned": False,
             "commented": [],
         }
-        if previous is not None:
-            state["previous"] = previous
+        if replaces is not None:
+            # Keep every known affected version so an older passing retest
+            # cannot close the replacement while a newer failure is unverified.
+            state["previous"] = replaces.number
+            state["versions"] = list(replaces.state["versions"])
+            state["python"] = replaces.state["python"]
+            _merge_result(state, result)
         issue = self.api.request(
             "POST",
             "/issues",
@@ -876,7 +897,11 @@ def cmd_discover(args: argparse.Namespace) -> None:
     token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")
     if token and repo:
-        retest = retest_versions(load_issues(GitHub(token, repo)))
+        try:
+            retest = retest_versions(load_issues(GitHub(token, repo)))
+        except TruncatedError:
+            print("::warning::Too many open ha-compat issues; retesting every target.")
+            args.force = True
     for target in targets:
         target["retest"] = args.force or target["version"] in retest
     print(f"Selected {len(targets)} Home Assistant release(s).")
@@ -923,13 +948,19 @@ def cmd_report(args: argparse.Namespace) -> None:
     results.sort(key=lambda r: parse_version(r["version"]))
     print(f"Loaded {len(results)} result(s).")
 
-    reporter = Reporter(
-        api, run_url, workflow_url, load_issues(api), copilot_enabled=args.copilot
-    )
-    if any(r["outcome"] == "failure" for r in results):
-        reporter.ensure_label()
-    for result in results:
-        reporter.process(result)
+    try:
+        reporter = Reporter(
+            api, run_url, workflow_url, load_issues(api), copilot_enabled=args.copilot
+        )
+        if any(r["outcome"] == "failure" for r in results):
+            reporter.ensure_label()
+        for result in results:
+            reporter.process(result)
+    except TruncatedError:
+        raise SystemExit(
+            "Stopped reporting: a GitHub listing exceeded its page budget, so issue "
+            "state is incomplete. Close stale ha-compat issues and rerun."
+        ) from None
     Path(args.plan_out).write_text(json.dumps(reporter.copilot_ops))
     print(f"Queued {len(reporter.copilot_ops)} Copilot operation(s).")
 
