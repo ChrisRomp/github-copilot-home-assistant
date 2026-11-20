@@ -156,8 +156,12 @@ class FakeGitHub:
         self.fail_paths: set[str] = set()
         self.fail_patch_paths: set[str] = set()
         self.comments: dict[int, list[dict]] = {}
+        self.login = "automation-user"
         self.ignore_assignees = False
         self.next_number = 100
+
+    def authenticated_login(self):
+        return self.login
 
     def request(self, method, path, body=None, params=None):
         self.calls.append((method, path, body))
@@ -190,7 +194,9 @@ class FakeGitHub:
             if method == "GET":
                 return self.comments.get(number, [])
             if method == "POST":
-                self.comments.setdefault(number, []).append(body)
+                self.comments.setdefault(number, []).append(
+                    {"body": body["body"], "user": {"login": self.login}}
+                )
                 return body
         match = re.fullmatch(r"/issues/(\d+)", path)
         if match:
@@ -341,6 +347,26 @@ def test_copilot_comment_retry_does_not_duplicate_post():
     assert _run_copilot(api, [op], copilot) == 0
     assert len(copilot.comments[7]) == 1
     assert "2026.12.0b1" in _state(api, 101)["commented"]
+
+
+def test_comment_marker_from_another_user_does_not_suppress_notification():
+    api = FakeGitHub()
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b0"))
+    assert _run_copilot(api, reporter.copilot_ops) == 0
+    _copilot_pr(api, 101, 7)
+    reporter = _reporter(api)
+    reporter.process(_result("2026.12.0b1"))
+    reporter.queue_pending_notifications()
+    op = reporter.copilot_ops[0]
+
+    copilot = FakeGitHub()
+    marker = watch.copilot_notification_marker(101, "2026.12.0b1")
+    copilot.comments[7] = [{"body": marker, "user": {"login": "another-user"}}]
+    assert _run_copilot(api, [op], copilot) == 0
+    assert len(copilot.comments[7]) == 2
+    assert copilot.comments[7][1]["user"]["login"] == copilot.login
+    assert marker in copilot.comments[7][1]["body"]
 
 
 @pytest.mark.parametrize(
@@ -727,6 +753,29 @@ def test_report_distinguishes_failures_beyond_artifact_display_limit(tmp_path):
         assert result["failing_total"] == len(common) + 1
         _reporter(api).process(result)
     assert sorted(api.issues) == [101, 102]
+
+
+def test_authenticated_login_uses_current_github_token(monkeypatch):
+    monkeypatch.delenv("GITHUB_API_URL", raising=False)
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self):
+            return b'{"login":"automation-user"}'
+
+    def urlopen(request, timeout):
+        assert request.full_url == "https://api.github.com/user"
+        assert request.get_method() == "GET"
+        assert request.get_header("Authorization") == "Bearer token"
+        return Response()
+
+    monkeypatch.setattr(watch.urllib.request, "urlopen", urlopen)
+    assert watch.GitHub("token", "o/r").authenticated_login() == "automation-user"
 
 
 @pytest.mark.parametrize(("method", "expected_calls"), [("POST", 1), ("PATCH", 3)])

@@ -209,17 +209,16 @@ def _fetch_json(request: urllib.request.Request, attempts: int = 3) -> Any:
 class GitHub:
     def __init__(self, token: str, repo: str) -> None:
         self.token = token
-        api_url = os.environ.get("GITHUB_API_URL") or "https://api.github.com"
-        self.repo_url = f"{api_url}/repos/{repo}"
+        self.api_url = os.environ.get("GITHUB_API_URL") or "https://api.github.com"
+        self.repo_url = f"{self.api_url}/repos/{repo}"
 
-    def request(
+    def _request(
         self,
         method: str,
-        path: str,
+        url: str,
         body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        url = f"{self.repo_url}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
         request = urllib.request.Request(
@@ -236,6 +235,21 @@ class GitHub:
         # A POST whose response is lost may already have created its issue or
         # comment. Do not retry it here; the next run rechecks state first.
         return _fetch_json(request, attempts=1 if method == "POST" else 3)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        return self._request(method, f"{self.repo_url}{path}", body, params)
+
+    def authenticated_login(self) -> str:
+        user = self._request("GET", f"{self.api_url}/user")
+        if not isinstance(user, dict) or not isinstance(user.get("login"), str):
+            raise ValueError("GitHub user response did not contain a login")
+        return user["login"]
 
     def paginate(
         self, path: str, params: dict[str, Any], max_pages: int
@@ -762,6 +776,16 @@ def _save_copilot_state(api: Any, issue: dict[str, Any], state: dict[str, Any]) 
     api.request("PATCH", f"/issues/{issue['number']}", {"body": body})
 
 
+def _is_our_notification(comment: dict[str, Any], marker: str, login: str) -> bool:
+    user = comment.get("user")
+    return (
+        marker in comment.get("body", "")
+        and isinstance(user, dict)
+        and isinstance(user.get("login"), str)
+        and user["login"].casefold() == login
+    )
+
+
 def run_copilot_ops(
     ops: list[dict[str, Any]],
     copilot_api: Any,
@@ -776,6 +800,7 @@ def run_copilot_ops(
     rewritten with ``issues_api`` so a failed operation retries on the next run.
     """
     failures = 0
+    copilot_login: str | None = None
     for op in ops:
         number = op.get("issue")
         if not isinstance(number, int) or op.get("op") not in ("assign", "comment"):
@@ -825,11 +850,16 @@ def run_copilot_ops(
                     or version in state["commented"]
                 ):
                     continue
+                if copilot_login is None:
+                    copilot_login = copilot_api.authenticated_login().casefold()
                 marker = copilot_notification_marker(number, version)
                 comments = copilot_api.paginate(
                     f"/issues/{pr}/comments", {}, max_pages=MAX_TIMELINE_PAGES
                 )
-                if not any(marker in comment.get("body", "") for comment in comments):
+                if not any(
+                    _is_our_notification(comment, marker, copilot_login)
+                    for comment in comments
+                ):
                     copilot_api.request(
                         "POST",
                         f"/issues/{pr}/comments",
