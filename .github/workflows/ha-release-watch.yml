@@ -1,0 +1,161 @@
+name: HA release watch
+
+# Tests this integration against the latest Home Assistant stable release and
+# the active monthly beta from PyPI, then tracks failures in ha-compat issues.
+# See docs/development.md.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Test one exact Home Assistant version (for example 2026.12.0b1).
+        required: false
+        type: string
+      force:
+        description: Retest even when this commit already passed.
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: ha-release-watch
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      default-branch: ${{ steps.select.outputs.default-branch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: select
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          if [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo 'default-branch=true' >> "$GITHUB_OUTPUT"
+          fi
+          args=()
+          if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi
+          if [ "$INPUT_FORCE" = "true" ]; then args+=(--force); fi
+          python3 .github/scripts/ha_release_watch.py discover "${args[@]}"
+
+  test:
+    needs: discover
+    if: needs.discover.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    name: test (${{ matrix.version }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: passed
+        if: ${{ !matrix.retest }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ha-watch-pass
+          key: ha-watch-pass-${{ matrix.version }}-${{ github.sha }}
+          lookup-only: true
+      - if: steps.passed.outputs.cache-hit == 'true'
+        run: echo "Home Assistant ${{ matrix.version }} already passed on this commit."
+      - if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - id: tests
+        if: steps.passed.outputs.cache-hit != 'true'
+        uses: ./.github/actions/ha-tests
+        with:
+          homeassistant: ${{ matrix.version }}
+          mode: watch
+          lint: "false"
+          junit-xml: ${{ runner.temp }}/junit.xml
+          phase-file: ${{ runner.temp }}/phase
+      - if: steps.tests.outcome == 'success'
+        run: touch "$RUNNER_TEMP/ha-watch-pass"
+      - if: steps.tests.outcome == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ha-watch-pass
+          key: ha-watch-pass-${{ matrix.version }}-${{ github.sha }}
+      - name: Record result
+        if: always()
+        env:
+          HA_VERSION: ${{ matrix.version }}
+          PYTHON_VERSION: ${{ matrix.python }}
+          OUTCOME: ${{ steps.passed.outputs.cache-hit == 'true' && 'success' || steps.tests.outcome || 'skipped' }}
+        run: |
+          python3 .github/scripts/ha_release_watch.py result \
+            --version "$HA_VERSION" --sha "$GITHUB_SHA" --python "$PYTHON_VERSION" \
+            --outcome "$OUTCOME" --phase-file "$RUNNER_TEMP/phase" \
+            --junit "$RUNNER_TEMP/junit.xml" --out "$RUNNER_TEMP/result.json"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ha-watch-result-${{ matrix.version }}
+          path: ${{ runner.temp }}/result.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  report:
+    needs: [discover, test]
+    if: >-
+      always() && needs.discover.outputs.default-branch == 'true' &&
+      needs.discover.result == 'success' && needs.discover.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          pattern: ha-watch-result-*
+          path: ${{ runner.temp }}/results
+      - name: Update ha-compat issues
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          COPILOT_ENABLED: ${{ secrets.COPILOT_ASSIGN_TOKEN != '' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          find "$RUNNER_TEMP/results" -mindepth 2 -name result.json | while read -r file; do
+            mv "$file" "$RUNNER_TEMP/results/$(basename "$(dirname "$file")").json"
+          done
+          args=()
+          if [ "$COPILOT_ENABLED" = "true" ]; then args+=(--copilot); fi
+          python3 .github/scripts/ha_release_watch.py report \
+            --results "$RUNNER_TEMP/results" \
+            --plan-out "$RUNNER_TEMP/copilot-plan.json" "${args[@]}"
+      - name: Assign Copilot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          COPILOT_ASSIGN_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python3 .github/scripts/ha_release_watch.py copilot \
+            --plan "$RUNNER_TEMP/copilot-plan.json" --base-branch "$BASE_BRANCH"

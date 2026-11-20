@@ -1,0 +1,59 @@
+name: HA integration tests
+description: >-
+  Install a Home Assistant version with this integration's test dependencies,
+  then run lint and the full test suite, including real-HA contracts. Set up
+  Python before using this action.
+
+inputs:
+  homeassistant:
+    description: Exact Home Assistant version to install.
+    required: true
+  mode:
+    description: >-
+      "supported" installs the dev extra as CI always has. "watch" installs the
+      requested version even outside the supported range and runs pip check.
+    default: supported
+  lint:
+    description: Run ruff checks.
+    default: "true"
+  junit-xml:
+    description: Optional path for a pytest JUnit XML report.
+    default: ""
+  phase-file:
+    description: Optional file that records the step that was running.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Home Assistant and test dependencies
+      shell: bash
+      env:
+        HA_VERSION: ${{ inputs.homeassistant }}
+        MODE: ${{ inputs.mode }}
+        PHASE_FILE: ${{ inputs.phase-file }}
+      run: |
+        if [ -n "$PHASE_FILE" ]; then echo install > "$PHASE_FILE"; fi
+        python .github/scripts/ha_release_watch.py install --mode "$MODE" "$HA_VERSION"
+    - name: Lint
+      if: inputs.lint == 'true'
+      shell: bash
+      env:
+        PHASE_FILE: ${{ inputs.phase-file }}
+      run: |
+        if [ -n "$PHASE_FILE" ]; then echo lint > "$PHASE_FILE"; fi
+        ruff check .
+        ruff format --check .
+    - name: Test
+      shell: bash
+      env:
+        HA_COPILOT_HA_TESTS: "1"
+        JUNIT_XML: ${{ inputs.junit-xml }}
+        PHASE_FILE: ${{ inputs.phase-file }}
+      run: |
+        if [ -n "$PHASE_FILE" ]; then echo test > "$PHASE_FILE"; fi
+        if [ -n "$JUNIT_XML" ]; then
+          pytest -q -rs --junitxml "$JUNIT_XML"
+        else
+          pytest -q
+        fi

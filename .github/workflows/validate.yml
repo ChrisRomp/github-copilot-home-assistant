@@ -39,30 +39,9 @@ jobs:
           ]
           assert sdk == manifest["requirements"], "SDK pins differ"
           PY
-      - run: python -m pip install -e '.[dev]' 'homeassistant==${{ matrix.homeassistant }}'
-      - name: Install HA conversation and AI Task contract requirements
-        run: |
-          python - <<'PY'
-          import json
-          import pathlib
-          import subprocess
-          import sys
-          import homeassistant
-          components = pathlib.Path(homeassistant.__file__).parent / "components"
-          requirements = sorted({
-              requirement
-              for name in ("conversation", "camera", "image", "stream")
-              for requirement in json.loads(
-                  (components / name / "manifest.json").read_text()
-              ).get("requirements", [])
-          })
-          subprocess.run([sys.executable, "-m", "pip", "install", *requirements], check=True)
-          PY
-      - run: ruff check .
-      - run: ruff format --check .
-      - run: pytest -q
-        env:
-          HA_COPILOT_HA_TESTS: "1"
+      - uses: ./.github/actions/ha-tests
+        with:
+          homeassistant: ${{ matrix.homeassistant }}
   hassfest:
     runs-on: ubuntu-latest
     steps:
